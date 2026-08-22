@@ -8,8 +8,6 @@ import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.security.AccessControlException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
-import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.util.UUID;
@@ -24,8 +22,6 @@ import java.util.UUID;
  *   <li>Files can be created in the path</li>
  * </ul>
  */
-@Component
-@ConditionalOnBean(FileSystem.class)
 public class FileSystemHdfsPathValidator implements HdfsPathValidator {
 
     private static final Logger log = LoggerFactory.getLogger(FileSystemHdfsPathValidator.class);

@@ -44,6 +44,10 @@ intake:
       batch-interval-ms: 30000  # 30 seconds
       listener-threads: 4
       backout-queue: MQ.DMIH.CLAIMS.BACKOUT
-      backout-threshold: 5
+      # BISECT requires backout-threshold >= ceil(log2(batch-size)) + 1 = 14:
+      # while a poison bisects toward isolation, adjacent clean messages
+      # accumulate backout count too; a lower threshold would misroute them.
+      # Set BOTHRESH on the queue manager to match.
+      backout-threshold: 14
       degradation-strategy: BISECT  # Claims uses bisection per §6.1
       successes-required-to-restore: 10

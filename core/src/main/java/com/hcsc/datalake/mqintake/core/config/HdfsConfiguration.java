@@ -72,6 +72,16 @@ public class HdfsConfiguration {
         return fs;
     }
 
+    /**
+     * Production HdfsPathValidator bean. Declared explicitly (not via
+     * component scanning with @ConditionalOnBean, which is evaluated before
+     * the FileSystem @Bean exists and silently drops the validator).
+     */
+    @Bean
+    public com.hcsc.datalake.mqintake.core.config.HdfsPathValidator hdfsPathValidator(FileSystem fileSystem) {
+        return new com.hcsc.datalake.mqintake.core.hdfs.FileSystemHdfsPathValidator(fileSystem);
+    }
+
     @PreDestroy
     public void shutdown() {
         if (kerberosManager != null) {

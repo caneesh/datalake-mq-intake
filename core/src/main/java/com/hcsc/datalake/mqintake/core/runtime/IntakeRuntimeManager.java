@@ -76,6 +76,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
                                  MqConnectionManager mqConnectionManager,
                                  RecordSerializerFactory serializerFactory,
                                  BindingConfigValidator bindingConfigValidator,
+                                 BindingHealthManager healthManager,
                                  @Autowired(required = false) TrackerMessageBuilderFactory trackerBuilderFactory) {
         this.properties = properties;
         this.fileSystem = fileSystem;
@@ -86,7 +87,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         this.trackerBuilderFactory = trackerBuilderFactory;
 
         this.metricsRegistry = new MetricsRegistry();
-        this.healthManager = new BindingHealthManager();
+        this.healthManager = healthManager;
     }
 
     @Override
