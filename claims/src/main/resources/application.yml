@@ -7,14 +7,17 @@ intake:
   maxumsgs: 10000
   aggregate-memory-ceiling-bytes: 1073741824  # 1 GB
 
-  mq:
-    host: ${MQ_HOST:localhost}
-    port: ${MQ_PORT:1414}
-    queue-manager: ${MQ_QUEUE_MANAGER:QM1}
-    channel: ${MQ_CHANNEL:DEV.APP.SVRCONN}
-    user: ${MQ_USER:}
-    password: ${MQ_PASSWORD:}
-    receive-timeout-ms: 1000
+  mq-connections:
+    primary:
+      host: ${MQ_HOST:localhost}
+      port: ${MQ_PORT:1414}
+      queue-manager: ${MQ_QUEUE_MANAGER:QM1}
+      channel: ${MQ_CHANNEL:DEV.APP.SVRCONN}
+      transport-type: CLIENT
+      credential-ref: ${MQ_CREDENTIAL_REF:}
+      receive-timeout-ms: 1000
+      reconnect-attempts: 3
+      reconnect-delay-ms: 5000
 
   kerberos:
     enabled: ${KERBEROS_ENABLED:false}
@@ -31,6 +34,7 @@ intake:
 
   bindings:
     - id: claims
+      mq-connection: primary
       source-queue: MQ.DMIH.CLAIMS.IN
       mode: LAND_ONLY
       # No tracker-queue for LAND_ONLY mode

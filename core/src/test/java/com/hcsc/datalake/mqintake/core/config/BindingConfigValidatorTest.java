@@ -352,6 +352,44 @@ class BindingConfigValidatorTest {
         assertThat(binding.getTrackerBodyMode()).isEqualTo(TrackerBodyMode.FULL_COPY);
     }
 
+    @Test
+    void backoutQueueWithInvalidThresholdFails() {
+        BindingConfig binding = createValidTrackedBinding("rms");
+        binding.setBackoutQueue("MQ.BACKOUT.RMS");
+        binding.setBackoutThreshold(0);
+
+        properties.setBindings(Collections.singletonList(binding));
+
+        assertThatThrownBy(() -> validator.validate(properties))
+                .isInstanceOf(BindingConfigurationException.class)
+                .hasMessageContaining("backout_queue")
+                .hasMessageContaining("backout_threshold");
+    }
+
+    @Test
+    void zeroSuccessesRequiredToRestoreFails() {
+        BindingConfig binding = createValidTrackedBinding("rms");
+        binding.setSuccessesRequiredToRestore(0);
+
+        properties.setBindings(Collections.singletonList(binding));
+
+        assertThatThrownBy(() -> validator.validate(properties))
+                .isInstanceOf(BindingConfigurationException.class)
+                .hasMessageContaining("successes_required_to_restore must be positive");
+    }
+
+    @Test
+    void validBackoutQueueConfigurationPasses() {
+        BindingConfig binding = createValidTrackedBinding("rms");
+        binding.setBackoutQueue("MQ.BACKOUT.RMS");
+        binding.setBackoutThreshold(5);
+        binding.setSuccessesRequiredToRestore(10);
+
+        properties.setBindings(Collections.singletonList(binding));
+
+        validator.validate(properties); // Should not throw
+    }
+
     private BindingConfig createValidTrackedBinding(String id) {
         BindingConfig binding = new BindingConfig();
         binding.setId(id);

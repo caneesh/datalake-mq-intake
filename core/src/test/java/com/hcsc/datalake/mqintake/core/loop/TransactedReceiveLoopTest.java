@@ -1,12 +1,21 @@
 package com.hcsc.datalake.mqintake.core.loop;
 
+import com.hcsc.datalake.mqintake.core.audit.AuditRecordEmitter;
 import com.hcsc.datalake.mqintake.core.batch.BatchWriter;
 import com.hcsc.datalake.mqintake.core.batch.CountingBatchWriter;
 import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.BindingMode;
+import com.hcsc.datalake.mqintake.core.failure.DegradationStrategy;
+import com.hcsc.datalake.mqintake.core.failure.DegradedModeManager;
+import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
+import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
 import com.hcsc.datalake.mqintake.core.tracker.TrackerMessageBuilder;
 import org.apache.activemq.ActiveMQConnectionFactory;
 import org.junit.jupiter.api.*;
+
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.jms.*;
 import java.util.Optional;
@@ -397,5 +406,167 @@ class TransactedReceiveLoopTest {
         while (countMessagesOnQueue(queueName) > 0 && System.currentTimeMillis() < deadline) {
             Thread.sleep(50);
         }
+    }
+
+    @Test
+    void dataExceptionInvokesFailureClassifier() throws Exception {
+        BindingConfig config = createLandOnlyConfig(3);
+        sendMessages(3);
+
+        DegradedModeManager degradedModeManager = new DegradedModeManager(
+                "test", 3, DegradationStrategy.BATCH_OF_ONE, 5);
+
+        batchWriter.setFailOnNextWrite(true, new RecordSerializer.SerializationException("Bad data"));
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, degradedModeManager, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForRollbacks(loop, 1, 2000);
+        loop.stop();
+        future.get(1, TimeUnit.SECONDS);
+
+        assertThat(degradedModeManager.isInDegradedMode()).isTrue();
+        assertThat(degradedModeManager.getCurrentBatchSize()).isEqualTo(1);
+    }
+
+    @Test
+    void infrastructureExceptionDoesNotEnterDegradedMode() throws Exception {
+        BindingConfig config = createLandOnlyConfig(3);
+        sendMessages(3);
+
+        DegradedModeManager degradedModeManager = new DegradedModeManager(
+                "test", 3, DegradationStrategy.BATCH_OF_ONE, 5);
+
+        batchWriter.setFailOnNextWrite(true, new java.io.IOException("HDFS unavailable"));
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, degradedModeManager, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForRollbacks(loop, 1, 2000);
+        loop.stop();
+        future.get(1, TimeUnit.SECONDS);
+
+        assertThat(degradedModeManager.isInDegradedMode()).isFalse();
+        assertThat(degradedModeManager.getCurrentBatchSize()).isEqualTo(3);
+    }
+
+    @Test
+    void unknownExceptionDoesNotEnterDegradedMode() throws Exception {
+        BindingConfig config = createLandOnlyConfig(3);
+        sendMessages(3);
+
+        DegradedModeManager degradedModeManager = new DegradedModeManager(
+                "test", 3, DegradationStrategy.BATCH_OF_ONE, 5);
+
+        batchWriter.setFailOnNextWrite(true, new RuntimeException("Unknown error"));
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, degradedModeManager, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForRollbacks(loop, 1, 2000);
+        loop.stop();
+        future.get(1, TimeUnit.SECONDS);
+
+        assertThat(degradedModeManager.isInDegradedMode()).isFalse();
+        assertThat(degradedModeManager.getCurrentBatchSize()).isEqualTo(3);
+    }
+
+    @Test
+    void auditEmittedOnlyAfterSuccessfulCommit() throws Exception {
+        BindingConfig config = createLandOnlyConfig(3);
+        sendMessages(3);
+
+        AtomicBoolean auditEmitted = new AtomicBoolean(false);
+        AuditRecordEmitter mockEmitter = new TestAuditRecordEmitter() {
+            @Override
+            public void emit(String bindingId, BatchWriter.BatchWriteResult writeResult, List<Message> messages) {
+                auditEmitted.set(true);
+            }
+        };
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, null, mockEmitter, null, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForCommits(loop, 1, 2000);
+        loop.stop();
+        future.get(1, TimeUnit.SECONDS);
+
+        assertThat(loop.getCommitCount()).isEqualTo(1);
+        assertThat(auditEmitted.get()).isTrue();
+    }
+
+    @Test
+    void auditFailureDoesNotUndoCommittedTransaction() throws Exception {
+        BindingConfig config = createLandOnlyConfig(3);
+        sendMessages(3);
+
+        AuditRecordEmitter failingEmitter = new TestAuditRecordEmitter() {
+            @Override
+            public void emit(String bindingId, BatchWriter.BatchWriteResult writeResult, List<Message> messages) {
+                throw new RuntimeException("Audit system down");
+            }
+        };
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, null, failingEmitter, null, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForCommits(loop, 1, 2000);
+        loop.stop();
+        future.get(1, TimeUnit.SECONDS);
+
+        assertThat(loop.getCommitCount()).isEqualTo(1);
+        assertThat(loop.getMessageCount()).isEqualTo(3);
+        assertThat(countMessagesOnQueue(SOURCE_QUEUE)).isEqualTo(0);
+    }
+
+    private static abstract class TestAuditRecordEmitter implements AuditRecordEmitter {
+        @Override
+        public void emit(com.hcsc.datalake.mqintake.core.audit.AuditRecord record) {
+            // No-op for tests
+        }
+    }
+
+    @Test
+    void metricsUpdatedOnSuccessfulCommit() throws Exception {
+        BindingConfig config = createLandOnlyConfig(3);
+        sendMessages(3);
+
+        BindingMetrics metrics = new BindingMetrics("test-binding");
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, null, null, metrics, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForCommits(loop, 1, 2000);
+        loop.stop();
+        future.get(1, TimeUnit.SECONDS);
+
+        assertThat(metrics.getCommitCount()).isEqualTo(1);
+        assertThat(metrics.getMessagesWritten()).isEqualTo(3);
+    }
+
+    @Test
+    void metricsUpdatedOnRollback() throws Exception {
+        BindingConfig config = createLandOnlyConfig(3);
+        sendMessages(3);
+
+        BindingMetrics metrics = new BindingMetrics("test-binding");
+        batchWriter.setFailOnNextWrite(true, "HDFS failure");
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, null, null, metrics, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForRollbacks(loop, 1, 2000);
+        loop.stop();
+        future.get(1, TimeUnit.SECONDS);
+
+        assertThat(metrics.getRollbackCount()).isGreaterThanOrEqualTo(1);
+        assertThat(metrics.getCommitCount()).isEqualTo(0);
     }
 }

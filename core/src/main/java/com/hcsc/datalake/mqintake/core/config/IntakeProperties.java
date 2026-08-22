@@ -3,7 +3,9 @@ package com.hcsc.datalake.mqintake.core.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Root configuration properties for the MQ intake service.
@@ -12,6 +14,7 @@ import java.util.List;
 public class IntakeProperties {
 
     private List<BindingConfig> bindings = new ArrayList<>();
+    private Map<String, MqConnectionConfig> mqConnections = new HashMap<>();
     private int maxumsgs = 10_000;
     private long aggregateMemoryCeilingBytes = 1_073_741_824L;
     private String instanceId;
@@ -27,6 +30,14 @@ public class IntakeProperties {
 
     public void setBindings(List<BindingConfig> bindings) {
         this.bindings = bindings;
+    }
+
+    public Map<String, MqConnectionConfig> getMqConnections() {
+        return mqConnections;
+    }
+
+    public void setMqConnections(Map<String, MqConnectionConfig> mqConnections) {
+        this.mqConnections = mqConnections;
     }
 
     public int getMaxumsgs() {

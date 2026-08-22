@@ -15,10 +15,14 @@ public class CountingBatchWriter implements BatchWriter {
     private final AtomicLong totalMessageCount = new AtomicLong(0);
     private volatile boolean shouldFail = false;
     private volatile String failureMessage = "Simulated write failure";
+    private volatile Throwable failureCause = null;
 
     @Override
     public BatchWriteResult write(String bindingId, List<Message> messages) throws BatchWriteException {
         if (shouldFail) {
+            if (failureCause != null) {
+                throw new BatchWriteException(failureMessage, failureCause);
+            }
             throw new BatchWriteException(failureMessage);
         }
 
@@ -54,5 +58,12 @@ public class CountingBatchWriter implements BatchWriter {
     public void setFailOnNextWrite(boolean fail, String message) {
         this.shouldFail = fail;
         this.failureMessage = message;
+        this.failureCause = null;
+    }
+
+    public void setFailOnNextWrite(boolean fail, Throwable cause) {
+        this.shouldFail = fail;
+        this.failureMessage = cause.getMessage();
+        this.failureCause = cause;
     }
 }

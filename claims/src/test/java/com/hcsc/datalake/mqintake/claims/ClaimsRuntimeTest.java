@@ -3,7 +3,9 @@ package com.hcsc.datalake.mqintake.claims;
 import com.hcsc.datalake.mqintake.claims.serializer.ClaimsRecordSerializer;
 import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.BindingMode;
+import com.hcsc.datalake.mqintake.core.config.MqConnectionConfig;
 import com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry;
+import com.hcsc.datalake.mqintake.core.mq.MqConnectionManager;
 import com.hcsc.datalake.mqintake.core.orchestration.RecordSerializerFactory;
 import com.hcsc.datalake.mqintake.core.runtime.BindingRuntime;
 import com.hcsc.datalake.mqintake.core.runtime.BindingRuntimeFactory;
@@ -15,8 +17,10 @@ import org.junit.jupiter.api.io.TempDir;
 
 import javax.jms.Connection;
 import java.nio.file.Path;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 /**
  * Tests for Claims runtime creation.
@@ -32,6 +36,7 @@ class ClaimsRuntimeTest {
     private FileSystem fileSystem;
     private Configuration hadoopConf;
     private Connection jmsConnection;
+    private MqConnectionManager mqConnectionManager;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -42,12 +47,30 @@ class ClaimsRuntimeTest {
         ActiveMQConnectionFactory factory = new ActiveMQConnectionFactory("vm://localhost?broker.persistent=false");
         jmsConnection = factory.createConnection();
         jmsConnection.start();
+
+        // Create mock MqConnectionManager
+        MqConnectionConfig mqConfig = new MqConnectionConfig();
+        mqConfig.setId("primary");
+        mqConfig.setReceiveTimeoutMs(1000);
+
+        mqConnectionManager = mock(MqConnectionManager.class);
+        when(mqConnectionManager.hasConnection("primary")).thenReturn(true);
+        when(mqConnectionManager.getConnection("primary")).thenReturn(jmsConnection);
+        when(mqConnectionManager.getConfig("primary")).thenReturn(Optional.of(mqConfig));
     }
 
     @AfterEach
-    void tearDown() throws Exception {
-        if (jmsConnection != null) jmsConnection.close();
-        if (fileSystem != null) fileSystem.close();
+    void tearDown() {
+        try {
+            if (jmsConnection != null) jmsConnection.close();
+        } catch (Exception e) {
+            // Ignore cleanup errors
+        }
+        try {
+            if (fileSystem != null) fileSystem.close();
+        } catch (Exception e) {
+            // Ignore cleanup errors
+        }
     }
 
     @Test
@@ -58,10 +81,10 @@ class ClaimsRuntimeTest {
         MetricsRegistry metricsRegistry = new MetricsRegistry();
 
         BindingRuntimeFactory factory = new BindingRuntimeFactory(
-                fileSystem, hadoopConf, jmsConnection,
+                fileSystem, hadoopConf, mqConnectionManager,
                 serializerFactory, null, // No tracker factory for LAND_ONLY
                 metricsRegistry, null,
-                "claims-instance", 1000);
+                "claims-instance");
 
         BindingConfig config = createClaimsBindingConfig();
         BindingRuntime runtime = factory.create(config);
@@ -90,11 +113,11 @@ class ClaimsRuntimeTest {
         ClaimsConfiguration claimsConfig = new ClaimsConfiguration();
 
         BindingRuntimeFactory factory = new BindingRuntimeFactory(
-                fileSystem, hadoopConf, jmsConnection,
+                fileSystem, hadoopConf, mqConnectionManager,
                 claimsConfig.recordSerializerFactory(),
                 null, // Explicitly no tracker factory
                 new MetricsRegistry(), null,
-                "claims-instance", 1000);
+                "claims-instance");
 
         BindingConfig config = createClaimsBindingConfig();
         BindingRuntime runtime = factory.create(config);
@@ -109,11 +132,11 @@ class ClaimsRuntimeTest {
         ClaimsConfiguration claimsConfig = new ClaimsConfiguration();
 
         BindingRuntimeFactory factory = new BindingRuntimeFactory(
-                fileSystem, hadoopConf, jmsConnection,
+                fileSystem, hadoopConf, mqConnectionManager,
                 claimsConfig.recordSerializerFactory(),
                 null,
                 new MetricsRegistry(), null,
-                "claims-instance", 1000);
+                "claims-instance");
 
         BindingConfig config = createClaimsBindingConfig();
         config.setListenerThreads(6);
@@ -131,11 +154,11 @@ class ClaimsRuntimeTest {
         ClaimsConfiguration claimsConfig = new ClaimsConfiguration();
 
         BindingRuntimeFactory factory = new BindingRuntimeFactory(
-                fileSystem, hadoopConf, jmsConnection,
+                fileSystem, hadoopConf, mqConnectionManager,
                 claimsConfig.recordSerializerFactory(),
                 null,
                 new MetricsRegistry(), null,
-                "claims-instance", 1000);
+                "claims-instance");
 
         BindingConfig config = createClaimsBindingConfig();
         config.setListenerThreads(2);
@@ -156,6 +179,7 @@ class ClaimsRuntimeTest {
     private BindingConfig createClaimsBindingConfig() {
         BindingConfig config = new BindingConfig();
         config.setId("claims");
+        config.setMqConnection("primary");
         config.setSourceQueue("MQ.DMIH.CLAIMS.IN");
         config.setMode(BindingMode.LAND_ONLY);
         config.setHdfsBasePath(tempDir.toString());

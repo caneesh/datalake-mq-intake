@@ -4,11 +4,13 @@ import com.hcsc.datalake.mqintake.core.audit.AuditRecordEmitter;
 import com.hcsc.datalake.mqintake.core.batch.BatchWriter;
 import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.BindingMode;
+import com.hcsc.datalake.mqintake.core.config.MqConnectionConfig;
 import com.hcsc.datalake.mqintake.core.failure.DegradedModeManager;
 import com.hcsc.datalake.mqintake.core.hdfs.SequenceFileBatchWriter;
 import com.hcsc.datalake.mqintake.core.loop.TransactedReceiveLoop;
 import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
 import com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry;
+import com.hcsc.datalake.mqintake.core.mq.MqConnectionManager;
 import com.hcsc.datalake.mqintake.core.orchestration.RecordSerializerFactory;
 import com.hcsc.datalake.mqintake.core.orchestration.TrackerMessageBuilderFactory;
 import com.hcsc.datalake.mqintake.core.poison.PoisonMessageHandler;
@@ -23,6 +25,7 @@ import javax.jms.Connection;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -50,32 +53,29 @@ public class BindingRuntimeFactory {
 
     private final FileSystem fileSystem;
     private final Configuration hadoopConf;
-    private final Connection jmsConnection;
+    private final MqConnectionManager mqConnectionManager;
     private final RecordSerializerFactory serializerFactory;
     private final TrackerMessageBuilderFactory trackerBuilderFactory;
     private final MetricsRegistry metricsRegistry;
     private final AuditRecordEmitter auditEmitter;
     private final String instanceId;
-    private final long receiveTimeoutMs;
 
     public BindingRuntimeFactory(FileSystem fileSystem,
                                   Configuration hadoopConf,
-                                  Connection jmsConnection,
+                                  MqConnectionManager mqConnectionManager,
                                   RecordSerializerFactory serializerFactory,
                                   TrackerMessageBuilderFactory trackerBuilderFactory,
                                   MetricsRegistry metricsRegistry,
                                   AuditRecordEmitter auditEmitter,
-                                  String instanceId,
-                                  long receiveTimeoutMs) {
+                                  String instanceId) {
         this.fileSystem = Objects.requireNonNull(fileSystem, "fileSystem required");
         this.hadoopConf = Objects.requireNonNull(hadoopConf, "hadoopConf required");
-        this.jmsConnection = jmsConnection; // May be null if MQ not configured
+        this.mqConnectionManager = Objects.requireNonNull(mqConnectionManager, "mqConnectionManager required");
         this.serializerFactory = Objects.requireNonNull(serializerFactory, "serializerFactory required");
         this.trackerBuilderFactory = trackerBuilderFactory; // May be null for LAND_ONLY modules
         this.metricsRegistry = Objects.requireNonNull(metricsRegistry, "metricsRegistry required");
         this.auditEmitter = auditEmitter; // May be null
         this.instanceId = Objects.requireNonNull(instanceId, "instanceId required");
-        this.receiveTimeoutMs = receiveTimeoutMs;
     }
 
     /**
@@ -95,6 +95,9 @@ public class BindingRuntimeFactory {
         try {
             validateConfig(config);
 
+            Connection jmsConnection = getConnectionForBinding(config);
+            long receiveTimeoutMs = getReceiveTimeoutForBinding(config);
+
             RecordSerializer serializer = createSerializer(config);
             BatchWriter batchWriter = createBatchWriter(config, serializer);
             TrackerMessageBuilder trackerBuilder = createTrackerBuilder(config);
@@ -102,12 +105,14 @@ public class BindingRuntimeFactory {
             BindingMetrics metrics = metricsRegistry.forBinding(bindingId);
 
             List<TransactedReceiveLoop> loops = createLoops(
-                    config, batchWriter, trackerBuilder, poisonHandler, metrics);
+                    config, jmsConnection, receiveTimeoutMs, batchWriter, trackerBuilder, poisonHandler, metrics);
 
             ExecutorService executor = createExecutor(config);
 
             return new BindingRuntime(config, loops, executor, trackerBuilder != null);
 
+        } catch (BindingRuntimeCreationException e) {
+            throw e;
         } catch (Exception e) {
             throw new BindingRuntimeCreationException(
                     "Failed to create runtime for binding '" + bindingId + "': " + e.getMessage(), e);
@@ -121,11 +126,36 @@ public class BindingRuntimeFactory {
                     "but none was provided. Ensure the module provides a TrackerMessageBuilderFactory bean.");
         }
 
-        if (jmsConnection == null) {
+        String mqConnId = config.getMqConnection();
+        if (mqConnId == null || mqConnId.isBlank()) {
             throw new BindingRuntimeCreationException(
-                    "No JMS connection available for binding '" + config.getId() + "'. " +
-                    "Configure intake.mq.host to enable MQ connectivity.");
+                    "Binding '" + config.getId() + "' does not specify mq-connection.");
         }
+
+        if (!mqConnectionManager.hasConnection(mqConnId)) {
+            throw new BindingRuntimeCreationException(
+                    "Binding '" + config.getId() + "' references unknown mq-connection: " + mqConnId);
+        }
+    }
+
+    private Connection getConnectionForBinding(BindingConfig config) throws BindingRuntimeCreationException {
+        String mqConnId = config.getMqConnection();
+        try {
+            Connection connection = mqConnectionManager.getConnection(mqConnId);
+            Optional<MqConnectionConfig> mqConfig = mqConnectionManager.getConfig(mqConnId);
+            log.debug("Obtained connection for binding '{}' from mq-connection '{}'",
+                    config.getId(), mqConnId);
+            return connection;
+        } catch (MqConnectionManager.MqConnectionException e) {
+            throw new BindingRuntimeCreationException(
+                    "Failed to get MQ connection for binding '" + config.getId() + "': " + e.getMessage(), e);
+        }
+    }
+
+    private long getReceiveTimeoutForBinding(BindingConfig config) {
+        String mqConnId = config.getMqConnection();
+        Optional<MqConnectionConfig> mqConfig = mqConnectionManager.getConfig(mqConnId);
+        return mqConfig.map(MqConnectionConfig::getReceiveTimeoutMs).orElse(1000L);
     }
 
     private RecordSerializer createSerializer(BindingConfig config) {
@@ -158,6 +188,8 @@ public class BindingRuntimeFactory {
     }
 
     private List<TransactedReceiveLoop> createLoops(BindingConfig config,
+                                                     Connection jmsConnection,
+                                                     long receiveTimeoutMs,
                                                      BatchWriter batchWriter,
                                                      TrackerMessageBuilder trackerBuilder,
                                                      PoisonMessageHandler poisonHandler,

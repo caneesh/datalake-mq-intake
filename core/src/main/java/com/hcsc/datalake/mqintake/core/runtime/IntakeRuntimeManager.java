@@ -3,10 +3,12 @@ package com.hcsc.datalake.mqintake.core.runtime;
 import com.hcsc.datalake.mqintake.core.audit.AuditRecordEmitter;
 import com.hcsc.datalake.mqintake.core.audit.HdfsAuditRecordEmitter;
 import com.hcsc.datalake.mqintake.core.config.BindingConfig;
+import com.hcsc.datalake.mqintake.core.config.BindingConfigValidator;
 import com.hcsc.datalake.mqintake.core.config.IntakeProperties;
 import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.lifecycle.StartupValidator;
 import com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry;
+import com.hcsc.datalake.mqintake.core.mq.MqConnectionManager;
 import com.hcsc.datalake.mqintake.core.orchestration.RecordSerializerFactory;
 import com.hcsc.datalake.mqintake.core.orchestration.TrackerMessageBuilderFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -17,7 +19,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
-import javax.jms.Connection;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -55,9 +56,10 @@ public class IntakeRuntimeManager implements SmartLifecycle {
     private final IntakeProperties properties;
     private final FileSystem fileSystem;
     private final Configuration hadoopConf;
-    private final Connection jmsConnection;
+    private final MqConnectionManager mqConnectionManager;
     private final RecordSerializerFactory serializerFactory;
     private final TrackerMessageBuilderFactory trackerBuilderFactory;
+    private final BindingConfigValidator bindingConfigValidator;
 
     private final MetricsRegistry metricsRegistry;
     private final BindingHealthManager healthManager;
@@ -71,14 +73,16 @@ public class IntakeRuntimeManager implements SmartLifecycle {
     public IntakeRuntimeManager(IntakeProperties properties,
                                  FileSystem fileSystem,
                                  Configuration hadoopConf,
-                                 @Autowired(required = false) Connection jmsConnection,
+                                 MqConnectionManager mqConnectionManager,
                                  RecordSerializerFactory serializerFactory,
+                                 BindingConfigValidator bindingConfigValidator,
                                  @Autowired(required = false) TrackerMessageBuilderFactory trackerBuilderFactory) {
         this.properties = properties;
         this.fileSystem = fileSystem;
         this.hadoopConf = hadoopConf;
-        this.jmsConnection = jmsConnection;
+        this.mqConnectionManager = mqConnectionManager;
         this.serializerFactory = serializerFactory;
+        this.bindingConfigValidator = bindingConfigValidator;
         this.trackerBuilderFactory = trackerBuilderFactory;
 
         this.metricsRegistry = new MetricsRegistry();
@@ -95,14 +99,15 @@ public class IntakeRuntimeManager implements SmartLifecycle {
             return;
         }
 
-        if (jmsConnection == null) {
-            log.warn("No JMS connection available — bindings will not start. " +
-                    "Configure intake.mq.host to enable MQ connectivity.");
+        if (properties.getMqConnections().isEmpty()) {
+            log.warn("No MQ connections configured — bindings will not start. " +
+                    "Configure intake.mq-connections to enable MQ connectivity.");
             running = true;
             return;
         }
 
         try {
+            validateBindingConfigurations();
             validateAllBindings();
             cleanupTempFiles();
             initializeRuntimeFactory();
@@ -116,6 +121,11 @@ public class IntakeRuntimeManager implements SmartLifecycle {
             log.error("Failed to start IntakeRuntimeManager: {}", e.getMessage(), e);
             throw new RuntimeException("Startup failed: " + e.getMessage(), e);
         }
+    }
+
+    private void validateBindingConfigurations() {
+        bindingConfigValidator.validate(properties);
+        log.info("Binding configurations validated successfully");
     }
 
     private void validateAllBindings() throws StartupValidator.StartupValidationException {
@@ -152,13 +162,12 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         this.runtimeFactory = new BindingRuntimeFactory(
                 fileSystem,
                 hadoopConf,
-                jmsConnection,
+                mqConnectionManager,
                 serializerFactory,
                 trackerBuilderFactory,
                 metricsRegistry,
                 auditEmitter,
-                properties.getInstanceId(),
-                properties.getMq().getReceiveTimeoutMs());
+                properties.getInstanceId());
     }
 
     private void createAndStartRuntimes() {

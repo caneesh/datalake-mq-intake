@@ -3,7 +3,10 @@ package com.hcsc.datalake.mqintake.core.runtime;
 import com.hcsc.datalake.mqintake.core.audit.AuditRecordEmitter;
 import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.BindingMode;
+import com.hcsc.datalake.mqintake.core.config.MqConnectionConfig;
 import com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry;
+import com.hcsc.datalake.mqintake.core.mq.CredentialProvider;
+import com.hcsc.datalake.mqintake.core.mq.MqConnectionManager;
 import com.hcsc.datalake.mqintake.core.orchestration.RecordSerializerFactory;
 import com.hcsc.datalake.mqintake.core.orchestration.TrackerMessageBuilderFactory;
 import com.hcsc.datalake.mqintake.core.serializer.TestRecordSerializer;
@@ -18,9 +21,11 @@ import javax.jms.Connection;
 import javax.jms.Message;
 import javax.jms.Session;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 /**
  * Tests for BindingRuntimeFactory.
@@ -33,6 +38,7 @@ class BindingRuntimeFactoryTest {
     private FileSystem fileSystem;
     private Configuration hadoopConf;
     private Connection jmsConnection;
+    private MqConnectionManager mqConnectionManager;
     private MetricsRegistry metricsRegistry;
     private RecordSerializerFactory serializerFactory;
     private TrackerMessageBuilderFactory trackerBuilderFactory;
@@ -46,6 +52,21 @@ class BindingRuntimeFactoryTest {
         ActiveMQConnectionFactory factory = new ActiveMQConnectionFactory("vm://localhost?broker.persistent=false");
         jmsConnection = factory.createConnection();
         jmsConnection.start();
+
+        // Create MqConnectionManager with a test connection
+        MqConnectionConfig mqConfig = new MqConnectionConfig();
+        mqConfig.setId("test-conn");
+        mqConfig.setHost("localhost");
+        mqConfig.setPort(1414);
+        mqConfig.setQueueManager("QM1");
+        mqConfig.setChannel("DEV.APP.SVRCONN");
+        mqConfig.setReceiveTimeoutMs(1000);
+
+        // Create a mock MqConnectionManager that returns our test connection
+        mqConnectionManager = mock(MqConnectionManager.class);
+        when(mqConnectionManager.hasConnection("test-conn")).thenReturn(true);
+        when(mqConnectionManager.getConnection("test-conn")).thenReturn(jmsConnection);
+        when(mqConnectionManager.getConfig("test-conn")).thenReturn(Optional.of(mqConfig));
 
         metricsRegistry = new MetricsRegistry();
         serializerFactory = config -> new TestRecordSerializer();
@@ -103,17 +124,29 @@ class BindingRuntimeFactoryTest {
     }
 
     @Test
-    void noJmsConnectionThrows() throws Exception {
-        BindingRuntimeFactory factory = new BindingRuntimeFactory(
-                fileSystem, hadoopConf, null, // no JMS connection
-                serializerFactory, trackerBuilderFactory,
-                metricsRegistry, null, "test-instance", 1000);
+    void unknownMqConnectionThrows() throws Exception {
+        when(mqConnectionManager.hasConnection("unknown-conn")).thenReturn(false);
+
+        BindingRuntimeFactory factory = createFactory(null);
 
         BindingConfig config = createLandOnlyConfig();
+        config.setMqConnection("unknown-conn");
 
         assertThatThrownBy(() -> factory.create(config))
                 .isInstanceOf(BindingRuntimeFactory.BindingRuntimeCreationException.class)
-                .hasMessageContaining("No JMS connection");
+                .hasMessageContaining("unknown mq-connection");
+    }
+
+    @Test
+    void missingMqConnectionThrows() throws Exception {
+        BindingRuntimeFactory factory = createFactory(null);
+
+        BindingConfig config = createLandOnlyConfig();
+        config.setMqConnection(null);
+
+        assertThatThrownBy(() -> factory.create(config))
+                .isInstanceOf(BindingRuntimeFactory.BindingRuntimeCreationException.class)
+                .hasMessageContaining("does not specify mq-connection");
     }
 
     @Test
@@ -160,15 +193,16 @@ class BindingRuntimeFactoryTest {
 
     private BindingRuntimeFactory createFactory(TrackerMessageBuilderFactory trackerFactory) {
         return new BindingRuntimeFactory(
-                fileSystem, hadoopConf, jmsConnection,
+                fileSystem, hadoopConf, mqConnectionManager,
                 serializerFactory, trackerFactory,
                 metricsRegistry, null,
-                "test-instance", 1000);
+                "test-instance");
     }
 
     private BindingConfig createLandOnlyConfig() {
         BindingConfig config = new BindingConfig();
         config.setId("test-land-only");
+        config.setMqConnection("test-conn");
         config.setSourceQueue("TEST.SOURCE");
         config.setMode(BindingMode.LAND_ONLY);
         config.setHdfsBasePath(tempDir.toString());
@@ -182,6 +216,7 @@ class BindingRuntimeFactoryTest {
     private BindingConfig createTrackedConfig() {
         BindingConfig config = new BindingConfig();
         config.setId("test-tracked");
+        config.setMqConnection("test-conn");
         config.setSourceQueue("TEST.SOURCE");
         config.setMode(BindingMode.TRACKED);
         config.setTrackerQueue("TEST.TRACKER");

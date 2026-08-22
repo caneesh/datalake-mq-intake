@@ -41,6 +41,7 @@ public class BindingConfigValidator {
         validateNoDuplicateBindingIds(bindings, errors);
         validateNoDuplicateSourceQueues(bindings, errors);
         validateTrackerQueueConsistency(bindings, errors);
+        validateBackoutQueueConsistency(bindings, errors);
         validateBatchSizes(bindings, properties.getMaxumsgs(), errors);
         validateAggregateMemory(bindings, properties.getAggregateMemoryCeilingBytes(), errors);
         validateRequiredFields(bindings, errors);
@@ -92,6 +93,24 @@ public class BindingConfigValidator {
             if (binding.getMode() == BindingMode.LAND_ONLY && hasTrackerQueue) {
                 errors.add("LAND_ONLY binding '" + binding.getId() +
                         "' must not configure a tracker_queue");
+            }
+        }
+    }
+
+    private void validateBackoutQueueConsistency(List<BindingConfig> bindings, List<String> errors) {
+        for (BindingConfig binding : bindings) {
+            boolean hasBackoutQueue = binding.getBackoutQueue() != null &&
+                    !binding.getBackoutQueue().isBlank();
+            int backoutThreshold = binding.getBackoutThreshold();
+
+            if (hasBackoutQueue && backoutThreshold <= 0) {
+                errors.add("Binding '" + binding.getId() +
+                        "' has backout_queue configured but backout_threshold is not positive");
+            }
+
+            if (binding.getSuccessesRequiredToRestore() <= 0) {
+                errors.add("Binding '" + binding.getId() +
+                        "' successes_required_to_restore must be positive");
             }
         }
     }

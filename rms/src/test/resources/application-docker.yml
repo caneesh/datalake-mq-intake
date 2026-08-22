@@ -1,0 +1,52 @@
+spring:
+  application:
+    name: datalake-mq-intake-rms-docker-test
+
+intake:
+  instance-id: docker-test-instance
+  maxumsgs: 10000
+  aggregate-memory-ceiling-bytes: 1073741824
+
+  mq-connections:
+    primary:
+      host: localhost
+      port: 1414
+      queue-manager: QM1
+      channel: DEV.APP.SVRCONN
+      transport-type: CLIENT
+      credential-ref: env:MQ_USER,MQ_PASSWORD
+      receive-timeout-ms: 1000
+      reconnect-attempts: 3
+      reconnect-delay-ms: 2000
+
+  kerberos:
+    enabled: false
+
+  hdfs:
+    audit-base-path: /tmp/mq-intake-test/audit
+    temp-file-max-age-ms: 3600000
+
+  shutdown:
+    drain-timeout-ms: 10000
+
+  bindings:
+    - id: rms-test
+      mq-connection: primary
+      source-queue: MQ.HPS.MEMBERSHIP.IN
+      mode: TRACKED
+      tracker-queue: MQ.HPS.MEMBERSHIP.TRACKER
+      tracker-body-mode: FULL_COPY
+      tracker-fields:
+        reporting-system: DMIH/DL
+        source-system: IIB
+        message-status: RCVD
+        destination-status: ""
+      hdfs-base-path: /tmp/mq-intake-test/data/rms
+      batch-size: 100
+      batch-bytes: 10485760    # 10 MB
+      batch-interval-ms: 5000
+      listener-threads: 1
+      backout-queue: MQ.HPS.MEMBERSHIP.BACKOUT
+      backout-threshold: 3
+      degradation-strategy: BATCH_OF_ONE
+      successes-required-to-restore: 5

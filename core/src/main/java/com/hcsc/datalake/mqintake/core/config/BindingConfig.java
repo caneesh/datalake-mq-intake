@@ -9,6 +9,7 @@ import com.hcsc.datalake.mqintake.core.failure.DegradationStrategy;
 public class BindingConfig {
 
     private String id;
+    private String mqConnection;
     private String sourceQueue;
     private BindingMode mode;
     private String trackerQueue;
@@ -34,6 +35,14 @@ public class BindingConfig {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getMqConnection() {
+        return mqConnection;
+    }
+
+    public void setMqConnection(String mqConnection) {
+        this.mqConnection = mqConnection;
     }
 
     public String getSourceQueue() {

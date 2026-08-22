@@ -2,8 +2,9 @@ package com.hcsc.datalake.mqintake.rms;
 
 import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.BindingMode;
-import com.hcsc.datalake.mqintake.core.config.IntakeProperties;
+import com.hcsc.datalake.mqintake.core.config.MqConnectionConfig;
 import com.hcsc.datalake.mqintake.core.config.TrackerBodyMode;
+import com.hcsc.datalake.mqintake.core.mq.MqConnectionManager;
 import com.hcsc.datalake.mqintake.core.orchestration.RecordSerializerFactory;
 import com.hcsc.datalake.mqintake.core.orchestration.TrackerMessageBuilderFactory;
 import com.hcsc.datalake.mqintake.core.runtime.BindingRuntime;
@@ -19,8 +20,10 @@ import org.junit.jupiter.api.io.TempDir;
 
 import javax.jms.Connection;
 import java.nio.file.Path;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 /**
  * Tests for RMS runtime creation.
@@ -36,6 +39,7 @@ class RmsRuntimeTest {
     private FileSystem fileSystem;
     private Configuration hadoopConf;
     private Connection jmsConnection;
+    private MqConnectionManager mqConnectionManager;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -46,12 +50,30 @@ class RmsRuntimeTest {
         ActiveMQConnectionFactory factory = new ActiveMQConnectionFactory("vm://localhost?broker.persistent=false");
         jmsConnection = factory.createConnection();
         jmsConnection.start();
+
+        // Create mock MqConnectionManager
+        MqConnectionConfig mqConfig = new MqConnectionConfig();
+        mqConfig.setId("primary");
+        mqConfig.setReceiveTimeoutMs(1000);
+
+        mqConnectionManager = mock(MqConnectionManager.class);
+        when(mqConnectionManager.hasConnection("primary")).thenReturn(true);
+        when(mqConnectionManager.getConnection("primary")).thenReturn(jmsConnection);
+        when(mqConnectionManager.getConfig("primary")).thenReturn(Optional.of(mqConfig));
     }
 
     @AfterEach
-    void tearDown() throws Exception {
-        if (jmsConnection != null) jmsConnection.close();
-        if (fileSystem != null) fileSystem.close();
+    void tearDown() {
+        try {
+            if (jmsConnection != null) jmsConnection.close();
+        } catch (Exception e) {
+            // Ignore cleanup errors
+        }
+        try {
+            if (fileSystem != null) fileSystem.close();
+        } catch (Exception e) {
+            // Ignore cleanup errors
+        }
     }
 
     @Test
@@ -63,10 +85,10 @@ class RmsRuntimeTest {
         MetricsRegistry metricsRegistry = new MetricsRegistry();
 
         BindingRuntimeFactory factory = new BindingRuntimeFactory(
-                fileSystem, hadoopConf, jmsConnection,
+                fileSystem, hadoopConf, mqConnectionManager,
                 serializerFactory, trackerFactory,
                 metricsRegistry, null,
-                "rms-instance", 1000);
+                "rms-instance");
 
         BindingConfig config = createRmsBindingConfig();
         BindingRuntime runtime = factory.create(config);
@@ -126,11 +148,11 @@ class RmsRuntimeTest {
         RmsConfiguration rmsConfig = new RmsConfiguration();
 
         BindingRuntimeFactory factory = new BindingRuntimeFactory(
-                fileSystem, hadoopConf, jmsConnection,
+                fileSystem, hadoopConf, mqConnectionManager,
                 rmsConfig.recordSerializerFactory(),
                 rmsConfig.trackerMessageBuilderFactory(),
                 new MetricsRegistry(), null,
-                "rms-instance", 1000);
+                "rms-instance");
 
         BindingConfig config = createRmsBindingConfig();
         config.setListenerThreads(8);
@@ -146,6 +168,7 @@ class RmsRuntimeTest {
     private BindingConfig createRmsBindingConfig() {
         BindingConfig config = new BindingConfig();
         config.setId("rms");
+        config.setMqConnection("primary");
         config.setSourceQueue("MQ.HPS.MEMBERSHIP.IN");
         config.setMode(BindingMode.TRACKED);
         config.setTrackerQueue("MQ.HPS.MEMBERSHIP.TRACKER");

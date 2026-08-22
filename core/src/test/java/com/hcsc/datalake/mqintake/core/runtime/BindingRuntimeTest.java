@@ -39,8 +39,12 @@ class BindingRuntimeTest {
     }
 
     @AfterEach
-    void tearDown() throws Exception {
-        if (connection != null) connection.close();
+    void tearDown() {
+        try {
+            if (connection != null) connection.close();
+        } catch (Exception e) {
+            // Ignore cleanup errors - connection may already be disposed
+        }
     }
 
     @Test
