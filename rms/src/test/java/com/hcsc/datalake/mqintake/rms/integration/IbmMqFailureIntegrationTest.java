@@ -324,7 +324,133 @@ class IbmMqFailureIntegrationTest {
                 .isEqualTo(BindingHealthManager.HealthStatus.HEALTHY);
     }
 
+    @Test
+    @DisplayName("Loop recovers after a full queue-manager restart and replays the uncommitted batch")
+    void recoveryAfterRealQueueManagerRestart() throws Exception {
+        assumeTrue(dockerAvailable(), "docker CLI/container not available - skipping");
+
+        // batchSize 5 with a long interval: the loop accumulates without
+        // flushing, so the first three messages are still inside an
+        // uncommitted transaction when the queue manager goes down.
+        BindingConfig config = bindingConfig(5, 5);
+        config.setBatchIntervalMs(600_000);
+        BindingHealthManager health = new BindingHealthManager();
+        BindingMetrics metrics = new BindingMetrics("rms-it");
+
+        BatchWriter writer = new SequenceFileBatchWriter(
+                fileSystem, hadoopConf, new PoisonSensitiveSerializer(),
+                "it-instance", config.getId(), config.getHdfsBasePath());
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, writer, null, null, null,
+                health, null, metrics, "it-instance", 200);
+        executor.submit(loop);
+
+        for (int i = 0; i < 3; i++) {
+            send(SOURCE_QUEUE, "PRE-" + i);
+        }
+        // Consumed into the in-flight batch but deliberately not yet committed
+        awaitTrue(30_000, () -> depth(SOURCE_QUEUE) == 0);
+        assertThat(landedIdentities(config))
+                .as("batch must still be uncommitted, nothing landed yet")
+                .isEmpty();
+
+        // Full queue-manager restart: process down, all connections severed,
+        // in-flight transactions resolved by the QM on the way back up.
+        restartQueueManagerAndWaitHealthy();
+
+        // The loop must rebuild its session and resume. The three PRE messages
+        // were rolled back by the restart, so the queue manager redelivers
+        // them; two more then complete a batch of five and it commits.
+        awaitSendsSucceed("POST-0", "POST-1");
+
+        Set<String> expected = new HashSet<>();
+        for (int i = 0; i < 3; i++) {
+            expected.add("PRE-" + i);
+        }
+        for (int i = 0; i < 2; i++) {
+            expected.add("POST-" + i);
+        }
+
+        // Success takes a few seconds once the QM is back (measured ~5s), so
+        // this bounds the FAILURE path rather than the success path. Keep it
+        // tight: an unrecoverable loop should fail the build in minutes, not
+        // tens of minutes.
+        awaitTrue(90_000, () -> landedIdentities(config).containsAll(expected));
+        loop.stop();
+
+        // Zero loss across a full restart: the uncommitted messages were
+        // replayed rather than dropped.
+        assertThat(landedIdentities(config))
+                .as("every message from before and after the restart must land")
+                .containsAll(expected);
+        assertThat(depth(SOURCE_QUEUE)).isZero();
+
+        assertThat(loop.getReconnectCount())
+                .as("session was rebuilt at least once").isGreaterThan(0);
+        assertThat(metrics.getReconnectSuccessCount()).isGreaterThan(0);
+        assertThat(health.getStatus("rms-it"))
+                .as("health returns to HEALTHY after the queue manager comes back")
+                .isEqualTo(BindingHealthManager.HealthStatus.HEALTHY);
+    }
+
     // --- helpers ---
+
+    /**
+     * Restarts the whole container, which stops and restarts the queue manager
+     * — a stronger outage than stopping a channel. Waits for the container
+     * healthcheck ({@code dspmq}) to report healthy again.
+     */
+    private void restartQueueManagerAndWaitHealthy() throws Exception {
+        exec("docker", "restart", CONTAINER);
+
+        long deadline = System.currentTimeMillis() + 180_000;
+        while (System.currentTimeMillis() < deadline) {
+            String health = exec("docker", "inspect", "-f",
+                    "{{.State.Health.Status}}", CONTAINER).trim();
+            if ("healthy".equals(health)) {
+                return;
+            }
+            Thread.sleep(1000);
+        }
+        throw new java.lang.IllegalStateException("Queue manager did not become healthy after restart");
+    }
+
+    /**
+     * Sends once the queue manager accepts connections again. The producer uses
+     * its own short-lived session, so it fails until the QM is truly ready.
+     *
+     * <p>All bodies share one retry window: a single JMS call on a
+     * not-yet-recovered connection can block for tens of seconds before
+     * throwing, so per-message windows compound badly on the failure path.
+     */
+    private void awaitSendsSucceed(String... bodies) throws Exception {
+        long deadline = System.currentTimeMillis() + 60_000;
+        Exception last = null;
+        for (String body : bodies) {
+            boolean sent = false;
+            while (!sent && System.currentTimeMillis() < deadline) {
+                try {
+                    send(SOURCE_QUEUE, body);
+                    sent = true;
+                } catch (Exception e) {
+                    last = e;
+                    Thread.sleep(1000);
+                }
+            }
+            if (!sent) {
+                throw new java.lang.IllegalStateException(
+                        "Could not send '" + body + "' after restart", last);
+            }
+        }
+    }
+
+    private String exec(String... cmd) throws Exception {
+        Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+        String out = new String(p.getInputStream().readAllBytes());
+        p.waitFor();
+        return out;
+    }
 
     private BindingConfig bindingConfig(int batchSize, int backoutThreshold) {
         BindingConfig config = new BindingConfig();
