@@ -18,6 +18,8 @@ import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -41,41 +43,65 @@ public class SequenceFileBatchWriter implements BatchWriter {
     private final String instanceId;
     private final Clock clock;
     private final CompressionType compressionType;
+    private final Map<String, String> bindingBasePaths;
 
     private final AtomicLong batchSequence = new AtomicLong(0);
 
     /**
-     * Creates a writer with system clock.
+     * Creates a writer with system clock and a single binding path.
      */
     public SequenceFileBatchWriter(FileSystem fileSystem,
                                     Configuration conf,
                                     RecordSerializer serializer,
-                                    String instanceId) {
-        this(fileSystem, conf, serializer, instanceId, Clock.systemUTC(), CompressionType.RECORD);
+                                    String instanceId,
+                                    String bindingId,
+                                    String basePath) {
+        this(fileSystem, conf, serializer, instanceId, Clock.systemUTC(),
+                CompressionType.RECORD, Map.of(bindingId, basePath));
     }
 
     /**
-     * Creates a writer with injectable clock (for testing).
+     * Creates a writer with multiple binding paths.
+     */
+    public SequenceFileBatchWriter(FileSystem fileSystem,
+                                    Configuration conf,
+                                    RecordSerializer serializer,
+                                    String instanceId,
+                                    Map<String, String> bindingBasePaths) {
+        this(fileSystem, conf, serializer, instanceId, Clock.systemUTC(),
+                CompressionType.RECORD, bindingBasePaths);
+    }
+
+    /**
+     * Creates a writer with full configuration.
      */
     public SequenceFileBatchWriter(FileSystem fileSystem,
                                     Configuration conf,
                                     RecordSerializer serializer,
                                     String instanceId,
                                     Clock clock,
-                                    CompressionType compressionType) {
+                                    CompressionType compressionType,
+                                    Map<String, String> bindingBasePaths) {
         this.fileSystem = fileSystem;
         this.conf = conf;
         this.serializer = serializer;
         this.instanceId = instanceId;
         this.clock = clock;
         this.compressionType = compressionType;
+        this.bindingBasePaths = new ConcurrentHashMap<>(bindingBasePaths);
 
-        // Validate: BLOCK compression is forbidden per §8
         if (compressionType == CompressionType.BLOCK) {
             throw new IllegalArgumentException(
                     "BLOCK compression is forbidden — it triggers mid-stream sync behavior " +
                     "that interacts badly with erasure-coded files. Use RECORD or NONE.");
         }
+    }
+
+    /**
+     * Registers a base path for a binding.
+     */
+    public void registerBinding(String bindingId, String basePath) {
+        bindingBasePaths.put(bindingId, basePath);
     }
 
     @Override
@@ -84,20 +110,19 @@ public class SequenceFileBatchWriter implements BatchWriter {
             throw new BatchWriteException("Cannot write empty batch");
         }
 
-        // CRITICAL: Compute partition path fresh at flush time — NEVER cache
+        String basePath = bindingBasePaths.get(bindingId);
+        if (basePath == null) {
+            throw new BatchWriteException("No base path configured for binding: " + bindingId);
+        }
+
         Instant now = Instant.now(clock);
-        String basePath = getBasePath(bindingId);
         String partitionPath = PartitionPath.compute(basePath, now);
 
-        // Generate unique filename
         long batchSeq = batchSequence.incrementAndGet();
         String filename = PartitionPath.filename(bindingId, instanceId, now.toEpochMilli(), batchSeq);
 
-        // Temp path: {base}/_tmp/{instance_id}/{filename}
         String tempDir = PartitionPath.tempDir(basePath, instanceId);
         Path tempPath = new Path(tempDir, filename);
-
-        // Final path: {partition}/{filename}
         Path finalPath = new Path(partitionPath, filename);
 
         log.debug("Writing batch: {} messages to temp={}, final={}",
@@ -105,16 +130,12 @@ public class SequenceFileBatchWriter implements BatchWriter {
 
         long byteCount = 0;
         try {
-            // Ensure temp directory exists
             fileSystem.mkdirs(tempPath.getParent());
 
-            // Write to temp file
             byteCount = writeSequenceFile(tempPath, bindingId, messages, filename);
 
-            // Ensure partition directory exists
             fileSystem.mkdirs(finalPath.getParent());
 
-            // ATOMIC RENAME: visibility barrier
             boolean renamed = fileSystem.rename(tempPath, finalPath);
             if (!renamed) {
                 throw new BatchWriteException(
@@ -127,7 +148,6 @@ public class SequenceFileBatchWriter implements BatchWriter {
             return new BatchWriteResult(finalPath.toString(), messages.size(), byteCount);
 
         } catch (IOException e) {
-            // Clean up temp file on failure
             deleteQuietly(tempPath);
             throw new BatchWriteException("Failed to write batch to HDFS: " + e.getMessage(), e);
         } catch (RecordSerializer.SerializationException e) {
@@ -136,11 +156,6 @@ public class SequenceFileBatchWriter implements BatchWriter {
         }
     }
 
-    /**
-     * Writes messages to a SequenceFile at the given path.
-     *
-     * @return total bytes written
-     */
     private long writeSequenceFile(Path path, String bindingId, List<Message> messages, String filename)
             throws IOException, RecordSerializer.SerializationException {
 
@@ -162,18 +177,13 @@ public class SequenceFileBatchWriter implements BatchWriter {
                 writer.append(record.getKey(), record.getValue());
             }
 
-            // Sync ensures data is flushed to DataNodes
             writer.hflush();
             endPos = writer.getLength();
         }
-        // Close happens via try-with-resources — this is the DURABILITY BARRIER
 
         return endPos - startPos;
     }
 
-    /**
-     * Builds metadata for a single message.
-     */
     private RecordMetadata buildMetadata(String bindingId, Message message, String filename, int offset) {
         RecordMetadata.Builder builder = RecordMetadata.builder()
                 .bindingId(bindingId)
@@ -183,7 +193,6 @@ public class SequenceFileBatchWriter implements BatchWriter {
 
         try {
             builder.mqMessageId(message.getJMSMessageID());
-            // JMS timestamp is in millis
             long jmsTimestamp = message.getJMSTimestamp();
             if (jmsTimestamp > 0) {
                 builder.mqPutTimestamp(Instant.ofEpochMilli(jmsTimestamp));
@@ -195,18 +204,6 @@ public class SequenceFileBatchWriter implements BatchWriter {
         return builder.build();
     }
 
-    /**
-     * Gets the base path for a binding. In real implementation, this would
-     * come from binding config. For now, uses a simple convention.
-     */
-    protected String getBasePath(String bindingId) {
-        // Override this in actual implementation to use BindingConfig
-        return "/data/raw/" + bindingId;
-    }
-
-    /**
-     * Deletes a file, ignoring errors.
-     */
     private void deleteQuietly(Path path) {
         try {
             fileSystem.delete(path, false);
@@ -215,14 +212,6 @@ public class SequenceFileBatchWriter implements BatchWriter {
         }
     }
 
-    /**
-     * Cleans up stale temp files for THIS instance only.
-     * Called on startup to remove crash debris.
-     *
-     * @param basePath the HDFS base path
-     * @param maxAgeMs maximum age in milliseconds — files older than this are deleted
-     * @return number of files deleted
-     */
     public int cleanupTempFiles(String basePath, long maxAgeMs) throws IOException {
         String tempDir = PartitionPath.tempDir(basePath, instanceId);
         Path tempPath = new Path(tempDir);
@@ -248,5 +237,9 @@ public class SequenceFileBatchWriter implements BatchWriter {
 
     public String getInstanceId() {
         return instanceId;
+    }
+
+    public String getBasePath(String bindingId) {
+        return bindingBasePaths.get(bindingId);
     }
 }

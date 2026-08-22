@@ -1,6 +1,10 @@
 package com.hcsc.datalake.mqintake.core.audit;
 
+import com.hcsc.datalake.mqintake.core.batch.BatchWriter;
+
+import javax.jms.Message;
 import java.io.IOException;
+import java.util.List;
 
 /**
  * Interface for emitting audit records after successful commits.
@@ -25,6 +29,16 @@ public interface AuditRecordEmitter {
      * @throws IOException if the audit record could not be written
      */
     void emit(AuditRecord record) throws IOException;
+
+    /**
+     * Convenience method to build and emit an audit record from batch results.
+     *
+     * @param bindingId   the binding identifier
+     * @param writeResult the result from BatchWriter.write()
+     * @param messages    the messages that were written
+     * @throws IOException if the audit record could not be written
+     */
+    void emit(String bindingId, BatchWriter.BatchWriteResult writeResult, List<Message> messages) throws IOException;
 
     /**
      * Flushes any buffered audit records. Some implementations may buffer

@@ -7,6 +7,28 @@ intake:
   maxumsgs: 10000
   aggregate-memory-ceiling-bytes: 1073741824  # 1 GB
 
+  mq:
+    host: ${MQ_HOST:localhost}
+    port: ${MQ_PORT:1414}
+    queue-manager: ${MQ_QUEUE_MANAGER:QM1}
+    channel: ${MQ_CHANNEL:DEV.APP.SVRCONN}
+    user: ${MQ_USER:}
+    password: ${MQ_PASSWORD:}
+    receive-timeout-ms: 1000
+
+  kerberos:
+    enabled: ${KERBEROS_ENABLED:false}
+    principal: ${KERBEROS_PRINCIPAL:}
+    keytab-path: ${KERBEROS_KEYTAB_PATH:}
+    relogin-interval-ms: 3600000  # 1 hour
+
+  hdfs:
+    audit-base-path: /data/audit
+    temp-file-max-age-ms: 3600000  # 1 hour
+
+  shutdown:
+    drain-timeout-ms: 30000  # 30 seconds
+
   bindings:
     - id: claims
       source-queue: MQ.DMIH.CLAIMS.IN
@@ -17,3 +39,7 @@ intake:
       batch-bytes: 134217728    # 128 MB
       batch-interval-ms: 30000  # 30 seconds
       listener-threads: 4
+      backout-queue: MQ.DMIH.CLAIMS.BACKOUT
+      backout-threshold: 5
+      degradation-strategy: BISECT  # Claims uses bisection per §6.1
+      successes-required-to-restore: 10

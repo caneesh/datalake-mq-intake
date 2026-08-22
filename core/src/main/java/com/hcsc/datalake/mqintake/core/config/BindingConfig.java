@@ -1,5 +1,7 @@
 package com.hcsc.datalake.mqintake.core.config;
 
+import com.hcsc.datalake.mqintake.core.failure.DegradationStrategy;
+
 /**
  * Configuration for a single binding: a self-contained pipeline from
  * one source queue to one HDFS landing path.
@@ -16,7 +18,15 @@ public class BindingConfig {
     private int batchSize;
     private long batchBytes;
     private long batchIntervalMs;
-    private int listenerThreads;
+    private int listenerThreads = 1;
+
+    // Poison message handling (§6.1)
+    private String backoutQueue;
+    private int backoutThreshold = 5;
+
+    // Degraded mode (§6.1)
+    private DegradationStrategy degradationStrategy = DegradationStrategy.BATCH_OF_ONE;
+    private int successesRequiredToRestore = 10;
 
     public String getId() {
         return id;
@@ -104,6 +114,38 @@ public class BindingConfig {
 
     public void setListenerThreads(int listenerThreads) {
         this.listenerThreads = listenerThreads;
+    }
+
+    public String getBackoutQueue() {
+        return backoutQueue;
+    }
+
+    public void setBackoutQueue(String backoutQueue) {
+        this.backoutQueue = backoutQueue;
+    }
+
+    public int getBackoutThreshold() {
+        return backoutThreshold;
+    }
+
+    public void setBackoutThreshold(int backoutThreshold) {
+        this.backoutThreshold = backoutThreshold;
+    }
+
+    public DegradationStrategy getDegradationStrategy() {
+        return degradationStrategy;
+    }
+
+    public void setDegradationStrategy(DegradationStrategy degradationStrategy) {
+        this.degradationStrategy = degradationStrategy;
+    }
+
+    public int getSuccessesRequiredToRestore() {
+        return successesRequiredToRestore;
+    }
+
+    public void setSuccessesRequiredToRestore(int successesRequiredToRestore) {
+        this.successesRequiredToRestore = successesRequiredToRestore;
     }
 
     /**

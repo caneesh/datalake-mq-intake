@@ -1,14 +1,18 @@
 package com.hcsc.datalake.mqintake.core.audit;
 
+import com.hcsc.datalake.mqintake.core.batch.BatchWriter;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.jms.Message;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -28,10 +32,17 @@ public class HdfsAuditRecordEmitter implements AuditRecordEmitter {
 
     private final FileSystem fileSystem;
     private final String auditBasePath;
+    private final AuditRecordBuilder auditRecordBuilder;
 
     public HdfsAuditRecordEmitter(FileSystem fileSystem, String auditBasePath) {
+        this(fileSystem, auditBasePath, "unknown", Clock.systemUTC());
+    }
+
+    public HdfsAuditRecordEmitter(FileSystem fileSystem, String auditBasePath,
+                                   String instanceId, Clock clock) {
         this.fileSystem = Objects.requireNonNull(fileSystem, "fileSystem required");
         this.auditBasePath = Objects.requireNonNull(auditBasePath, "auditBasePath required");
+        this.auditRecordBuilder = new AuditRecordBuilder(instanceId, clock);
     }
 
     @Override
@@ -127,5 +138,11 @@ public class HdfsAuditRecordEmitter implements AuditRecordEmitter {
 
     public String getAuditBasePath() {
         return auditBasePath;
+    }
+
+    @Override
+    public void emit(String bindingId, BatchWriter.BatchWriteResult writeResult, List<Message> messages) throws IOException {
+        AuditRecord record = auditRecordBuilder.build(bindingId, writeResult, messages);
+        emit(record);
     }
 }

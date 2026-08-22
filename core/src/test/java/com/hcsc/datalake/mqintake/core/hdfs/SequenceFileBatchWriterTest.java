@@ -21,6 +21,7 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.*;
@@ -294,7 +295,7 @@ class SequenceFileBatchWriterTest {
     void blockCompressionIsForbidden() {
         assertThatThrownBy(() -> new SequenceFileBatchWriter(
                 fileSystem, conf, new TestRecordSerializer(), "instance",
-                Clock.systemUTC(), CompressionType.BLOCK))
+                Clock.systemUTC(), CompressionType.BLOCK, Map.of("test", "/data/test")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("BLOCK compression is forbidden");
     }
@@ -340,12 +341,16 @@ class SequenceFileBatchWriterTest {
 
     private SequenceFileBatchWriter createWriter(String basePath, TestClock clock, String instanceId) {
         return new SequenceFileBatchWriter(
-                fileSystem, conf, new TestRecordSerializer(), instanceId, clock, CompressionType.RECORD) {
-            @Override
-            protected String getBasePath(String bindingId) {
-                return basePath;
-            }
-        };
+                fileSystem, conf, new TestRecordSerializer(), instanceId, clock,
+                CompressionType.RECORD, createBindingMap(basePath));
+    }
+
+    private Map<String, String> createBindingMap(String basePath) {
+        return Map.of(
+                "binding", basePath,
+                "test-binding", basePath,
+                "my-binding", basePath
+        );
     }
 
     private List<Message> createMessages(int count) throws JMSException {
@@ -402,13 +407,8 @@ class SequenceFileBatchWriterTest {
 
         TrackingWriter(FileSystem fs, Configuration conf, TestRecordSerializer serializer,
                        String instanceId, String basePath, Clock clock) {
-            super(fs, conf, serializer, instanceId, clock, CompressionType.RECORD);
+            super(fs, conf, serializer, instanceId, clock, CompressionType.RECORD, createBindingMap(basePath));
             this.basePath = basePath;
-        }
-
-        @Override
-        protected String getBasePath(String bindingId) {
-            return basePath;
         }
 
         @Override
@@ -429,23 +429,18 @@ class SequenceFileBatchWriterTest {
         List<String> filesInPartitionDuringWrite = new ArrayList<>();
         String partitionPathUsed;
         private final String basePath;
-        private final Clock clock;
+        private final Clock writerClock;
 
         PartitionCheckingWriter(FileSystem fs, Configuration conf, TestRecordSerializer serializer,
                                 String instanceId, String basePath, Clock clock) {
-            super(fs, conf, serializer, instanceId, clock, CompressionType.RECORD);
+            super(fs, conf, serializer, instanceId, clock, CompressionType.RECORD, createBindingMap(basePath));
             this.basePath = basePath;
-            this.clock = clock;
-        }
-
-        @Override
-        protected String getBasePath(String bindingId) {
-            return basePath;
+            this.writerClock = clock;
         }
 
         @Override
         public BatchWriteResult write(String bindingId, List<Message> messages) throws BatchWriteException {
-            partitionPathUsed = PartitionPath.compute(basePath, Instant.now(clock));
+            partitionPathUsed = PartitionPath.compute(basePath, Instant.now(writerClock));
 
             // Check partition before write completes (during our write)
             try {
@@ -467,17 +462,10 @@ class SequenceFileBatchWriterTest {
      * Writer that fails after writing but before rename.
      */
     private class FailingWriter extends SequenceFileBatchWriter {
-        private final String basePath;
 
         FailingWriter(FileSystem fs, Configuration conf, TestRecordSerializer serializer,
                       String instanceId, String basePath, Clock clock) {
-            super(fs, conf, serializer, instanceId, clock, CompressionType.RECORD);
-            this.basePath = basePath;
-        }
-
-        @Override
-        protected String getBasePath(String bindingId) {
-            return basePath;
+            super(fs, conf, serializer, instanceId, clock, CompressionType.RECORD, createBindingMap(basePath));
         }
 
         @Override

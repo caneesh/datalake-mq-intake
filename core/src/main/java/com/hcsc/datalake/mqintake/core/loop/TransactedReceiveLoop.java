@@ -1,8 +1,13 @@
 package com.hcsc.datalake.mqintake.core.loop;
 
+import com.hcsc.datalake.mqintake.core.audit.AuditRecordEmitter;
 import com.hcsc.datalake.mqintake.core.batch.BatchWriter;
 import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.BindingMode;
+import com.hcsc.datalake.mqintake.core.failure.DegradedModeManager;
+import com.hcsc.datalake.mqintake.core.failure.FailureClass;
+import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
+import com.hcsc.datalake.mqintake.core.poison.PoisonMessageHandler;
 import com.hcsc.datalake.mqintake.core.tracker.TrackerMessageBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,7 +41,12 @@ public class TransactedReceiveLoop implements Runnable {
     private final BindingConfig config;
     private final Connection connection;
     private final BatchWriter batchWriter;
-    private final TrackerMessageBuilder trackerMessageBuilder; // null for LAND_ONLY
+    private final TrackerMessageBuilder trackerMessageBuilder;
+    private final PoisonMessageHandler poisonMessageHandler;
+    private final DegradedModeManager degradedModeManager;
+    private final AuditRecordEmitter auditRecordEmitter;
+    private final BindingMetrics metrics;
+    private final String instanceId;
     private final long receiveTimeoutMs;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -46,7 +56,7 @@ public class TransactedReceiveLoop implements Runnable {
 
     private volatile Session session;
     private volatile MessageConsumer consumer;
-    private volatile MessageProducer trackerProducer; // null for LAND_ONLY
+    private volatile MessageProducer trackerProducer;
     private volatile Thread loopThread;
 
     /**
@@ -56,20 +66,34 @@ public class TransactedReceiveLoop implements Runnable {
      * @param connection            shared JMS connection (thread-safe)
      * @param batchWriter           writer for HDFS batches
      * @param trackerMessageBuilder builder for tracker messages (null for LAND_ONLY)
-     * @param receiveTimeoutMs      timeout for receive() calls (for shutdown interruption)
+     * @param poisonMessageHandler  handler for poison messages (null to disable)
+     * @param degradedModeManager   manager for degraded batch mode (null to disable)
+     * @param auditRecordEmitter    emitter for audit records (null to disable)
+     * @param metrics               binding metrics (null to disable)
+     * @param instanceId            instance identifier for audit records
+     * @param receiveTimeoutMs      timeout for receive() calls
      */
     public TransactedReceiveLoop(BindingConfig config,
                                   Connection connection,
                                   BatchWriter batchWriter,
                                   TrackerMessageBuilder trackerMessageBuilder,
+                                  PoisonMessageHandler poisonMessageHandler,
+                                  DegradedModeManager degradedModeManager,
+                                  AuditRecordEmitter auditRecordEmitter,
+                                  BindingMetrics metrics,
+                                  String instanceId,
                                   long receiveTimeoutMs) {
         this.config = config;
         this.connection = connection;
         this.batchWriter = batchWriter;
         this.trackerMessageBuilder = trackerMessageBuilder;
+        this.poisonMessageHandler = poisonMessageHandler;
+        this.degradedModeManager = degradedModeManager;
+        this.auditRecordEmitter = auditRecordEmitter;
+        this.metrics = metrics;
+        this.instanceId = instanceId;
         this.receiveTimeoutMs = receiveTimeoutMs;
 
-        // Validate: TRACKED bindings must have a tracker message builder
         if (config.getMode() == BindingMode.TRACKED && trackerMessageBuilder == null) {
             throw new IllegalArgumentException(
                     "TRACKED binding '" + config.getId() + "' requires a TrackerMessageBuilder");
@@ -99,20 +123,12 @@ public class TransactedReceiveLoop implements Runnable {
         }
     }
 
-    /**
-     * Initializes the JMS session, consumer, and producer (if TRACKED).
-     * All are created from the same session per the design requirement.
-     */
     private void initializeSession() throws JMSException {
-        // Create transacted session: createSession(transacted=true, acknowledgeMode=0)
-        // acknowledgeMode is ignored when transacted=true
         session = connection.createSession(true, Session.SESSION_TRANSACTED);
 
-        // Create consumer for the source queue
         Queue sourceQueue = session.createQueue(config.getSourceQueue());
         consumer = session.createConsumer(sourceQueue);
 
-        // For TRACKED bindings, create producer for the tracker queue ON THE SAME SESSION
         if (config.getMode() == BindingMode.TRACKED) {
             Queue trackerQueue = session.createQueue(config.getTrackerQueue());
             trackerProducer = session.createProducer(trackerQueue);
@@ -124,9 +140,6 @@ public class TransactedReceiveLoop implements Runnable {
                 config.getId(), config.getSourceQueue(), config.getMode());
     }
 
-    /**
-     * Main receive loop. Runs until stop() is called.
-     */
     private void runLoop() {
         FlushTrigger flushTrigger = new FlushTrigger(
                 config.getBatchSize(),
@@ -138,20 +151,19 @@ public class TransactedReceiveLoop implements Runnable {
 
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
-                // Bounded receive with timeout for predictable shutdown
+                int effectiveBatchSize = getEffectiveBatchSize();
                 Message message = consumer.receive(receiveTimeoutMs);
 
                 if (message != null) {
                     batch.add(message);
                     flushTrigger.trackMessage(message);
 
-                    if (flushTrigger.shouldFlush()) {
+                    if (batch.size() >= effectiveBatchSize || flushTrigger.shouldFlush()) {
                         processBatch(batch);
                         batch.clear();
                         flushTrigger.reset();
                     }
                 } else {
-                    // Timeout - check if we should flush a partial batch on time trigger
                     if (!batch.isEmpty() && flushTrigger.isTimeoutExpired()) {
                         processBatch(batch);
                         batch.clear();
@@ -162,6 +174,7 @@ public class TransactedReceiveLoop implements Runnable {
                 if (running.get()) {
                     log.error("JMS error in receive loop for binding '{}': {}",
                             config.getId(), e.getMessage(), e);
+                    handleFailure(e);
                     rollbackQuietly();
                     batch.clear();
                     flushTrigger.reset();
@@ -169,7 +182,6 @@ public class TransactedReceiveLoop implements Runnable {
             }
         }
 
-        // Drain: flush any remaining messages on shutdown
         if (!batch.isEmpty()) {
             log.info("Draining {} messages on shutdown for binding '{}'",
                     batch.size(), config.getId());
@@ -183,57 +195,110 @@ public class TransactedReceiveLoop implements Runnable {
         }
     }
 
-    /**
-     * Processes a batch: write to HDFS, send tracker messages (if TRACKED), commit.
-     * Any failure rolls back the entire batch.
-     */
+    private int getEffectiveBatchSize() {
+        if (degradedModeManager != null) {
+            return degradedModeManager.getCurrentBatchSize();
+        }
+        return config.getBatchSize();
+    }
+
     private void processBatch(List<Message> batch) {
         int batchSize = batch.size();
         log.debug("Processing batch of {} messages for binding '{}'",
                 batchSize, config.getId());
 
+        List<Message> cleanMessages = batch;
         try {
-            // Step 1: Write batch to HDFS (stub for now)
-            batchWriter.write(config.getId(), batch);
+            if (poisonMessageHandler != null) {
+                PoisonMessageHandler.BatchPoisonCheckResult poisonResult =
+                        poisonMessageHandler.checkAndRoutePoisonMessages(session, batch);
 
-            // Step 2: For TRACKED bindings, send tracker messages
-            if (config.getMode() == BindingMode.TRACKED) {
-                sendTrackerMessages(batch);
+                if (poisonResult.hasPoisonMessages()) {
+                    log.warn("Routed {} poison messages to backout queue for binding '{}'",
+                            poisonResult.getPoisonCount(), config.getId());
+                    if (metrics != null) {
+                        for (int i = 0; i < poisonResult.getPoisonCount(); i++) {
+                            metrics.recordPoisonMessageRouted();
+                        }
+                    }
+                }
+
+                cleanMessages = poisonResult.getCleanMessages();
+                if (cleanMessages.isEmpty()) {
+                    session.commit();
+                    commitCount.incrementAndGet();
+                    if (degradedModeManager != null) {
+                        degradedModeManager.recordSuccess();
+                    }
+                    return;
+                }
             }
 
-            // Step 3: Commit the transaction
+            BatchWriter.BatchWriteResult writeResult = batchWriter.write(config.getId(), cleanMessages);
+
+            if (config.getMode() == BindingMode.TRACKED) {
+                sendTrackerMessages(cleanMessages);
+            }
+
             session.commit();
             commitCount.incrementAndGet();
-            messageCount.addAndGet(batchSize);
+            messageCount.addAndGet(cleanMessages.size());
+
+            if (degradedModeManager != null) {
+                degradedModeManager.recordSuccess();
+            }
+
+            if (metrics != null) {
+                metrics.recordCommit();
+                metrics.recordMessagesWritten(cleanMessages.size(), writeResult.getByteCount());
+            }
+
+            emitAuditRecord(cleanMessages, writeResult);
 
             log.debug("Committed batch of {} messages for binding '{}'",
-                    batchSize, config.getId());
+                    cleanMessages.size(), config.getId());
 
         } catch (Exception e) {
-            // ANY failure before commit: roll back the entire batch
             log.error("Batch processing failed for binding '{}', rolling back {} messages: {}",
                     config.getId(), batchSize, e.getMessage(), e);
+            handleFailure(e);
             rollbackQuietly();
+
+            if (metrics != null) {
+                metrics.recordRollback();
+            }
         }
     }
 
-    /**
-     * Sends tracker messages for each source message in the batch.
-     * Uses the same session as the consumer, so all operations are in one transaction.
-     */
+    private void handleFailure(Throwable e) {
+        if (degradedModeManager != null) {
+            FailureClass failureClass = degradedModeManager.recordFailure(e);
+            log.debug("Failure classified as {} for binding '{}'", failureClass, config.getId());
+        }
+    }
+
+    private void emitAuditRecord(List<Message> messages, BatchWriter.BatchWriteResult writeResult) {
+        if (auditRecordEmitter == null) {
+            return;
+        }
+
+        try {
+            auditRecordEmitter.emit(config.getId(), writeResult, messages);
+        } catch (Exception e) {
+            log.warn("Failed to emit audit record for binding '{}': {}",
+                    config.getId(), e.getMessage());
+        }
+    }
+
     private void sendTrackerMessages(List<Message> batch) throws JMSException {
         for (Message sourceMessage : batch) {
             Optional<Message> trackerMessage = trackerMessageBuilder.build(session, sourceMessage);
             if (trackerMessage.isPresent()) {
                 trackerProducer.send(trackerMessage.get());
             }
-            // Empty optional suppresses the send for this message (e.g., null header guard)
         }
     }
 
-    /**
-     * Rolls back the session, swallowing any exception.
-     */
     private void rollbackQuietly() {
         try {
             if (session != null) {
@@ -246,22 +311,19 @@ public class TransactedReceiveLoop implements Runnable {
         }
     }
 
-    /**
-     * Stops the receive loop gracefully.
-     */
     public void stop() {
         log.info("Stopping receive loop for binding '{}'", config.getId());
         running.set(false);
 
-        // Interrupt the thread if it's blocked on receive
         if (loopThread != null) {
             loopThread.interrupt();
         }
     }
 
-    /**
-     * Cleans up JMS resources.
-     */
+    public Session getSession() {
+        return session;
+    }
+
     private void cleanup() {
         running.set(false);
 
