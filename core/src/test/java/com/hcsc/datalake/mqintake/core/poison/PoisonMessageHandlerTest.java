@@ -212,4 +212,23 @@ class PoisonMessageHandlerTest {
 
         assertThat(deliveryCount).isEqualTo(2); // Uses JMSXDeliveryCount, not 11
     }
+
+    @Test
+    void throwsBackoutFailureExceptionWhenRoutingFails() throws Exception {
+        // Use a closed session to force routing failure
+        Session closedSession = connection.createSession(true, Session.SESSION_TRANSACTED);
+        closedSession.close();
+
+        PoisonMessageHandler handler = new PoisonMessageHandler(3, BACKOUT_QUEUE);
+
+        TextMessage poison = session.createTextMessage("Poison");
+        poison.setIntProperty(PoisonMessageHandler.JMSX_DELIVERY_COUNT, 5);
+
+        List<Message> batch = Arrays.asList(poison);
+
+        // Routing to backout on closed session should throw BackoutFailureException
+        assertThatThrownBy(() -> handler.checkAndRoutePoisonMessages(closedSession, batch))
+                .isInstanceOf(PoisonMessageHandler.BackoutFailureException.class)
+                .hasMessageContaining("Failed to route poison message");
+    }
 }

@@ -39,7 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   <li>TrackerMessageBuilder (from module-provided factory, TRACKED only)</li>
  *   <li>BatchWriter (SequenceFileBatchWriter)</li>
  *   <li>PoisonMessageHandler (if backout queue configured)</li>
- *   <li>DegradedModeManager (one per loop)</li>
+ *   <li>DegradedModeManager (one per binding, shared by all loops)</li>
  *   <li>TransactedReceiveLoop (one per listener thread)</li>
  * </ul>
  *
@@ -196,20 +196,23 @@ public class BindingRuntimeFactory {
                                                      BindingMetrics metrics) {
         List<TransactedReceiveLoop> loops = new ArrayList<>();
 
-        for (int i = 0; i < config.getListenerThreads(); i++) {
-            DegradedModeManager degradedModeManager = new DegradedModeManager(
-                    config.getId(),
-                    config.getBatchSize(),
-                    config.getDegradationStrategy(),
-                    config.getSuccessesRequiredToRestore());
+        // CRITICAL: One DegradedModeManager per binding, shared by ALL loops.
+        // When any thread hits a MESSAGE_DATA failure, ALL threads switch to
+        // degraded batch sizes until the binding recovers.
+        DegradedModeManager degradedModeManager = new DegradedModeManager(
+                config.getId(),
+                config.getBatchSize(),
+                config.getDegradationStrategy(),
+                config.getSuccessesRequiredToRestore());
 
+        for (int i = 0; i < config.getListenerThreads(); i++) {
             TransactedReceiveLoop loop = new TransactedReceiveLoop(
                     config,
                     jmsConnection,
                     batchWriter,
                     trackerBuilder,
                     poisonHandler,
-                    degradedModeManager,
+                    degradedModeManager,  // Shared instance
                     auditEmitter,
                     metrics,
                     instanceId,

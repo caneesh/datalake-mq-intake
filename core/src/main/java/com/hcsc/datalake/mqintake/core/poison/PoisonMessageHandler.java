@@ -126,17 +126,29 @@ public class PoisonMessageHandler {
     /**
      * Checks a batch of messages and routes any poison messages to backout.
      *
+     * <p>CRITICAL: If routing to backout queue fails for ANY message, this method
+     * throws {@link BackoutFailureException}. The caller MUST NOT commit when this
+     * happens — the batch must be rolled back so no messages are lost.
+     *
      * @param session  the transacted session
      * @param messages the messages to check
      * @return result containing any poison messages found
+     * @throws BackoutFailureException if routing to backout queue fails
      */
-    public BatchPoisonCheckResult checkAndRoutePoisonMessages(Session session, java.util.List<Message> messages) {
+    public BatchPoisonCheckResult checkAndRoutePoisonMessages(Session session, java.util.List<Message> messages)
+            throws BackoutFailureException {
         java.util.List<BackoutResult> routed = new java.util.ArrayList<>();
         java.util.List<Message> clean = new java.util.ArrayList<>();
 
         for (Message message : messages) {
             if (isPoisonMessage(message)) {
                 BackoutResult result = routeToBackout(session, message);
+                if (!result.isSuccess()) {
+                    // CRITICAL: BOQ failure must cause rollback - message cannot be lost
+                    throw new BackoutFailureException(
+                            "Failed to route poison message to backout queue: " + result.getMessageId(),
+                            result.getError());
+                }
                 routed.add(result);
             } else {
                 clean.add(message);
@@ -144,6 +156,16 @@ public class PoisonMessageHandler {
         }
 
         return new BatchPoisonCheckResult(clean, routed);
+    }
+
+    /**
+     * Thrown when routing a poison message to the backout queue fails.
+     * The caller MUST roll back the transaction when this is thrown.
+     */
+    public static class BackoutFailureException extends Exception {
+        public BackoutFailureException(String message, Throwable cause) {
+            super(message, cause);
+        }
     }
 
     public int getBackoutThreshold() {

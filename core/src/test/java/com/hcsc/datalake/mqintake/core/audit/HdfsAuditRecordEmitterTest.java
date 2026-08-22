@@ -15,6 +15,9 @@ import static org.assertj.core.api.Assertions.*;
 
 /**
  * Tests for HdfsAuditRecordEmitter.
+ *
+ * <p>Audit files are now immutable per-batch:
+ * {auditBasePath}/{bindingId}/{date}/audit_{datafilename}.json
  */
 class HdfsAuditRecordEmitterTest {
 
@@ -40,7 +43,7 @@ class HdfsAuditRecordEmitterTest {
     }
 
     @Test
-    void emitsAuditRecordAsJsonLine() throws Exception {
+    void emitsAuditRecordAsJson() throws Exception {
         AuditRecord record = AuditRecord.builder()
                 .bindingId("rms")
                 .partitionPath("/data/raw/rms/year=2026/month=08/day=22")
@@ -55,8 +58,8 @@ class HdfsAuditRecordEmitterTest {
 
         emitter.emit(record);
 
-        // Read the audit file
-        String auditFile = testBasePath + "/rms/audit_20260822.jsonl";
+        // Audit file is named after the data file
+        String auditFile = testBasePath + "/rms/20260822/audit_rms_inst1_123456_1.json";
         List<String> lines = readLines(auditFile);
 
         assertThat(lines).hasSize(1);
@@ -74,7 +77,7 @@ class HdfsAuditRecordEmitterTest {
     }
 
     @Test
-    void appendsMultipleRecordsToSameFile() throws Exception {
+    void eachBatchGetsItsOwnAuditFile() throws Exception {
         AuditRecord record1 = AuditRecord.builder()
                 .bindingId("rms")
                 .partitionPath("/data")
@@ -98,12 +101,18 @@ class HdfsAuditRecordEmitterTest {
         emitter.emit(record1);
         emitter.emit(record2);
 
-        String auditFile = testBasePath + "/rms/audit_20260822.jsonl";
-        List<String> lines = readLines(auditFile);
+        // Each batch gets its own immutable audit file
+        assertThat(fileSystem.exists(new Path(testBasePath + "/rms/20260822/audit_file1.json"))).isTrue();
+        assertThat(fileSystem.exists(new Path(testBasePath + "/rms/20260822/audit_file2.json"))).isTrue();
 
-        assertThat(lines).hasSize(2);
-        assertThat(lines.get(0)).contains("file1.seq");
-        assertThat(lines.get(1)).contains("file2.seq");
+        // Verify contents
+        List<String> lines1 = readLines(testBasePath + "/rms/20260822/audit_file1.json");
+        List<String> lines2 = readLines(testBasePath + "/rms/20260822/audit_file2.json");
+
+        assertThat(lines1).hasSize(1);
+        assertThat(lines2).hasSize(1);
+        assertThat(lines1.get(0)).contains("file1.seq");
+        assertThat(lines2.get(0)).contains("file2.seq");
     }
 
     @Test
@@ -131,8 +140,8 @@ class HdfsAuditRecordEmitterTest {
         emitter.emit(rmsRecord);
         emitter.emit(claimsRecord);
 
-        assertThat(fileSystem.exists(new Path(testBasePath + "/rms/audit_20260822.jsonl"))).isTrue();
-        assertThat(fileSystem.exists(new Path(testBasePath + "/claims/audit_20260822.jsonl"))).isTrue();
+        assertThat(fileSystem.exists(new Path(testBasePath + "/rms/20260822/audit_rms.json"))).isTrue();
+        assertThat(fileSystem.exists(new Path(testBasePath + "/claims/20260822/audit_claims.json"))).isTrue();
     }
 
     @Test
@@ -160,8 +169,8 @@ class HdfsAuditRecordEmitterTest {
         emitter.emit(day1);
         emitter.emit(day2);
 
-        assertThat(fileSystem.exists(new Path(testBasePath + "/rms/audit_20260822.jsonl"))).isTrue();
-        assertThat(fileSystem.exists(new Path(testBasePath + "/rms/audit_20260823.jsonl"))).isTrue();
+        assertThat(fileSystem.exists(new Path(testBasePath + "/rms/20260822/audit_day1.json"))).isTrue();
+        assertThat(fileSystem.exists(new Path(testBasePath + "/rms/20260823/audit_day2.json"))).isTrue();
     }
 
     @Test
@@ -180,7 +189,7 @@ class HdfsAuditRecordEmitterTest {
 
         emitter.emit(record);
 
-        String auditFile = testBasePath + "/rms/audit_20260822.jsonl";
+        String auditFile = testBasePath + "/rms/20260822/audit_test.json";
         List<String> lines = readLines(auditFile);
 
         assertThat(lines.get(0)).contains("\"first_identity\":null");
@@ -192,7 +201,7 @@ class HdfsAuditRecordEmitterTest {
         AuditRecord record = AuditRecord.builder()
                 .bindingId("rms")
                 .partitionPath("/data/with\"quotes")
-                .filename("file\twith\ttabs.seq")
+                .filename("file_with_tabs.seq")
                 .recordCount(10)
                 .byteCount(1000)
                 .firstIdentity("line\nbreak")
@@ -202,12 +211,11 @@ class HdfsAuditRecordEmitterTest {
 
         emitter.emit(record);
 
-        String auditFile = testBasePath + "/rms/audit_20260822.jsonl";
+        String auditFile = testBasePath + "/rms/20260822/audit_file_with_tabs.json";
         List<String> lines = readLines(auditFile);
 
         // JSON should have escaped special characters
         assertThat(lines.get(0)).contains("\\\"");  // escaped quote
-        assertThat(lines.get(0)).contains("\\t");   // escaped tab
         assertThat(lines.get(0)).contains("\\n");   // escaped newline
     }
 

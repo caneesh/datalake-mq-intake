@@ -16,14 +16,17 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Emits audit records to HDFS as JSON lines.
+ * Emits audit records to HDFS as JSON.
  *
  * <p>From DESIGN.md §12: Audit records are written to an HDFS audit path.
- * The format is one JSON object per line (JSONL), which allows for efficient
- * appending and simple parsing.
+ * Each audit record is written to its own immutable file — no concurrent
+ * appends, no corruption risk.
  *
- * <p>Audit files are organized by binding and date:
- * {auditBasePath}/{bindingId}/audit_{date}.jsonl
+ * <p>Audit files are organized by binding and date with unique batch IDs:
+ * {auditBasePath}/{bindingId}/{date}/audit_{filename}.json
+ *
+ * <p>The filename is derived from the data file being audited, ensuring a
+ * 1:1 correspondence between data files and audit records.
  */
 public class HdfsAuditRecordEmitter implements AuditRecordEmitter {
 
@@ -55,54 +58,42 @@ public class HdfsAuditRecordEmitter implements AuditRecordEmitter {
         // Ensure parent directory exists
         fileSystem.mkdirs(path.getParent());
 
-        // Append to audit file (create if not exists)
-        // Handle filesystems that don't support append by reading existing content
-        byte[] newLine = (json + "\n").getBytes(StandardCharsets.UTF_8);
+        // Write audit record to its own unique, immutable file.
+        // Each batch gets its own file - no concurrent appends, no corruption.
+        byte[] content = (json + "\n").getBytes(StandardCharsets.UTF_8);
 
-        if (fileSystem.exists(path)) {
-            try (FSDataOutputStream out = fileSystem.append(path)) {
-                out.write(newLine);
-                out.hflush();
-            } catch (UnsupportedOperationException e) {
-                // Filesystem doesn't support append - read and rewrite
-                appendByRewrite(path, newLine);
-            }
-        } else {
-            try (FSDataOutputStream out = fileSystem.create(path)) {
-                out.write(newLine);
-                out.hflush();
-            }
+        try (FSDataOutputStream out = fileSystem.create(path, false)) {
+            out.write(content);
+            out.hflush();
         }
 
         log.debug("Emitted audit record for {}/{}", record.getBindingId(), record.getFilename());
     }
 
     /**
-     * Fallback for filesystems that don't support append.
-     */
-    private void appendByRewrite(Path path, byte[] newContent) throws IOException {
-        // Read existing content
-        byte[] existing;
-        try (java.io.InputStream in = fileSystem.open(path)) {
-            existing = in.readAllBytes();
-        }
-
-        // Write back with new content appended
-        try (FSDataOutputStream out = fileSystem.create(path, true)) {
-            out.write(existing);
-            out.write(newContent);
-            out.hflush();
-        }
-    }
-
-    /**
      * Builds the audit file path for a record.
+     *
+     * <p>Each audit record gets its own unique file, named after the data file
+     * it audits. This ensures:
+     * <ul>
+     *   <li>No concurrent writes to the same file</li>
+     *   <li>1:1 correspondence between data files and audit records</li>
+     *   <li>Immutable audit trail</li>
+     * </ul>
      */
     private String buildAuditPath(AuditRecord record) {
         String date = DATE_FORMAT.format(
                 record.getCommitTimestamp().atZone(java.time.ZoneOffset.UTC).toLocalDate());
-        return String.format("%s/%s/audit_%s.jsonl",
-                auditBasePath, record.getBindingId(), date);
+        // Derive audit filename from the data filename (strip extension, add audit prefix)
+        String dataFilename = record.getFilename();
+        String auditFilename = "audit_" + stripExtension(dataFilename) + ".json";
+        return String.format("%s/%s/%s/%s",
+                auditBasePath, record.getBindingId(), date, auditFilename);
+    }
+
+    private String stripExtension(String filename) {
+        int lastDot = filename.lastIndexOf('.');
+        return lastDot > 0 ? filename.substring(0, lastDot) : filename;
     }
 
     /**

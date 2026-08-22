@@ -210,8 +210,15 @@ public class TransactedReceiveLoop implements Runnable {
         List<Message> cleanMessages = batch;
         try {
             if (poisonMessageHandler != null) {
-                PoisonMessageHandler.BatchPoisonCheckResult poisonResult =
-                        poisonMessageHandler.checkAndRoutePoisonMessages(session, batch);
+                PoisonMessageHandler.BatchPoisonCheckResult poisonResult;
+                try {
+                    poisonResult = poisonMessageHandler.checkAndRoutePoisonMessages(session, batch);
+                } catch (PoisonMessageHandler.BackoutFailureException e) {
+                    // CRITICAL: BOQ routing failed - we MUST rollback to avoid losing messages
+                    log.error("Backout queue routing failed for binding '{}', rolling back: {}",
+                            config.getId(), e.getMessage(), e);
+                    throw e; // Re-throw to trigger rollback in outer catch
+                }
 
                 if (poisonResult.hasPoisonMessages()) {
                     log.warn("Routed {} poison messages to backout queue for binding '{}'",
