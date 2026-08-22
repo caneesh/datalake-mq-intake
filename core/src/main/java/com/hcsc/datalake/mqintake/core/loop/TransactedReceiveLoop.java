@@ -6,6 +6,7 @@ import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.BindingMode;
 import com.hcsc.datalake.mqintake.core.failure.DegradedModeManager;
 import com.hcsc.datalake.mqintake.core.failure.FailureClass;
+import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
 import com.hcsc.datalake.mqintake.core.poison.PoisonMessageHandler;
 import com.hcsc.datalake.mqintake.core.tracker.TrackerMessageBuilder;
@@ -53,6 +54,7 @@ public class TransactedReceiveLoop implements Runnable {
     private final TrackerMessageBuilder trackerMessageBuilder;
     private final PoisonMessageHandler poisonMessageHandler;
     private final DegradedModeManager degradedModeManager;
+    private final BindingHealthManager healthManager;
     private final AuditRecordEmitter auditRecordEmitter;
     private final BindingMetrics metrics;
     private final String instanceId;
@@ -79,6 +81,7 @@ public class TransactedReceiveLoop implements Runnable {
      * @param trackerMessageBuilder builder for tracker messages (null for LAND_ONLY)
      * @param poisonMessageHandler  handler for poison messages (null to disable)
      * @param degradedModeManager   manager for degraded batch mode (null to disable)
+     * @param healthManager         health manager for binding health updates (null to disable)
      * @param auditRecordEmitter    emitter for audit records (null to disable)
      * @param metrics               binding metrics (null to disable)
      * @param instanceId            instance identifier for audit records
@@ -90,6 +93,7 @@ public class TransactedReceiveLoop implements Runnable {
                                   TrackerMessageBuilder trackerMessageBuilder,
                                   PoisonMessageHandler poisonMessageHandler,
                                   DegradedModeManager degradedModeManager,
+                                  BindingHealthManager healthManager,
                                   AuditRecordEmitter auditRecordEmitter,
                                   BindingMetrics metrics,
                                   String instanceId,
@@ -100,6 +104,7 @@ public class TransactedReceiveLoop implements Runnable {
         this.trackerMessageBuilder = trackerMessageBuilder;
         this.poisonMessageHandler = poisonMessageHandler;
         this.degradedModeManager = degradedModeManager;
+        this.healthManager = healthManager;
         this.auditRecordEmitter = auditRecordEmitter;
         this.metrics = metrics;
         this.instanceId = instanceId;
@@ -255,9 +260,7 @@ public class TransactedReceiveLoop implements Runnable {
                 if (cleanMessages.isEmpty()) {
                     session.commit();
                     commitCount.incrementAndGet();
-                    if (degradedModeManager != null) {
-                        degradedModeManager.recordSuccess();
-                    }
+                    handleSuccess();
                     return;
                 }
             }
@@ -272,9 +275,7 @@ public class TransactedReceiveLoop implements Runnable {
             commitCount.incrementAndGet();
             messageCount.addAndGet(cleanMessages.size());
 
-            if (degradedModeManager != null) {
-                degradedModeManager.recordSuccess();
-            }
+            handleSuccess();
 
             if (metrics != null) {
                 metrics.recordCommit();
@@ -300,8 +301,33 @@ public class TransactedReceiveLoop implements Runnable {
 
     private void handleFailure(Throwable e) {
         if (degradedModeManager != null) {
+            boolean wasDegraded = degradedModeManager.isInDegradedMode();
             FailureClass failureClass = degradedModeManager.recordFailure(e);
             log.debug("Failure classified as {} for binding '{}'", failureClass, config.getId());
+
+            // Update health if we just entered degraded mode
+            if (!wasDegraded && degradedModeManager.isInDegradedMode() && healthManager != null) {
+                healthManager.recordDegraded(config.getId(),
+                        "Entered degraded mode due to " + failureClass + " failure");
+                if (metrics != null) {
+                    metrics.recordDegradedModeEntry();
+                }
+            }
+        }
+    }
+
+    private void handleSuccess() {
+        if (degradedModeManager != null) {
+            boolean wasDegraded = degradedModeManager.isInDegradedMode();
+            degradedModeManager.recordSuccess();
+
+            // Update health if we just exited degraded mode
+            if (wasDegraded && !degradedModeManager.isInDegradedMode() && healthManager != null) {
+                healthManager.recordHealthy(config.getId());
+                if (metrics != null) {
+                    metrics.recordDegradedModeExit();
+                }
+            }
         }
     }
 
@@ -443,11 +469,24 @@ public class TransactedReceiveLoop implements Runnable {
         if (attempts > MAX_RECONNECT_ATTEMPTS) {
             log.error("Max reconnect attempts ({}) exceeded for binding '{}'",
                     MAX_RECONNECT_ATTEMPTS, config.getId());
+            if (healthManager != null) {
+                healthManager.recordUnhealthy(config.getId(),
+                        new RuntimeException("Max reconnect attempts exceeded"));
+            }
+            if (metrics != null) {
+                metrics.recordReconnectFailure();
+            }
             return false;
         }
 
         log.warn("Attempting session recovery for binding '{}' (attempt {}/{})",
                 config.getId(), attempts, MAX_RECONNECT_ATTEMPTS);
+
+        // Update health to RECOVERING
+        if (healthManager != null) {
+            healthManager.recordRecovering(config.getId(),
+                    String.format("Session reconnect attempt %d/%d", attempts, MAX_RECONNECT_ATTEMPTS));
+        }
 
         // Close existing resources
         closeSessionResources();
@@ -481,6 +520,11 @@ public class TransactedReceiveLoop implements Runnable {
 
             if (metrics != null) {
                 metrics.recordReconnect();
+            }
+
+            // Restore health to HEALTHY after successful recovery
+            if (healthManager != null) {
+                healthManager.recordHealthy(config.getId());
             }
 
             return true;

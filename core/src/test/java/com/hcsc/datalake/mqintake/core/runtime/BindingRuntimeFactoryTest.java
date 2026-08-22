@@ -195,7 +195,7 @@ class BindingRuntimeFactoryTest {
         return new BindingRuntimeFactory(
                 fileSystem, hadoopConf, mqConnectionManager,
                 serializerFactory, trackerFactory,
-                metricsRegistry, null,
+                metricsRegistry, null, null,
                 "test-instance");
     }
 

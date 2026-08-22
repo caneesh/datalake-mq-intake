@@ -7,6 +7,7 @@ import com.hcsc.datalake.mqintake.core.config.BindingMode;
 import com.hcsc.datalake.mqintake.core.config.MqConnectionConfig;
 import com.hcsc.datalake.mqintake.core.failure.DegradedModeManager;
 import com.hcsc.datalake.mqintake.core.hdfs.SequenceFileBatchWriter;
+import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.loop.TransactedReceiveLoop;
 import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
 import com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry;
@@ -57,6 +58,7 @@ public class BindingRuntimeFactory {
     private final RecordSerializerFactory serializerFactory;
     private final TrackerMessageBuilderFactory trackerBuilderFactory;
     private final MetricsRegistry metricsRegistry;
+    private final BindingHealthManager healthManager;
     private final AuditRecordEmitter auditEmitter;
     private final String instanceId;
 
@@ -66,6 +68,7 @@ public class BindingRuntimeFactory {
                                   RecordSerializerFactory serializerFactory,
                                   TrackerMessageBuilderFactory trackerBuilderFactory,
                                   MetricsRegistry metricsRegistry,
+                                  BindingHealthManager healthManager,
                                   AuditRecordEmitter auditEmitter,
                                   String instanceId) {
         this.fileSystem = Objects.requireNonNull(fileSystem, "fileSystem required");
@@ -74,6 +77,7 @@ public class BindingRuntimeFactory {
         this.serializerFactory = Objects.requireNonNull(serializerFactory, "serializerFactory required");
         this.trackerBuilderFactory = trackerBuilderFactory; // May be null for LAND_ONLY modules
         this.metricsRegistry = Objects.requireNonNull(metricsRegistry, "metricsRegistry required");
+        this.healthManager = healthManager; // May be null for tests
         this.auditEmitter = auditEmitter; // May be null
         this.instanceId = Objects.requireNonNull(instanceId, "instanceId required");
     }
@@ -213,6 +217,7 @@ public class BindingRuntimeFactory {
                     trackerBuilder,
                     poisonHandler,
                     degradedModeManager,  // Shared instance
+                    healthManager,
                     auditEmitter,
                     metrics,
                     instanceId,

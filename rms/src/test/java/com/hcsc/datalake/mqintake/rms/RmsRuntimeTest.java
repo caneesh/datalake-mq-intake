@@ -87,7 +87,7 @@ class RmsRuntimeTest {
         BindingRuntimeFactory factory = new BindingRuntimeFactory(
                 fileSystem, hadoopConf, mqConnectionManager,
                 serializerFactory, trackerFactory,
-                metricsRegistry, null,
+                metricsRegistry, null, null,
                 "rms-instance");
 
         BindingConfig config = createRmsBindingConfig();
@@ -151,7 +151,7 @@ class RmsRuntimeTest {
                 fileSystem, hadoopConf, mqConnectionManager,
                 rmsConfig.recordSerializerFactory(),
                 rmsConfig.trackerMessageBuilderFactory(),
-                new MetricsRegistry(), null,
+                new MetricsRegistry(), null, null,
                 "rms-instance");
 
         BindingConfig config = createRmsBindingConfig();

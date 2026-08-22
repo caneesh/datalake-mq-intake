@@ -74,7 +74,7 @@ class TransactedReceiveLoopTest {
 
         // When: run the loop until batch is committed
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForCommits(loop, 1, 2000);
@@ -101,7 +101,7 @@ class TransactedReceiveLoopTest {
 
         // When: run the loop (batch will fail)
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForRollbacks(loop, 1, 2000);
@@ -125,7 +125,7 @@ class TransactedReceiveLoopTest {
 
         // When: run with null tracker message builder (valid for LAND_ONLY)
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForCommits(loop, 1, 2000);
@@ -151,7 +151,7 @@ class TransactedReceiveLoopTest {
 
         // When: run the loop
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, builder, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, builder, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForCommits(loop, 1, 2000);
@@ -180,7 +180,7 @@ class TransactedReceiveLoopTest {
 
         // When: run the loop
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, failingBuilder, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, failingBuilder, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForRollbacks(loop, 1, 2000);
@@ -202,7 +202,7 @@ class TransactedReceiveLoopTest {
         BindingConfig config = createTrackedConfig(5);
 
         assertThatThrownBy(() -> new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS))
+                config, connection, batchWriter, null, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("TrackerMessageBuilder");
     }
@@ -215,7 +215,7 @@ class TransactedReceiveLoopTest {
 
         // When: run until all messages processed
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForMessages(loop, 9, 5000);
@@ -235,7 +235,7 @@ class TransactedReceiveLoopTest {
 
         // When: run briefly with no messages
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         Thread.sleep(300); // Wait a few receive timeouts
@@ -257,7 +257,7 @@ class TransactedReceiveLoopTest {
 
         // When: run until both batches complete
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForMessages(loop, 10, 5000);
@@ -280,7 +280,7 @@ class TransactedReceiveLoopTest {
 
         // When: run briefly and stop
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         // Wait for time trigger to flush the partial batch
@@ -311,7 +311,7 @@ class TransactedReceiveLoopTest {
 
         // When: run the loop
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, selectiveBuilder, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, selectiveBuilder, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForCommits(loop, 1, 2000);
@@ -419,7 +419,7 @@ class TransactedReceiveLoopTest {
         batchWriter.setFailOnNextWrite(true, new RecordSerializer.SerializationException("Bad data"));
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, degradedModeManager, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, degradedModeManager, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForRollbacks(loop, 1, 2000);
@@ -441,7 +441,7 @@ class TransactedReceiveLoopTest {
         batchWriter.setFailOnNextWrite(true, new java.io.IOException("HDFS unavailable"));
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, degradedModeManager, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, degradedModeManager, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForRollbacks(loop, 1, 2000);
@@ -463,7 +463,7 @@ class TransactedReceiveLoopTest {
         batchWriter.setFailOnNextWrite(true, new RuntimeException("Unknown error"));
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, degradedModeManager, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, degradedModeManager, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForRollbacks(loop, 1, 2000);
@@ -488,7 +488,7 @@ class TransactedReceiveLoopTest {
         };
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, mockEmitter, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null, mockEmitter, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForCommits(loop, 1, 2000);
@@ -512,7 +512,7 @@ class TransactedReceiveLoopTest {
         };
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, failingEmitter, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null, failingEmitter, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForCommits(loop, 1, 2000);
@@ -539,7 +539,7 @@ class TransactedReceiveLoopTest {
         BindingMetrics metrics = new BindingMetrics("test-binding");
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, metrics, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null, null, metrics, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForCommits(loop, 1, 2000);
@@ -559,7 +559,7 @@ class TransactedReceiveLoopTest {
         batchWriter.setFailOnNextWrite(true, "HDFS failure");
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, metrics, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null, null, metrics, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForRollbacks(loop, 1, 2000);
@@ -578,7 +578,7 @@ class TransactedReceiveLoopTest {
         sendMessages(3);
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForCommits(loop, 1, 2000);
@@ -596,7 +596,7 @@ class TransactedReceiveLoopTest {
         // Don't send messages - loop will just wait on receive()
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
 
@@ -619,7 +619,7 @@ class TransactedReceiveLoopTest {
         BindingMetrics metrics = new BindingMetrics("test-binding");
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, metrics, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null, null, metrics, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForCommits(loop, 1, 2000);

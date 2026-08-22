@@ -219,7 +219,7 @@ class BindingRuntimeTest {
         for (int i = 0; i < count; i++) {
             TransactedReceiveLoop loop = new TransactedReceiveLoop(
                     config, connection, batchWriter, trackerBuilder,
-                    null, null, null, null, "test-instance", 100);
+                    null, null, null, null, null, "test-instance", 100);
             loops.add(loop);
         }
         return loops;

@@ -166,6 +166,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
                 serializerFactory,
                 trackerBuilderFactory,
                 metricsRegistry,
+                healthManager,
                 auditEmitter,
                 properties.getInstanceId());
     }

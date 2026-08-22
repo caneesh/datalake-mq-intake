@@ -74,6 +74,21 @@ public class BindingHealthManager {
     }
 
     /**
+     * Records that a binding is recovering (e.g., reconnecting to MQ).
+     *
+     * @param bindingId the binding identifier
+     * @param reason    reason for recovery (e.g., "session reconnect attempt 2/10")
+     */
+    public void recordRecovering(String bindingId, String reason) {
+        BindingHealth health = getOrCreateHealth(bindingId);
+        if (health.status != HealthStatus.RECOVERING) {
+            log.warn("Binding '{}' entered RECOVERING state: {}", bindingId, reason);
+        }
+        health.status = HealthStatus.RECOVERING;
+        health.degradedReason = reason;
+    }
+
+    /**
      * Marks a binding as stopped (normal shutdown).
      *
      * @param bindingId the binding identifier
@@ -155,6 +170,8 @@ public class BindingHealthManager {
         HEALTHY,
         /** Binding is in degraded mode (batch-of-one or bisecting) */
         DEGRADED,
+        /** Binding is recovering from a failure (reconnecting to MQ) */
+        RECOVERING,
         /** Binding has failed and is not processing messages */
         UNHEALTHY,
         /** Binding has been stopped (normal shutdown) */

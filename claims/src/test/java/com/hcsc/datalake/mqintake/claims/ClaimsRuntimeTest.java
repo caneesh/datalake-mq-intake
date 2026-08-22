@@ -83,7 +83,7 @@ class ClaimsRuntimeTest {
         BindingRuntimeFactory factory = new BindingRuntimeFactory(
                 fileSystem, hadoopConf, mqConnectionManager,
                 serializerFactory, null, // No tracker factory for LAND_ONLY
-                metricsRegistry, null,
+                metricsRegistry, null, null,
                 "claims-instance");
 
         BindingConfig config = createClaimsBindingConfig();
@@ -116,7 +116,7 @@ class ClaimsRuntimeTest {
                 fileSystem, hadoopConf, mqConnectionManager,
                 claimsConfig.recordSerializerFactory(),
                 null, // Explicitly no tracker factory
-                new MetricsRegistry(), null,
+                new MetricsRegistry(), null, null,
                 "claims-instance");
 
         BindingConfig config = createClaimsBindingConfig();
@@ -135,7 +135,7 @@ class ClaimsRuntimeTest {
                 fileSystem, hadoopConf, mqConnectionManager,
                 claimsConfig.recordSerializerFactory(),
                 null,
-                new MetricsRegistry(), null,
+                new MetricsRegistry(), null, null,
                 "claims-instance");
 
         BindingConfig config = createClaimsBindingConfig();
@@ -157,7 +157,7 @@ class ClaimsRuntimeTest {
                 fileSystem, hadoopConf, mqConnectionManager,
                 claimsConfig.recordSerializerFactory(),
                 null,
-                new MetricsRegistry(), null,
+                new MetricsRegistry(), null, null,
                 "claims-instance");
 
         BindingConfig config = createClaimsBindingConfig();
