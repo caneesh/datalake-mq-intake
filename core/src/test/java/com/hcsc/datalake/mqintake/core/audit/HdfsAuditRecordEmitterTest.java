@@ -1,0 +1,225 @@
+package com.hcsc.datalake.mqintake.core.audit;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.junit.jupiter.api.*;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.*;
+
+/**
+ * Tests for HdfsAuditRecordEmitter.
+ */
+class HdfsAuditRecordEmitterTest {
+
+    private FileSystem fileSystem;
+    private String testBasePath;
+    private HdfsAuditRecordEmitter emitter;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        Configuration conf = new Configuration();
+        conf.set("fs.defaultFS", "file:///");
+        fileSystem = FileSystem.get(conf);
+
+        testBasePath = "/tmp/audit-test-" + System.currentTimeMillis();
+        emitter = new HdfsAuditRecordEmitter(fileSystem, testBasePath);
+    }
+
+    @AfterEach
+    void tearDown() throws Exception {
+        if (fileSystem != null && testBasePath != null) {
+            fileSystem.delete(new Path(testBasePath), true);
+        }
+    }
+
+    @Test
+    void emitsAuditRecordAsJsonLine() throws Exception {
+        AuditRecord record = AuditRecord.builder()
+                .bindingId("rms")
+                .partitionPath("/data/raw/rms/year=2026/month=08/day=22")
+                .filename("rms_inst1_123456_1.seq")
+                .recordCount(100)
+                .byteCount(50000)
+                .firstIdentity("guid-first")
+                .lastIdentity("guid-last")
+                .instanceId("inst1")
+                .commitTimestamp(Instant.parse("2026-08-22T10:30:00Z"))
+                .build();
+
+        emitter.emit(record);
+
+        // Read the audit file
+        String auditFile = testBasePath + "/rms/audit_20260822.jsonl";
+        List<String> lines = readLines(auditFile);
+
+        assertThat(lines).hasSize(1);
+
+        String json = lines.get(0);
+        assertThat(json).contains("\"binding_id\":\"rms\"");
+        assertThat(json).contains("\"partition_path\":\"/data/raw/rms/year=2026/month=08/day=22\"");
+        assertThat(json).contains("\"filename\":\"rms_inst1_123456_1.seq\"");
+        assertThat(json).contains("\"record_count\":100");
+        assertThat(json).contains("\"byte_count\":50000");
+        assertThat(json).contains("\"first_identity\":\"guid-first\"");
+        assertThat(json).contains("\"last_identity\":\"guid-last\"");
+        assertThat(json).contains("\"instance_id\":\"inst1\"");
+        assertThat(json).contains("\"commit_timestamp\":\"2026-08-22T10:30:00Z\"");
+    }
+
+    @Test
+    void appendsMultipleRecordsToSameFile() throws Exception {
+        AuditRecord record1 = AuditRecord.builder()
+                .bindingId("rms")
+                .partitionPath("/data")
+                .filename("file1.seq")
+                .recordCount(10)
+                .byteCount(1000)
+                .instanceId("inst1")
+                .commitTimestamp(Instant.parse("2026-08-22T10:00:00Z"))
+                .build();
+
+        AuditRecord record2 = AuditRecord.builder()
+                .bindingId("rms")
+                .partitionPath("/data")
+                .filename("file2.seq")
+                .recordCount(20)
+                .byteCount(2000)
+                .instanceId("inst1")
+                .commitTimestamp(Instant.parse("2026-08-22T10:15:00Z"))
+                .build();
+
+        emitter.emit(record1);
+        emitter.emit(record2);
+
+        String auditFile = testBasePath + "/rms/audit_20260822.jsonl";
+        List<String> lines = readLines(auditFile);
+
+        assertThat(lines).hasSize(2);
+        assertThat(lines.get(0)).contains("file1.seq");
+        assertThat(lines.get(1)).contains("file2.seq");
+    }
+
+    @Test
+    void separatesFilesByBindingId() throws Exception {
+        AuditRecord rmsRecord = AuditRecord.builder()
+                .bindingId("rms")
+                .partitionPath("/data")
+                .filename("rms.seq")
+                .recordCount(10)
+                .byteCount(1000)
+                .instanceId("inst1")
+                .commitTimestamp(Instant.parse("2026-08-22T10:00:00Z"))
+                .build();
+
+        AuditRecord claimsRecord = AuditRecord.builder()
+                .bindingId("claims")
+                .partitionPath("/data")
+                .filename("claims.seq")
+                .recordCount(20)
+                .byteCount(2000)
+                .instanceId("inst1")
+                .commitTimestamp(Instant.parse("2026-08-22T10:00:00Z"))
+                .build();
+
+        emitter.emit(rmsRecord);
+        emitter.emit(claimsRecord);
+
+        assertThat(fileSystem.exists(new Path(testBasePath + "/rms/audit_20260822.jsonl"))).isTrue();
+        assertThat(fileSystem.exists(new Path(testBasePath + "/claims/audit_20260822.jsonl"))).isTrue();
+    }
+
+    @Test
+    void separatesFilesByDate() throws Exception {
+        AuditRecord day1 = AuditRecord.builder()
+                .bindingId("rms")
+                .partitionPath("/data")
+                .filename("day1.seq")
+                .recordCount(10)
+                .byteCount(1000)
+                .instanceId("inst1")
+                .commitTimestamp(Instant.parse("2026-08-22T23:59:00Z"))
+                .build();
+
+        AuditRecord day2 = AuditRecord.builder()
+                .bindingId("rms")
+                .partitionPath("/data")
+                .filename("day2.seq")
+                .recordCount(20)
+                .byteCount(2000)
+                .instanceId("inst1")
+                .commitTimestamp(Instant.parse("2026-08-23T00:01:00Z"))
+                .build();
+
+        emitter.emit(day1);
+        emitter.emit(day2);
+
+        assertThat(fileSystem.exists(new Path(testBasePath + "/rms/audit_20260822.jsonl"))).isTrue();
+        assertThat(fileSystem.exists(new Path(testBasePath + "/rms/audit_20260823.jsonl"))).isTrue();
+    }
+
+    @Test
+    void handlesNullIdentityValues() throws Exception {
+        AuditRecord record = AuditRecord.builder()
+                .bindingId("rms")
+                .partitionPath("/data")
+                .filename("test.seq")
+                .recordCount(10)
+                .byteCount(1000)
+                .firstIdentity(null)
+                .lastIdentity(null)
+                .instanceId("inst1")
+                .commitTimestamp(Instant.parse("2026-08-22T10:00:00Z"))
+                .build();
+
+        emitter.emit(record);
+
+        String auditFile = testBasePath + "/rms/audit_20260822.jsonl";
+        List<String> lines = readLines(auditFile);
+
+        assertThat(lines.get(0)).contains("\"first_identity\":null");
+        assertThat(lines.get(0)).contains("\"last_identity\":null");
+    }
+
+    @Test
+    void escapesSpecialCharactersInJson() throws Exception {
+        AuditRecord record = AuditRecord.builder()
+                .bindingId("rms")
+                .partitionPath("/data/with\"quotes")
+                .filename("file\twith\ttabs.seq")
+                .recordCount(10)
+                .byteCount(1000)
+                .firstIdentity("line\nbreak")
+                .instanceId("inst1")
+                .commitTimestamp(Instant.parse("2026-08-22T10:00:00Z"))
+                .build();
+
+        emitter.emit(record);
+
+        String auditFile = testBasePath + "/rms/audit_20260822.jsonl";
+        List<String> lines = readLines(auditFile);
+
+        // JSON should have escaped special characters
+        assertThat(lines.get(0)).contains("\\\"");  // escaped quote
+        assertThat(lines.get(0)).contains("\\t");   // escaped tab
+        assertThat(lines.get(0)).contains("\\n");   // escaped newline
+    }
+
+    private List<String> readLines(String path) throws Exception {
+        List<String> lines = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(fileSystem.open(new Path(path))))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                lines.add(line);
+            }
+        }
+        return lines;
+    }
+}
