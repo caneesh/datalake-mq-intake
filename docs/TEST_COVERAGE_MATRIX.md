@@ -15,9 +15,11 @@ Legend: **PP** = production-path integration test, **U** = unit/component test.
 | 4 | Failure after MQ commit, before audit | `TransactedReceiveLoopTest` | `auditFailureDoesNotUndoCommittedTransaction` | U | yes | PASS | Commit survives audit outage; crash window closed retrospectively by `PartitionReconciliationServiceTest.soleCopyOrphanIsKeptAndRetrospectivelyAudited`. |
 | 5 | Failure between RMS tracker send and commit | `TransactedReceiveLoopTest` | `trackerFailureRollsBackEntireBatch` | U | yes | PASS | Tracker messages and gets roll back as one unit. |
 | 6 | Tracker queue failure | `ProductionPathIntegrationTest` | `trackerFailureAfterRenameYieldsPermittedDuplicateNotLoss` | PP | yes | PASS | Tracker outage → rollback → recovery → exactly one tracker per committed message. |
-| 7 | Deterministic bad payload | `ClaimsBisectionIntegrationTest` | `batchOf16WithOnePoisonIsolatesItWithoutOneByOneProcessing`, `multiplePoisonMessagesAreAllIsolatedSafely` | PP | yes | PASS | Suspect-tracked bisection; only true poison reaches BOQ; < N transactions. |
+| 7 | Deterministic bad payload | `ClaimsBisectionIntegrationTest`; `IbmMqFailureIntegrationTest` | `batchOf16WithOnePoisonIsolatesItWithoutOneByOneProcessing`, `multiplePoisonMessagesAreAllIsolatedSafely`; `poisonIsolatedToBackoutQueueOnRealMq` | PP | yes | PASS | Suspect-tracked bisection; only true poison reaches BOQ; < N transactions. Also proven against a real queue manager with real redelivery driving the bisection. |
 | 8 | HDFS infrastructure failure | `TransactedReceiveLoopTest` | `infrastructureExceptionDoesNotEnterDegradedMode` | U | partial | PASS/BLOCKED | Classification + rollback automated. True HDFS outage/failover needs a real cluster (see below). |
-| 9 | MQ reconnect / session recovery | `TransactedReceiveLoopTest` | `sessionRecoveryExposesReconnectCount`, `reconnectMetricsRecorded` | U | partial | PASS/BLOCKED | Recovery state machine unit-tested; forcing a broker restart needs real IBM MQ (Docker profile: `IbmMqIntegrationTest`). |
+| 9 | MQ reconnect / session recovery | `IbmMqFailureIntegrationTest`; `TransactedReceiveLoopTest` | `sessionRecoveryAfterRealChannelOutage`; `sessionRecoveryExposesReconnectCount` | PP | yes | PASS | Real channel outage (`STOP CHANNEL ... MODE(FORCE)`) breaks a live loop; `MQRC_CONNECTION_BROKEN` detected, Session+Consumer rebuilt from the same Connection, processing resumes, health returns HEALTHY. Full **queue-manager restart** remains untested — see below. |
+| — | Real MQ delivery-count accumulation | `IbmMqFailureIntegrationTest` | `deliveryCountAccumulatesAcrossRollbacksOnRealMq` | PP | yes | PASS | The queue manager increments `JMSXDeliveryCount` 1→4 across rollbacks; `PoisonMessageHandler` reads it. Unit tests could only assert the property name. |
+| — | Real MQ redelivery identity stability | `IbmMqFailureIntegrationTest` | `messageIdIsStableAcrossRedeliveryOnRealMq` | PP | yes | PASS | `JMSMessageID` unchanged across redelivery — the premise the bisection suspect coordinator relies on. |
 | 10 | Graceful shutdown with in-flight batch | `ProductionPathIntegrationTest` | `gracefulShutdownWithInFlightBatchLosesNothing` | PP | yes | PASS | Bounded drain; no force-rename of uncommittable batch. |
 | 11 | Claims poison isolation / bisection | `ClaimsBisectionIntegrationTest` | all | PP | yes | PASS | Includes BOTHRESH/BISECT interplay validator rule (`BindingConfigValidator`). |
 | 12 | Multiple listeners, redelivery to different thread | `ProductionPathIntegrationTest` + `ClaimsBisectionIntegrationTest` | `multipleListenersRedeliveryLandsAllMessages`; 2-listener bisection | PP | yes | PASS | Identity set proves zero loss across threads. |
@@ -31,14 +33,34 @@ Legend: **PP** = production-path integration test, **U** = unit/component test.
 These cannot be proven with embedded substitutes and remain required before
 production cutover:
 
-1. **IBM MQ queue-manager restart / channel failure** mid-stream — session
-   recovery against real MQRC codes, uncommitted batch replay, BOTHRESH
-   accumulation by the real queue manager.
+1. **IBM MQ queue-manager restart** mid-stream (`endmqm`/`strmqm`) — a
+   stronger event than the channel outage now covered. Uncommitted batch
+   replay while the QM is fully down. Residual risk: recovery reuses the
+   injected `Connection`, which survives a channel bounce but is unproven
+   across a QM restart; if it does not survive, `MqConnectionManager` must
+   hand the loop a fresh Connection.
 2. **HDFS NameNode failover / DataNode loss** during write, close, and rename —
    including behavior on erasure-coded paths.
 3. **Kerberos ticket expiry and renewal** under load (KerberosManager relogin).
-4. **Real BOTHRESH/BOQNAME queue-manager configuration** matching the
-   application's backout thresholds.
+4. **BOTHRESH at production batch sizes** — the Docker drill runs at batch 8 /
+   threshold 4; claims production is batch 8000 / threshold 14.
 5. **Tracker consumer compatibility** — golden-master verification of the
    rewritten MessageHeaderDetails against the legacy system (blocked on §20.4
    artifacts; RMS production startup is gated until then).
+
+## Running the real-MQ tests
+
+`IbmMqIntegrationTest` and `IbmMqFailureIntegrationTest` are skipped unless
+`MQ_USER` is set, so a green build does **not** imply they ran. Confirm the
+run reports `Skipped: 0`:
+
+```bash
+docker-compose up -d ibm-mq
+MQ_USER=app MQ_PASSWORD=passw0rd mvn test
+```
+
+`sessionRecoveryAfterRealChannelOutage` additionally needs the `docker` CLI
+and the `mq-intake-ibmmq` container, since it stops and restarts the channel;
+it self-skips otherwise. It restarts the channel in a `finally` block with an
+`@AfterEach` safety net — without that, a failing assertion would leave the
+channel stopped and silently degrade every later MQ test to "skipped".
