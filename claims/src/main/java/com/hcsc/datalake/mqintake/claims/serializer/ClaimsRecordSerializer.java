@@ -56,28 +56,43 @@ public class ClaimsRecordSerializer implements RecordSerializer, PlaceholderSeri
     }
 
     private final ClaimsIdentityExtractor identityExtractor;
+    private final boolean failOnMissingIdentity;
 
     /**
-     * Creates a serializer with the default identity extractor.
+     * Creates a serializer for TEST/DEV use with the non-production fixture
+     * extractor. Missing identity is tolerated (null in the key).
      *
-     * <p>The default tries CLM_XMITSN_ID first, then REC_CTL_NBR.
-     * This is a placeholder until open item #17 is resolved.
+     * <p><strong>Not for production.</strong> Production wiring must use
+     * {@link #ClaimsRecordSerializer(ClaimsIdentityExtractor, boolean)} with an
+     * explicitly configured extractor and {@code failOnMissingIdentity=true}.
      */
     public ClaimsRecordSerializer() {
-        this(ClaimsIdentityExtractor.defaultExtractor());
+        this(ClaimsIdentityExtractor.nonProductionFixture(), false);
     }
 
     /**
      * Creates a serializer with a custom identity extractor.
      *
-     * <p>Use this when open item #17 is resolved and the correct
-     * identity field is known.
-     *
      * @param identityExtractor the strategy for extracting identity
      */
     public ClaimsRecordSerializer(ClaimsIdentityExtractor identityExtractor) {
+        this(identityExtractor, false);
+    }
+
+    /**
+     * Creates a serializer with a custom identity extractor and identity policy.
+     *
+     * @param identityExtractor     the strategy for extracting identity
+     * @param failOnMissingIdentity when true, a payload whose identity field is
+     *                              missing or blank fails serialization (and the
+     *                              batch rolls back) instead of landing with a
+     *                              null identity. Required for reconciliation.
+     */
+    public ClaimsRecordSerializer(ClaimsIdentityExtractor identityExtractor,
+                                  boolean failOnMissingIdentity) {
         this.identityExtractor = Objects.requireNonNull(identityExtractor,
                 "identityExtractor required");
+        this.failOnMissingIdentity = failOnMissingIdentity;
     }
 
     @Override
@@ -88,6 +103,14 @@ public class ClaimsRecordSerializer implements RecordSerializer, PlaceholderSeri
             String payload = extractPayload(message);
 
             String payloadIdentity = identityExtractor.extractIdentity(payload);
+            if (payloadIdentity != null && payloadIdentity.isBlank()) {
+                payloadIdentity = null;
+            }
+            if (payloadIdentity == null && failOnMissingIdentity) {
+                throw new SerializationException(
+                        "Claims identity field missing or blank in payload — " +
+                        "identity is required for reconciliation (open item #17)");
+            }
 
             String keyData = buildMetadataKey(metadata, payloadIdentity);
             Text key = new Text(keyData);

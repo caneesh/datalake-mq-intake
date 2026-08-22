@@ -102,8 +102,8 @@ class ClaimsIdentityExtractorTest {
     // --- defaultExtractor ---
 
     @Test
-    void defaultExtractor_triesClmXmitsnIdFirst() {
-        ClaimsIdentityExtractor extractor = ClaimsIdentityExtractor.defaultExtractor();
+    void nonProductionFixture_triesClmXmitsnIdFirst() {
+        ClaimsIdentityExtractor extractor = ClaimsIdentityExtractor.nonProductionFixture();
 
         String payload = "<Claim><CLM_XMITSN_ID>default-test-1</CLM_XMITSN_ID></Claim>";
 
@@ -111,8 +111,8 @@ class ClaimsIdentityExtractorTest {
     }
 
     @Test
-    void defaultExtractor_fallsBackToRecCtlNbr() {
-        ClaimsIdentityExtractor extractor = ClaimsIdentityExtractor.defaultExtractor();
+    void nonProductionFixture_fallsBackToRecCtlNbr() {
+        ClaimsIdentityExtractor extractor = ClaimsIdentityExtractor.nonProductionFixture();
 
         String payload = "<Claim><REC_CTL_NBR>fallback-ctl</REC_CTL_NBR></Claim>";
 

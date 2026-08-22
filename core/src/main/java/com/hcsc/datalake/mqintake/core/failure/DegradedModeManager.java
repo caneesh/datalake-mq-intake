@@ -16,8 +16,30 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <ul>
  *   <li>Only MESSAGE_DATA failures trigger degraded mode</li>
  *   <li>UNKNOWN failures NEVER trigger degraded mode</li>
- *   <li>Restore normal batch size after M consecutive successes</li>
+ *   <li>Restore normal batch size after M consecutive successes AND once no
+ *       suspect messages remain unresolved</li>
  * </ul>
+ *
+ * <p><strong>Suspect isolation (bisection coordinator):</strong> Classic
+ * in-memory bisection of a failed batch is unsafe under MQ, because after
+ * rollback the broker may redistribute the batch's messages to other listener
+ * threads. Instead, this manager is binding-scoped (shared by all loops) and
+ * tracks the JMS message IDs of failed batches as <em>suspects</em>:
+ * <ul>
+ *   <li>A data failure marks the whole failed batch suspect and shrinks the
+ *       shared batch size (BISECT halves it)</li>
+ *   <li>Any listener that later commits a batch clears those IDs from the
+ *       suspect set — good subsets commit in batches, on any thread</li>
+ *   <li>Batches containing the true poison keep failing and halving until the
+ *       poison is alone in its unit of work; its backout count then breaches
+ *       BOTHRESH and the PoisonMessageHandler routes it to the BOQ</li>
+ *   <li>Normal batch size is restored only after the suspect set is empty and
+ *       M consecutive successes have occurred</li>
+ * </ul>
+ * This is redistribution-safe: suspects are keyed by message ID, not by which
+ * thread received them. Complexity for one poison in a batch of N is
+ * O(log N) failing transactions, with clean subsets committing at the current
+ * bisected size rather than one-by-one.
  */
 public class DegradedModeManager {
 
@@ -33,6 +55,14 @@ public class DegradedModeManager {
     private final AtomicInteger currentBatchSize;
     private final AtomicInteger consecutiveSuccesses = new AtomicInteger(0);
     private final AtomicInteger degradationLevel = new AtomicInteger(0);
+
+    /**
+     * JMS message IDs from batches that failed with a data failure and have
+     * not yet been part of a committed batch or routed to the BOQ.
+     * Shared across all listener threads of the binding.
+     */
+    private final java.util.Set<String> suspectMessageIds =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /**
      * Creates a degraded mode manager.
@@ -56,7 +86,8 @@ public class DegradedModeManager {
 
     /**
      * Records a successful batch commit.
-     * May restore normal batch size after enough consecutive successes.
+     * May restore normal batch size after enough consecutive successes,
+     * but never while suspect messages remain unresolved.
      */
     public void recordSuccess() {
         if (!inDegradedMode.get()) {
@@ -64,12 +95,60 @@ public class DegradedModeManager {
         }
 
         int successes = consecutiveSuccesses.incrementAndGet();
-        log.debug("Binding '{}': consecutive successes in degraded mode: {}/{}",
-                bindingId, successes, successesRequiredToRestore);
+        log.debug("Binding '{}': consecutive successes in degraded mode: {}/{} ({} suspects outstanding)",
+                bindingId, successes, successesRequiredToRestore, suspectMessageIds.size());
 
-        if (successes >= successesRequiredToRestore) {
+        if (successes >= successesRequiredToRestore && suspectMessageIds.isEmpty()) {
             restore();
         }
+    }
+
+    /**
+     * Marks the message IDs of a failed batch as suspects. Called by any
+     * listener thread whose batch failed with a data-classified failure.
+     * Redistribution-safe: another thread committing these messages later
+     * clears them via {@link #clearSuspects}.
+     */
+    public void markBatchSuspect(java.util.Collection<String> messageIds) {
+        for (String id : messageIds) {
+            if (id != null) {
+                suspectMessageIds.add(id);
+            }
+        }
+        log.warn("Binding '{}': marked {} messages suspect ({} total outstanding)",
+                bindingId, messageIds.size(), suspectMessageIds.size());
+    }
+
+    /**
+     * Clears message IDs from the suspect set after they were part of a
+     * committed batch (or routed to the BOQ). Called by whichever listener
+     * thread the broker redelivered them to.
+     */
+    public void clearSuspects(java.util.Collection<String> messageIds) {
+        boolean removed = false;
+        for (String id : messageIds) {
+            if (id != null && suspectMessageIds.remove(id)) {
+                removed = true;
+            }
+        }
+        if (removed) {
+            log.info("Binding '{}': cleared suspects, {} outstanding",
+                    bindingId, suspectMessageIds.size());
+        }
+    }
+
+    /**
+     * Returns the number of unresolved suspect messages.
+     */
+    public int getSuspectCount() {
+        return suspectMessageIds.size();
+    }
+
+    /**
+     * Returns true if the given message ID is a known suspect.
+     */
+    public boolean isSuspect(String messageId) {
+        return messageId != null && suspectMessageIds.contains(messageId);
     }
 
     /**

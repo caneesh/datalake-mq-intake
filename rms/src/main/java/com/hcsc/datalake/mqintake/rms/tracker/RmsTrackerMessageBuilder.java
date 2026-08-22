@@ -45,6 +45,39 @@ public class RmsTrackerMessageBuilder implements TrackerMessageBuilder {
      */
     public static final String MESSAGE_HEADER_DETAILS = "MessageHeaderDetails";
 
+    /**
+     * Returns the legacy artifacts still missing before the tracker header
+     * rewrite is contract-complete (§20.4). An empty list means the contract
+     * is ready for production.
+     *
+     * <p>Derived from evidence in this class: an empty {@code TAG_LIST} and
+     * placeholder {@code processTag} mean the legacy transformation cannot be
+     * reproduced exactly.
+     */
+    public static java.util.List<String> trackerContractGaps() {
+        java.util.List<String> gaps = new java.util.ArrayList<>();
+        if (HeaderRewriter.TAG_LIST.length == 0) {
+            gaps.add("tagList contents (§20.4): actual rewritten tag names not captured");
+            gaps.add("setReplacedTagData / getCompleteStartTag / getCompleteEndTag bodies not captured (§20.4)");
+        }
+        if (!HeaderRewriter.ROOT_END_TAG_VERIFIED) {
+            gaps.add("ROOT_END_TAG / ROOT_END_TAG_CHAR values unverified against legacy (§20.4)");
+        }
+        if (!HeaderRewriter.GOLDEN_MASTER_AVAILABLE) {
+            gaps.add("No golden-master before/after MessageHeaderDetails fixture");
+        }
+        return gaps;
+    }
+
+    /**
+     * Returns true when the legacy tracker header rewrite contract is complete
+     * and this builder is safe to run in production. RMS TRACKED production
+     * startup is gated on this.
+     */
+    public static boolean isTrackerContractReady() {
+        return trackerContractGaps().isEmpty();
+    }
+
     private final TrackerBodyMode bodyMode;
     private final TrackerFields trackerFields;
     private final HeaderRewriter headerRewriter;
@@ -201,12 +234,18 @@ public class RmsTrackerMessageBuilder implements TrackerMessageBuilder {
      */
     static class HeaderRewriter {
 
-        // TODO (§20.4): Replace with actual values from current implementation
+        // TODO (§20.4): Replace with actual values from current implementation.
+        // Flip ROOT_END_TAG_VERIFIED to true once verified against legacy code.
+        static final boolean ROOT_END_TAG_VERIFIED = false;
         private static final String ROOT_END_TAG = "</MessageHeaderDetails>";
         private static final String ROOT_END_TAG_ESCAPED = "&lt;/MessageHeaderDetails&gt;";
 
+        // TODO (§20.4): Flip to true once a real before/after header fixture
+        // from the legacy system is checked into the test resources.
+        static final boolean GOLDEN_MASTER_AVAILABLE = false;
+
         // TODO (§20.4): Populate from tagList in current implementation
-        private static final String[] TAG_LIST = {
+        static final String[] TAG_LIST = {
             // Placeholder — actual tag names TBD
         };
 

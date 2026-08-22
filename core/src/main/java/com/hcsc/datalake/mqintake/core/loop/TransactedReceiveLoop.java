@@ -233,6 +233,12 @@ public class TransactedReceiveLoop implements Runnable {
         log.debug("Processing batch of {} messages for binding '{}'",
                 batchSize, config.getId());
 
+        // Collect IDs BEFORE any send: routing a message to the BOQ via
+        // producer.send() assigns it a NEW JMSMessageID, so IDs read afterward
+        // would no longer match the suspect entries recorded at failure time
+        List<String> batchMessageIds =
+                degradedModeManager != null ? collectMessageIds(batch) : List.of();
+
         List<Message> cleanMessages = batch;
         try {
             if (poisonMessageHandler != null) {
@@ -260,6 +266,9 @@ public class TransactedReceiveLoop implements Runnable {
                 if (cleanMessages.isEmpty()) {
                     session.commit();
                     commitCount.incrementAndGet();
+                    if (degradedModeManager != null) {
+                        degradedModeManager.clearSuspects(batchMessageIds);
+                    }
                     handleSuccess();
                     return;
                 }
@@ -274,6 +283,12 @@ public class TransactedReceiveLoop implements Runnable {
             session.commit();
             commitCount.incrementAndGet();
             messageCount.addAndGet(cleanMessages.size());
+
+            // Committed messages (including any routed to BOQ in this unit of
+            // work) are no longer suspects
+            if (degradedModeManager != null) {
+                degradedModeManager.clearSuspects(batchMessageIds);
+            }
 
             handleSuccess();
 
@@ -290,7 +305,7 @@ public class TransactedReceiveLoop implements Runnable {
         } catch (Exception e) {
             log.error("Batch processing failed for binding '{}', rolling back {} messages: {}",
                     config.getId(), batchSize, e.getMessage(), e);
-            handleFailure(e);
+            handleFailure(e, batchMessageIds);
             rollbackQuietly();
 
             if (metrics != null) {
@@ -300,10 +315,21 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     private void handleFailure(Throwable e) {
+        handleFailure(e, null);
+    }
+
+    private void handleFailure(Throwable e, List<String> failedBatchMessageIds) {
         if (degradedModeManager != null) {
             boolean wasDegraded = degradedModeManager.isInDegradedMode();
             FailureClass failureClass = degradedModeManager.recordFailure(e);
             log.debug("Failure classified as {} for binding '{}'", failureClass, config.getId());
+
+            // Data failures mark the failed batch's message IDs as suspects so
+            // the bisection coordinator can track them across redelivery to
+            // any listener thread (§6.1)
+            if (failureClass.triggersDegradedMode() && failedBatchMessageIds != null) {
+                degradedModeManager.markBatchSuspect(failedBatchMessageIds);
+            }
 
             // Update health if we just entered degraded mode
             if (!wasDegraded && degradedModeManager.isInDegradedMode() && healthManager != null) {
@@ -314,6 +340,24 @@ public class TransactedReceiveLoop implements Runnable {
                 }
             }
         }
+    }
+
+    /**
+     * Collects JMS message IDs from a batch, skipping unreadable ones.
+     */
+    private List<String> collectMessageIds(List<Message> batch) {
+        List<String> ids = new ArrayList<>(batch.size());
+        for (Message message : batch) {
+            try {
+                String id = message.getJMSMessageID();
+                if (id != null) {
+                    ids.add(id);
+                }
+            } catch (JMSException e) {
+                log.debug("Could not read JMSMessageID: {}", e.getMessage());
+            }
+        }
+        return ids;
     }
 
     private void handleSuccess() {

@@ -45,6 +45,7 @@ public class BindingConfigValidator {
         validateBatchSizes(bindings, properties.getMaxumsgs(), errors);
         validateAggregateMemory(bindings, properties.getAggregateMemoryCeilingBytes(), errors);
         validateRequiredFields(bindings, errors);
+        validateBisectBackoutThreshold(bindings, errors);
         validateHdfsPaths(bindings, errors);
 
         if (!errors.isEmpty()) {
@@ -183,6 +184,38 @@ public class BindingConfigValidator {
 
             if (binding.getListenerThreads() <= 0) {
                 errors.add(prefix + " listener_threads must be positive");
+            }
+        }
+    }
+
+    /**
+     * BISECT + backout interplay (§6.1): while a poison message is bisected
+     * toward isolation, clean messages sharing its failing batches accumulate
+     * backout count too. A clean message can share up to ceil(log2(batch_size))
+     * failing deliveries before the poison is alone, so its delivery count can
+     * legitimately reach ceil(log2(batch_size)) + 1. If BOTHRESH is at or below
+     * that, clean messages get misrouted to the BOQ. Enforce
+     * backout_threshold >= ceil(log2(batch_size)) + 1 for BISECT bindings.
+     */
+    private void validateBisectBackoutThreshold(List<BindingConfig> bindings, List<String> errors) {
+        for (BindingConfig binding : bindings) {
+            if (binding.getDegradationStrategy() != com.hcsc.datalake.mqintake.core.failure.DegradationStrategy.BISECT) {
+                continue;
+            }
+            boolean hasBackoutQueue = binding.getBackoutQueue() != null &&
+                    !binding.getBackoutQueue().isBlank();
+            if (!hasBackoutQueue || binding.getBatchSize() <= 1) {
+                continue;
+            }
+
+            int bisectDepth = 32 - Integer.numberOfLeadingZeros(binding.getBatchSize() - 1); // ceil(log2)
+            int minThreshold = bisectDepth + 1;
+            if (binding.getBackoutThreshold() < minThreshold) {
+                errors.add("Binding '" + binding.getId() + "' uses BISECT with batch_size " +
+                        binding.getBatchSize() + " but backout_threshold " +
+                        binding.getBackoutThreshold() + " < required minimum " + minThreshold +
+                        " (ceil(log2(batch_size)) + 1) — clean messages sharing failing batches " +
+                        "with a poison message would be misrouted to the backout queue");
             }
         }
     }
