@@ -16,7 +16,9 @@ import javax.jms.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -38,6 +40,13 @@ public class TransactedReceiveLoop implements Runnable {
 
     private static final Logger log = LoggerFactory.getLogger(TransactedReceiveLoop.class);
 
+    // Session recovery backoff constants
+    private static final long INITIAL_BACKOFF_MS = 1000;
+    private static final long MAX_BACKOFF_MS = 60000;
+    private static final int MAX_RECONNECT_ATTEMPTS = 10;
+    private static final double BACKOFF_MULTIPLIER = 2.0;
+    private static final double JITTER_FACTOR = 0.2;
+
     private final BindingConfig config;
     private final Connection connection;
     private final BatchWriter batchWriter;
@@ -53,6 +62,8 @@ public class TransactedReceiveLoop implements Runnable {
     private final AtomicLong commitCount = new AtomicLong(0);
     private final AtomicLong rollbackCount = new AtomicLong(0);
     private final AtomicLong messageCount = new AtomicLong(0);
+    private final AtomicInteger reconnectAttempts = new AtomicInteger(0);
+    private final AtomicLong reconnectCount = new AtomicLong(0);
 
     private volatile Session session;
     private volatile MessageConsumer consumer;
@@ -178,6 +189,16 @@ public class TransactedReceiveLoop implements Runnable {
                     rollbackQuietly();
                     batch.clear();
                     flushTrigger.reset();
+
+                    // Check if session needs recovery
+                    if (isSessionBroken(e)) {
+                        if (!recoverSession()) {
+                            log.error("Session recovery failed for binding '{}', stopping loop",
+                                    config.getId());
+                            running.set(false);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -333,7 +354,10 @@ public class TransactedReceiveLoop implements Runnable {
 
     private void cleanup() {
         running.set(false);
+        closeSessionResources();
+    }
 
+    private void closeSessionResources() {
         try {
             if (trackerProducer != null) {
                 trackerProducer.close();
@@ -341,6 +365,7 @@ public class TransactedReceiveLoop implements Runnable {
         } catch (JMSException e) {
             log.debug("Error closing tracker producer: {}", e.getMessage());
         }
+        trackerProducer = null;
 
         try {
             if (consumer != null) {
@@ -349,6 +374,7 @@ public class TransactedReceiveLoop implements Runnable {
         } catch (JMSException e) {
             log.debug("Error closing consumer: {}", e.getMessage());
         }
+        consumer = null;
 
         try {
             if (session != null) {
@@ -357,6 +383,133 @@ public class TransactedReceiveLoop implements Runnable {
         } catch (JMSException e) {
             log.debug("Error closing session: {}", e.getMessage());
         }
+        session = null;
+    }
+
+    /**
+     * Determines if a JMSException indicates a broken session/connection.
+     */
+    private boolean isSessionBroken(JMSException e) {
+        // Check if the linked exception indicates connection loss
+        Exception linked = e.getLinkedException();
+
+        // Common indicators of broken session/connection
+        String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+        String linkedMsg = linked != null && linked.getMessage() != null
+                ? linked.getMessage().toLowerCase() : "";
+
+        return msg.contains("connection") || msg.contains("session")
+                || msg.contains("closed") || msg.contains("disconnect")
+                || msg.contains("broken") || msg.contains("reset")
+                || linkedMsg.contains("connection") || linkedMsg.contains("socket")
+                || e.getErrorCode() != null && e.getErrorCode().startsWith("MQRC");
+    }
+
+    /**
+     * Determines if an exception indicates a non-recoverable error.
+     */
+    private boolean isNonRecoverableError(JMSException e) {
+        String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+        String errorCode = e.getErrorCode();
+
+        // Auth/security failures
+        if (msg.contains("authentication") || msg.contains("authorization")
+                || msg.contains("security") || msg.contains("not authorized")
+                || msg.contains("password") || msg.contains("credential")) {
+            return true;
+        }
+
+        // IBM MQ specific non-recoverable codes
+        if (errorCode != null) {
+            // 2035 = not authorized, 2063 = security error
+            if (errorCode.equals("MQRC_NOT_AUTHORIZED") || errorCode.equals("2035")
+                    || errorCode.equals("MQRC_SECURITY_ERROR") || errorCode.equals("2063")) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Attempts to recover the session with bounded exponential backoff.
+     *
+     * @return true if recovery succeeded, false if recovery failed after max attempts
+     *         or was interrupted
+     */
+    private boolean recoverSession() {
+        int attempts = reconnectAttempts.incrementAndGet();
+
+        if (attempts > MAX_RECONNECT_ATTEMPTS) {
+            log.error("Max reconnect attempts ({}) exceeded for binding '{}'",
+                    MAX_RECONNECT_ATTEMPTS, config.getId());
+            return false;
+        }
+
+        log.warn("Attempting session recovery for binding '{}' (attempt {}/{})",
+                config.getId(), attempts, MAX_RECONNECT_ATTEMPTS);
+
+        // Close existing resources
+        closeSessionResources();
+
+        // Calculate backoff with jitter
+        long backoffMs = calculateBackoff(attempts);
+
+        log.debug("Waiting {}ms before reconnect attempt {} for binding '{}'",
+                backoffMs, attempts, config.getId());
+
+        try {
+            Thread.sleep(backoffMs);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            log.info("Reconnect wait interrupted for binding '{}'", config.getId());
+            return false;
+        }
+
+        // Check if we should still be running
+        if (!running.get() || Thread.currentThread().isInterrupted()) {
+            log.info("Recovery aborted - loop stopping for binding '{}'", config.getId());
+            return false;
+        }
+
+        try {
+            initializeSession();
+            reconnectAttempts.set(0); // Reset on success
+            reconnectCount.incrementAndGet();
+            log.info("Session recovered successfully for binding '{}' after {} attempt(s)",
+                    config.getId(), attempts);
+
+            if (metrics != null) {
+                metrics.recordReconnect();
+            }
+
+            return true;
+        } catch (JMSException e) {
+            log.error("Session recovery attempt {} failed for binding '{}': {}",
+                    attempts, config.getId(), e.getMessage());
+
+            if (isNonRecoverableError(e)) {
+                log.error("Non-recoverable error detected for binding '{}', stopping recovery",
+                        config.getId());
+                return false;
+            }
+
+            // Recursive retry (will increment attempt counter)
+            return recoverSession();
+        }
+    }
+
+    /**
+     * Calculates exponential backoff with jitter.
+     */
+    private long calculateBackoff(int attempt) {
+        double exponential = INITIAL_BACKOFF_MS * Math.pow(BACKOFF_MULTIPLIER, attempt - 1);
+        long baseBackoff = Math.min((long) exponential, MAX_BACKOFF_MS);
+
+        // Add jitter: +/- JITTER_FACTOR * baseBackoff
+        double jitter = (ThreadLocalRandom.current().nextDouble() * 2 - 1) * JITTER_FACTOR * baseBackoff;
+
+        return Math.max(INITIAL_BACKOFF_MS, (long) (baseBackoff + jitter));
     }
 
     public boolean isRunning() {
@@ -377,5 +530,13 @@ public class TransactedReceiveLoop implements Runnable {
 
     public String getBindingId() {
         return config.getId();
+    }
+
+    public long getReconnectCount() {
+        return reconnectCount.get();
+    }
+
+    public int getCurrentReconnectAttempts() {
+        return reconnectAttempts.get();
     }
 }

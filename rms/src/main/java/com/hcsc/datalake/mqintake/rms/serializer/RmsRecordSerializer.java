@@ -1,5 +1,6 @@
 package com.hcsc.datalake.mqintake.rms.serializer;
 
+import com.hcsc.datalake.mqintake.core.serializer.PlaceholderSerializer;
 import com.hcsc.datalake.mqintake.core.serializer.RecordMetadata;
 import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
 import org.apache.hadoop.io.BytesWritable;
@@ -39,7 +40,12 @@ import java.util.regex.Pattern;
  * (BytesWritable). This matches Option A from §9.1 pending verification that
  * no consumer depends on current key semantics.
  */
-public class RmsRecordSerializer implements RecordSerializer {
+public class RmsRecordSerializer implements RecordSerializer, PlaceholderSerializer {
+
+    @Override
+    public String getPlaceholderReason() {
+        return "RMS serializer: metadata placement (Option A/B) per DESIGN.md §9.1 not finalized";
+    }
 
     /**
      * Pattern to extract MessageID (payload GUID) from the XML payload.

@@ -36,6 +36,8 @@ public class BindingMetrics {
     private final LongAdder poisonMessagesRouted = new LongAdder();
     private final LongAdder degradedModeEntries = new LongAdder();
     private final LongAdder degradedModeExits = new LongAdder();
+    private final LongAdder reconnectSuccessCount = new LongAdder();
+    private final LongAdder reconnectFailureCount = new LongAdder();
 
     // Gauges
     private final AtomicLong sourceQueueDepth = new AtomicLong(0);
@@ -100,6 +102,14 @@ public class BindingMetrics {
         flushCount.increment();
     }
 
+    public void recordReconnect() {
+        reconnectSuccessCount.increment();
+    }
+
+    public void recordReconnectFailure() {
+        reconnectFailureCount.increment();
+    }
+
     // --- Gauge setters ---
 
     public void setSourceQueueDepth(long depth) {
@@ -158,6 +168,14 @@ public class BindingMetrics {
 
     public long getDegradedModeExits() {
         return degradedModeExits.sum();
+    }
+
+    public long getReconnectSuccessCount() {
+        return reconnectSuccessCount.sum();
+    }
+
+    public long getReconnectFailureCount() {
+        return reconnectFailureCount.sum();
     }
 
     public long getSourceQueueDepth() {

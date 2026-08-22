@@ -1,5 +1,6 @@
 package com.hcsc.datalake.mqintake.claims.serializer;
 
+import com.hcsc.datalake.mqintake.core.serializer.PlaceholderSerializer;
 import com.hcsc.datalake.mqintake.core.serializer.RecordMetadata;
 import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
 import org.apache.hadoop.io.BytesWritable;
@@ -46,7 +47,13 @@ import java.util.Objects;
  *   <li>{@code CLM_ADJSTMT_NBR} is source-monotonic revision counter</li>
  * </ul>
  */
-public class ClaimsRecordSerializer implements RecordSerializer {
+public class ClaimsRecordSerializer implements RecordSerializer, PlaceholderSerializer {
+
+    @Override
+    public String getPlaceholderReason() {
+        return "Claims serializer: metadata placement per DESIGN.md §9.1 not finalized, " +
+               "identity field (open item #17) not confirmed";
+    }
 
     private final ClaimsIdentityExtractor identityExtractor;
 

@@ -569,4 +569,65 @@ class TransactedReceiveLoopTest {
         assertThat(metrics.getRollbackCount()).isGreaterThanOrEqualTo(1);
         assertThat(metrics.getCommitCount()).isEqualTo(0);
     }
+
+    // --- Session Recovery Tests ---
+
+    @Test
+    void sessionRecoveryExposesReconnectCount() throws Exception {
+        BindingConfig config = createLandOnlyConfig(3);
+        sendMessages(3);
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForCommits(loop, 1, 2000);
+        loop.stop();
+        future.get(1, TimeUnit.SECONDS);
+
+        // No reconnects needed for normal operation
+        assertThat(loop.getReconnectCount()).isEqualTo(0);
+        assertThat(loop.getCurrentReconnectAttempts()).isEqualTo(0);
+    }
+
+    @Test
+    void shutdownInterruptsLoop() throws Exception {
+        BindingConfig config = createLandOnlyConfig(100);
+        // Don't send messages - loop will just wait on receive()
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+
+        // Wait briefly for loop to start
+        Thread.sleep(100);
+        assertThat(loop.isRunning()).isTrue();
+
+        // Stop should interrupt cleanly
+        loop.stop();
+        future.get(2, TimeUnit.SECONDS);
+
+        assertThat(loop.isRunning()).isFalse();
+    }
+
+    @Test
+    void reconnectMetricsRecorded() throws Exception {
+        BindingConfig config = createLandOnlyConfig(3);
+        sendMessages(3);
+
+        BindingMetrics metrics = new BindingMetrics("test-binding");
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, null, null, metrics, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForCommits(loop, 1, 2000);
+        loop.stop();
+        future.get(1, TimeUnit.SECONDS);
+
+        // Normal operation - no reconnects
+        assertThat(metrics.getReconnectSuccessCount()).isEqualTo(0);
+        assertThat(metrics.getReconnectFailureCount()).isEqualTo(0);
+    }
 }
