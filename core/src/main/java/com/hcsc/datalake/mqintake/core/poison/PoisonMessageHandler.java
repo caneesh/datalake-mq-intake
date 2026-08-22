@@ -21,16 +21,30 @@ public class PoisonMessageHandler {
 
     /**
      * JMS property for delivery count (standard).
+     *
+     * <p>This is the sole source of delivery count. IBM MQ supplies it on every
+     * received message and increments it on each rollback, verified against the
+     * product in {@code IbmMqFailureIntegrationTest}.
+     *
+     * <p>There was once a fallback to the IBM-specific
+     * {@code JMS_IBM_MQMD_BackoutCount}. It was unreachable: this property is
+     * checked first and always present on IBM MQ, so the fallback could never
+     * run. It is also absent unless the destination enables MQMD read, which
+     * this application does not. Do not reintroduce it — if delivery count ever
+     * needs another source, fix it here rather than adding a branch that cannot
+     * execute.
      */
     public static final String JMSX_DELIVERY_COUNT = "JMSXDeliveryCount";
 
-    /**
-     * IBM MQ-specific property for backout count.
-     */
-    public static final String JMS_IBM_MQMD_BACKOUT_COUNT = "JMS_IBM_MQMD_BackoutCount";
-
     private final int backoutThreshold;
     private final String backoutQueueName;
+
+    /**
+     * Guards the missing-property warning so it is logged once per handler
+     * rather than once per message.
+     */
+    private final java.util.concurrent.atomic.AtomicBoolean warnedMissingDeliveryCount =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     /**
      * Creates a poison message handler.
@@ -61,23 +75,29 @@ public class PoisonMessageHandler {
     }
 
     /**
-     * Gets the delivery/backout count from a message.
-     * Tries JMSXDeliveryCount first, then IBM MQ-specific property.
+     * Gets the delivery count from a message, read from
+     * {@link #JMSX_DELIVERY_COUNT}.
+     *
+     * <p>Returns 1 ("first delivery", therefore never poison) when the property
+     * is missing or unreadable. That is the safe direction — the alternative
+     * would route healthy messages to the backout queue — but it does mean
+     * poison detection is inert without the property, so the condition is
+     * logged once per handler.
      *
      * @param message the message
      * @return the delivery count, or 1 if not available
      */
     public int getDeliveryCount(Message message) {
         try {
-            // Try standard JMS property first
             if (message.propertyExists(JMSX_DELIVERY_COUNT)) {
                 return message.getIntProperty(JMSX_DELIVERY_COUNT);
             }
 
-            // Try IBM MQ-specific property
-            if (message.propertyExists(JMS_IBM_MQMD_BACKOUT_COUNT)) {
-                // BackoutCount is 0 on first delivery, so add 1
-                return message.getIntProperty(JMS_IBM_MQMD_BACKOUT_COUNT) + 1;
+            if (warnedMissingDeliveryCount.compareAndSet(false, true)) {
+                log.warn("Messages on backout queue '{}' path carry no {} property. " +
+                        "Poison detection is INERT: no message can ever breach the " +
+                        "threshold of {}. Check the JMS provider and destination config.",
+                        backoutQueueName, JMSX_DELIVERY_COUNT, backoutThreshold);
             }
 
         } catch (JMSException e) {

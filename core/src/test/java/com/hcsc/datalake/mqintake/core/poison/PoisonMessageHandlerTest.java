@@ -151,20 +151,18 @@ class PoisonMessageHandlerTest {
     }
 
     @Test
-    void readsIbmMqBackoutCountProperty() throws Exception {
+    void deliveryCountComesOnlyFromJmsxDeliveryCount() throws Exception {
         PoisonMessageHandler handler = new PoisonMessageHandler(3, BACKOUT_QUEUE);
 
         TextMessage message = session.createTextMessage("Test");
-        // Note: ActiveMQ doesn't recognize IBM MQ-specific property names.
-        // In production with IBM MQ, this property would be set by the broker.
-        // For this test, we verify the property name constant is correct.
-        assertThat(PoisonMessageHandler.JMS_IBM_MQMD_BACKOUT_COUNT)
-                .isEqualTo("JMS_IBM_MQMD_BackoutCount");
+        // The IBM-specific backout property must NOT be consulted. The fallback
+        // that once read it was unreachable (JMSXDeliveryCount is checked first
+        // and IBM MQ always supplies it) and has been removed. This guards
+        // against it being reintroduced: were it back, the count would be 11.
+        message.setIntProperty("JMS_IBM_MQMD_BackoutCount", 10);
 
-        // Test with standard property instead (which ActiveMQ supports)
-        message.setIntProperty(PoisonMessageHandler.JMSX_DELIVERY_COUNT, 5);
-        int deliveryCount = handler.getDeliveryCount(message);
-        assertThat(deliveryCount).isEqualTo(5);
+        assertThat(handler.getDeliveryCount(message)).isEqualTo(1);
+        assertThat(handler.isPoisonMessage(message)).isFalse();
     }
 
     @Test
@@ -200,17 +198,15 @@ class PoisonMessageHandlerTest {
     }
 
     @Test
-    void prefersJmsxDeliveryCountOverIbmBackoutCount() throws Exception {
+    void jmsxDeliveryCountWinsOverAnyIbmBackoutProperty() throws Exception {
         PoisonMessageHandler handler = new PoisonMessageHandler(3, BACKOUT_QUEUE);
 
         TextMessage message = session.createTextMessage("Test");
-        // Both properties set - JMSXDeliveryCount should take priority
         message.setIntProperty(PoisonMessageHandler.JMSX_DELIVERY_COUNT, 2);
-        message.setIntProperty(PoisonMessageHandler.JMS_IBM_MQMD_BACKOUT_COUNT, 10);
+        message.setIntProperty("JMS_IBM_MQMD_BackoutCount", 10);
 
-        int deliveryCount = handler.getDeliveryCount(message);
-
-        assertThat(deliveryCount).isEqualTo(2); // Uses JMSXDeliveryCount, not 11
+        // 2, not 11: the standard property is the only source consulted
+        assertThat(handler.getDeliveryCount(message)).isEqualTo(2);
     }
 
     @Test
