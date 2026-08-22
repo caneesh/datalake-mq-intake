@@ -109,6 +109,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
 
         try {
             validateBindingConfigurations();
+            validateSerializers();
             validateAllBindings();
             cleanupTempFiles();
             initializeRuntimeFactory();
@@ -127,6 +128,17 @@ public class IntakeRuntimeManager implements SmartLifecycle {
     private void validateBindingConfigurations() {
         bindingConfigValidator.validate(properties);
         log.info("Binding configurations validated successfully");
+    }
+
+    /**
+     * Enforces the production serializer gate (§9.1): placeholder serializers
+     * fail startup when MQ_INTAKE_PRODUCTION=true; otherwise they run with a
+     * loud warning. Never a silent fallback.
+     */
+    private void validateSerializers() throws com.hcsc.datalake.mqintake.core.config.SerializerValidator.SerializerValidationException {
+        com.hcsc.datalake.mqintake.core.config.SerializerValidator validator =
+                new com.hcsc.datalake.mqintake.core.config.SerializerValidator(serializerFactory);
+        validator.validateOrFail(properties.getBindings());
     }
 
     private void validateAllBindings() throws StartupValidator.StartupValidationException {
