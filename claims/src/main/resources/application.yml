@@ -1,0 +1,19 @@
+spring:
+  application:
+    name: datalake-mq-intake-claims
+
+intake:
+  instance-id: ${HOSTNAME:claims-instance-1}
+  maxumsgs: 10000
+  aggregate-memory-ceiling-bytes: 1073741824  # 1 GB
+
+  bindings:
+    - id: claims
+      source-queue: MQ.DMIH.CLAIMS.IN
+      mode: LAND_ONLY
+      # No tracker-queue for LAND_ONLY mode
+      hdfs-base-path: /data/raw/claims/dmih
+      batch-size: 8000          # ≤ MAXUMSGS for LAND_ONLY mode (unit of work is N)
+      batch-bytes: 134217728    # 128 MB
+      batch-interval-ms: 30000  # 30 seconds
+      listener-threads: 4

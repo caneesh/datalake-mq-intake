@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: datalake-mq-intake-rms
+
+intake:
+  instance-id: ${HOSTNAME:rms-instance-1}
+  maxumsgs: 10000
+  aggregate-memory-ceiling-bytes: 1073741824  # 1 GB
+
+  bindings:
+    - id: rms
+      source-queue: MQ.HPS.MEMBERSHIP.IN
+      mode: TRACKED
+      tracker-queue: MQ.HPS.MEMBERSHIP.TRACKER
+      tracker-body-mode: FULL_COPY
+      tracker-fields:
+        reporting-system: DMIH/DL
+        source-system: IIB
+        message-status: RCVD
+        destination-status: ""
+      hdfs-base-path: /data/raw/membership/hps
+      batch-size: 4000          # ≤ MAXUMSGS/2 for TRACKED mode (unit of work is 2N)
+      batch-bytes: 134217728    # 128 MB
+      batch-interval-ms: 30000  # 30 seconds
+      listener-threads: 4

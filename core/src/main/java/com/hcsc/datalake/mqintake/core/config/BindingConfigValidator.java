@@ -1,0 +1,197 @@
+package com.hcsc.datalake.mqintake.core.config;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+/**
+ * Validates binding configuration at startup.
+ * All validations run before any listener starts — fail fast.
+ */
+@Component
+public class BindingConfigValidator {
+
+    private static final Logger log = LoggerFactory.getLogger(BindingConfigValidator.class);
+
+    private final HdfsPathValidator hdfsPathValidator;
+
+    public BindingConfigValidator(HdfsPathValidator hdfsPathValidator) {
+        this.hdfsPathValidator = hdfsPathValidator;
+    }
+
+    /**
+     * Validates all bindings. Throws BindingConfigurationException on any failure.
+     *
+     * @param properties the intake properties to validate
+     * @throws BindingConfigurationException if any validation fails
+     */
+    public void validate(IntakeProperties properties) {
+        List<String> errors = new ArrayList<>();
+        List<BindingConfig> bindings = properties.getBindings();
+
+        if (bindings == null || bindings.isEmpty()) {
+            throw new BindingConfigurationException("No bindings configured");
+        }
+
+        validateNoDuplicateBindingIds(bindings, errors);
+        validateNoDuplicateSourceQueues(bindings, errors);
+        validateTrackerQueueConsistency(bindings, errors);
+        validateBatchSizes(bindings, properties.getMaxumsgs(), errors);
+        validateAggregateMemory(bindings, properties.getAggregateMemoryCeilingBytes(), errors);
+        validateRequiredFields(bindings, errors);
+        validateHdfsPaths(bindings, errors);
+
+        if (!errors.isEmpty()) {
+            String message = "Binding configuration validation failed:\n  - " +
+                    String.join("\n  - ", errors);
+            log.error(message);
+            throw new BindingConfigurationException(message);
+        }
+
+        log.info("Binding configuration validated successfully: {} binding(s)", bindings.size());
+    }
+
+    private void validateNoDuplicateBindingIds(List<BindingConfig> bindings, List<String> errors) {
+        Set<String> seen = new HashSet<>();
+        for (BindingConfig binding : bindings) {
+            if (binding.getId() != null && !seen.add(binding.getId())) {
+                errors.add("Duplicate binding id: " + binding.getId());
+            }
+        }
+    }
+
+    private void validateNoDuplicateSourceQueues(List<BindingConfig> bindings, List<String> errors) {
+        Set<String> seen = new HashSet<>();
+        for (BindingConfig binding : bindings) {
+            if (binding.getSourceQueue() != null && !seen.add(binding.getSourceQueue())) {
+                errors.add("Duplicate source queue: " + binding.getSourceQueue() +
+                        " (binding: " + binding.getId() + ")");
+            }
+        }
+    }
+
+    private void validateTrackerQueueConsistency(List<BindingConfig> bindings, List<String> errors) {
+        for (BindingConfig binding : bindings) {
+            if (binding.getMode() == null) {
+                continue; // Will be caught by required fields validation
+            }
+
+            boolean hasTrackerQueue = binding.getTrackerQueue() != null &&
+                    !binding.getTrackerQueue().isBlank();
+
+            if (binding.getMode() == BindingMode.TRACKED && !hasTrackerQueue) {
+                errors.add("TRACKED binding '" + binding.getId() +
+                        "' requires a tracker_queue");
+            }
+
+            if (binding.getMode() == BindingMode.LAND_ONLY && hasTrackerQueue) {
+                errors.add("LAND_ONLY binding '" + binding.getId() +
+                        "' must not configure a tracker_queue");
+            }
+        }
+    }
+
+    private void validateBatchSizes(List<BindingConfig> bindings, int maxumsgs, List<String> errors) {
+        for (BindingConfig binding : bindings) {
+            if (binding.getMode() == null) {
+                continue;
+            }
+
+            int maxAllowed = binding.getMaxBatchSizeFor(maxumsgs);
+            if (binding.getBatchSize() > maxAllowed) {
+                String modeExplanation = binding.getMode() == BindingMode.TRACKED
+                        ? "MAXUMSGS/2 = " + maxAllowed + " (unit of work is 2N)"
+                        : "MAXUMSGS = " + maxAllowed;
+                errors.add("Binding '" + binding.getId() + "' batch_size " +
+                        binding.getBatchSize() + " exceeds " + modeExplanation);
+            }
+
+            if (binding.getBatchSize() <= 0) {
+                errors.add("Binding '" + binding.getId() + "' batch_size must be positive");
+            }
+        }
+    }
+
+    private void validateAggregateMemory(List<BindingConfig> bindings,
+                                         long ceiling, List<String> errors) {
+        long total = 0;
+        for (BindingConfig binding : bindings) {
+            total += binding.getMemoryFootprint();
+        }
+
+        if (total > ceiling) {
+            errors.add("Aggregate memory " + formatBytes(total) +
+                    " exceeds ceiling " + formatBytes(ceiling) +
+                    " (sum of batch_bytes * listener_threads across all bindings)");
+        }
+    }
+
+    private void validateRequiredFields(List<BindingConfig> bindings, List<String> errors) {
+        for (int i = 0; i < bindings.size(); i++) {
+            BindingConfig binding = bindings.get(i);
+            String prefix = "Binding[" + i + "]";
+
+            if (binding.getId() == null || binding.getId().isBlank()) {
+                errors.add(prefix + " missing required field: id");
+            } else {
+                prefix = "Binding '" + binding.getId() + "'";
+            }
+
+            if (binding.getSourceQueue() == null || binding.getSourceQueue().isBlank()) {
+                errors.add(prefix + " missing required field: source_queue");
+            }
+
+            if (binding.getMode() == null) {
+                errors.add(prefix + " missing required field: mode");
+            }
+
+            if (binding.getHdfsBasePath() == null || binding.getHdfsBasePath().isBlank()) {
+                errors.add(prefix + " missing required field: hdfs_base_path");
+            }
+
+            if (binding.getBatchBytes() <= 0) {
+                errors.add(prefix + " batch_bytes must be positive");
+            }
+
+            if (binding.getBatchIntervalMs() <= 0) {
+                errors.add(prefix + " batch_interval_ms must be positive");
+            }
+
+            if (binding.getListenerThreads() <= 0) {
+                errors.add(prefix + " listener_threads must be positive");
+            }
+        }
+    }
+
+    private void validateHdfsPaths(List<BindingConfig> bindings, List<String> errors) {
+        for (BindingConfig binding : bindings) {
+            if (binding.getHdfsBasePath() == null || binding.getHdfsBasePath().isBlank()) {
+                continue; // Will be caught by required fields validation
+            }
+
+            HdfsPathValidator.PathValidationResult result =
+                    hdfsPathValidator.validatePath(binding.getHdfsBasePath());
+
+            if (!result.isValid()) {
+                errors.add("Binding '" + binding.getId() + "' HDFS path not writable: " +
+                        result.getError());
+            }
+        }
+    }
+
+    private String formatBytes(long bytes) {
+        if (bytes >= 1_073_741_824) {
+            return String.format("%.2f GB", bytes / 1_073_741_824.0);
+        } else if (bytes >= 1_048_576) {
+            return String.format("%.2f MB", bytes / 1_048_576.0);
+        } else if (bytes >= 1024) {
+            return String.format("%.2f KB", bytes / 1024.0);
+        }
+        return bytes + " bytes";
+    }
+}
