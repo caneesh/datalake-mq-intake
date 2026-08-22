@@ -38,6 +38,8 @@ public class BindingMetrics {
     private final LongAdder degradedModeExits = new LongAdder();
     private final LongAdder reconnectSuccessCount = new LongAdder();
     private final LongAdder reconnectFailureCount = new LongAdder();
+    private final LongAdder auditFailureCount = new LongAdder();
+    private final LongAdder reconciliationDiscrepancyCount = new LongAdder();
 
     // Gauges
     private final AtomicLong sourceQueueDepth = new AtomicLong(0);
@@ -110,6 +112,14 @@ public class BindingMetrics {
         reconnectFailureCount.increment();
     }
 
+    public void recordAuditFailure() {
+        auditFailureCount.increment();
+    }
+
+    public void recordReconciliationDiscrepancy() {
+        reconciliationDiscrepancyCount.increment();
+    }
+
     // --- Gauge setters ---
 
     public void setSourceQueueDepth(long depth) {
@@ -176,6 +186,14 @@ public class BindingMetrics {
 
     public long getReconnectFailureCount() {
         return reconnectFailureCount.sum();
+    }
+
+    public long getAuditFailureCount() {
+        return auditFailureCount.sum();
+    }
+
+    public long getReconciliationDiscrepancyCount() {
+        return reconciliationDiscrepancyCount.sum();
     }
 
     public long getSourceQueueDepth() {

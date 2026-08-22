@@ -385,6 +385,9 @@ public class TransactedReceiveLoop implements Runnable {
         } catch (Exception e) {
             log.warn("Failed to emit audit record for binding '{}': {}",
                     config.getId(), e.getMessage());
+            if (metrics != null) {
+                metrics.recordAuditFailure();
+            }
         }
     }
 
