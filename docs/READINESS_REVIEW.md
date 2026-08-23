@@ -46,6 +46,21 @@ came down. It wrote one file per message. This is the only real-world evidence
 anyone has about how this path behaves under production volume, and it points
 at file count / write latency as the failure mode.
 
+**2a. CMT plus path-based rollover implies a durability window in the legacy
+system.** The MDBs are container-managed, so the transaction commits when
+`onMessage()` returns — but `HDFSWriter` appends to a SequenceFile that stays
+open across many messages, rolling only when the path bucket changes. Unless
+`write(...)` syncs per record (unconfirmed — MDB_QUESTIONS A5), MQ acknowledges
+a message while its data sits in an unflushed open file, and a crash loses
+data that MQ has already released.
+
+Our close → rename → commit ordering is strictly stronger and is **a deliberate
+divergence from MDB parity**, mandated by the standing constraint that nothing
+is acknowledged before HDFS visibility. Worth stating explicitly: under a
+"nothing new beyond the MDB" rule this is the one place we should knowingly
+*not* match the legacy behaviour, because matching it would reintroduce the
+defect the project exists to remove.
+
 **3. Our flush cadence was heading for the same shape.** Before this review's
 changes, a fixed 30 s interval meant a quiet feed produced one file per
 interval — and, because the interval was measured from batch reset rather than
@@ -91,7 +106,7 @@ chain minus tracker send, with BISECT + suspect-tracking poison isolation
 | 7 | Audit store concurrency-safe | proven | Immutable one-file-per-batch (`audit_{datafile}.json`); no append anywhere |
 | 8 | Partition reconciliation exists | code + tests, **not scheduled** | `PartitionReconciliationService` fully tested (11 tests) but no production scheduler invokes it yet — see D3 |
 | 9 | Serializers contractual or gated | gate proven; contract now partly known | `PlaceholderSerializer` marker + `SerializerValidator.validateOrFail` invoked in `IntakeRuntimeManager.start()`; production mode fails fast. MDB evidence since narrows the target: types are `LongWritable`/`Text` under `RECORD` (now matched — D1 fixed), the payload is whitespace-normalised not verbatim (now reproduced — D2 done), and metadata Option A is unjustified because the key varies per record |
-| 10 | RMS tracker contract complete or gated | gated (proven); **scope may shrink** | §20.4 artifacts still missing → `RmsConfiguration.validateTrackerContract` blocks TRACKED production startup; `RmsTrackerContractGatingTest`. New MDB evidence: `EJBHelper.forwardToMessageTracker` creates a transacted session and **never calls `session.commit()`**. That is either a genuine defect (trackers never delivered) or normal container-managed behaviour — the code reads identically both ways. If trackers are not arriving today, C11–C14 are moot and this gate can be removed rather than satisfied. See F3 |
+| 10 | RMS tracker contract complete or gated | gated (proven); **scope confirmed real** | §20.4 artifacts still missing → `RmsConfiguration.validateTrackerContract` blocks TRACKED production startup; `RmsTrackerContractGatingTest`. `EJBHelper.forwardToMessageTracker` never calls `session.commit()`, which briefly looked like trackers were never delivered. It is not a defect: the MDBs are **container-managed** (they roll back by throwing out of `onMessage`), so the container commits the enlisted session. DESIGN item #26's suspicion does not hold — there is a live consumer contract and this gate must be **satisfied, not removed** |
 | 11 | Claims identity explicit & approved | gated (proven) | `claims.identity-field` required; production fails without it; missing identity in payload fails the batch; `ClaimsIdentityGatingTest` |
 | 12 | Health/metrics wired to live runtime | proven | Loop drives HEALTHY/DEGRADED/RECOVERING/UNHEALTHY; `BindingsHealthIndicator` reports per-binding via actuator; reconnect/audit/reconciliation counters exist (reconciliation counter fires only when reconciliation runs — see D3) |
 | 13 | One proven shutdown path | proven | `GracefulShutdownHandler` (unused duplicate) **removed**; the single path is SmartLifecycle → `IntakeRuntimeManager.stop()` → bounded drain → commit-or-rollback, proven by `gracefulShutdownWithInFlightBatchLosesNothing` |
@@ -236,15 +251,12 @@ should not be assumed from unit-scale tests.
    dedup, this field exists solely to serve reconciliation — a capability the
    MDB does not have. Dropping reconciliation removes this gate entirely.
 3. Legacy tracker rewrite artifacts (§20.4) — blocks RMS TRACKED production.
-   **Answer DESIGN item #26 before spending any effort here.** The MDB creates
-   the tracker session with `createSession(true, 0)` and never calls
-   `session.commit()`. Under a container-managed transaction with a managed
-   connection factory that is correct and the container commits; under
-   bean-managed, or a non-managed factory, the send is never committed and
-   trackers have never been delivered. Static reading cannot separate the two.
-   Settle it empirically — tracker queue depth, or ask the consumers — and if
-   trackers are not arriving, this stops being a reimplementation and becomes a
-   decision about whether to send trackers at all.
+   DESIGN item #26 is effectively resolved: the MDBs are container-managed, so
+   the missing `session.commit()` is correct CMT code and the container commits
+   the tracker send. Trackers are being delivered, so the §20.4 capture is real
+   work that must be completed. Remaining confirmation is narrow — that the
+   tracker connection factory is a managed/XA resource rather than a directly
+   instantiated one — plus the empirical cross-check on the production queue.
 4. Quarantine/retention policy for reconciliation duplicates.
 5. **Freshness SLA per feed.** `batch_interval_ms` is now 0, so a message may
    wait until its partition window closes (~15 min worst case). Confirm both

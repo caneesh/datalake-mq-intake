@@ -121,7 +121,15 @@ seen the code that actually writes production SequenceFiles.
    MQ transactions*, and an open file cannot be renamed — so this may be a
    direct write with no visibility barrier at all. If so, our close→rename
    ordering is an addition, and a deliberate improvement rather than parity.
-5. Which durability call precedes close: `hflush()`, `hsync()`, or neither?
+5. **Which durability call does `HDFSWriter.write(...)` make, if any —
+   `hflush()`, `hsync()`, or neither?** Now the sharpest open question on this
+   branch, because of what CMT implies. The container commits when
+   `onMessage()` returns, but the SequenceFile stays **open** across many
+   messages (it rolls only on path change). So unless `write(...)` syncs per
+   record, MQ acknowledges a message while its data is still in an unflushed
+   open file — a data-loss window in the legacy system, not just a difference
+   from ours. If it *does* sync per record, that is an fsync per message and
+   likely a throughput factor worth knowing before sizing the replacement.
 6. ~~Is `processMessage`'s whitespace normalisation applied on this branch?~~
    **ANSWERED — yes.** `processMessage` maps `\n`, `\r` and `\t` each to a
    space, and **both** ingest paths call it before `writeToHDFS(...)`, so it
@@ -220,32 +228,29 @@ The four artifacts named in DESIGN §20.4, all expected to be in the MDB source:
 
 Behavioural questions on the same path:
 
-15. ~~Is the tracker session ever committed?~~ **ANSWERED — not by
-    application code.** In `EJBHelper.forwardToMessageTracker(...)` the code
-    creates a transacted session with `connection.createSession(true, 0)` and
-    there is **no `session.commit()`** anywhere in `EJBHelper.java`.
+15. ~~Is the tracker session ever committed?~~ **ANSWERED — yes, by the
+    container, not by application code.**
 
-    **Do not yet conclude that trackers are not arriving.** Absence of
-    `session.commit()` is exactly what a *container-managed* transaction looks
-    like: with a managed/XA connection factory the session is enlisted in the
-    container's transaction and committed by WebSphere at method end, and an
-    explicit `session.commit()` would itself be an error. So the code reads the
-    same whether trackers are delivered reliably or never at all. Resolving it
-    needs two more facts:
+    `EJBHelper.forwardToMessageTracker(...)` creates a transacted session with
+    `connection.createSession(true, 0)` and never calls `session.commit()`.
+    Read alone that looks like a defect. It is not: **the MDBs rely on
+    container rollback by throwing exceptions out of `onMessage()`**, which is
+    the container-managed (CMT) idiom — bean-managed code would drive
+    `UserTransaction` explicitly. Under CMT the session is enlisted in the
+    container's transaction and committed at method end, and an explicit
+    `session.commit()` would itself be an error.
 
-    - **E22 — is the MDB container-managed or bean-managed, and is the tracker
-      connection factory XA/managed?** If CMT + managed factory, the container
-      commits and trackers do arrive. If BMT, or a non-managed factory, they do
-      not.
-    - **The empirical check, which outranks both:** is anything actually on the
-      tracker queue in production, and do its consumers see messages? DESIGN
-      item #26 asks precisely this. A queue depth or a consumer confirmation
-      settles it without any code reasoning.
+    So DESIGN item #26's suspicion does **not** hold, and the §20.4 tracker
+    work is real: trackers are being delivered and there is a live consumer
+    contract to preserve. The RMS gate must be satisfied, not removed.
 
-    *Why it matters:* if trackers never arrive, the §20.4 artifacts (C11–C14)
-    are moot — there is no live consumer contract to preserve, and RMS becomes
-    a decision about whether to send trackers at all rather than a
-    reimplementation. That would remove a production gate.
+    *One narrow thing left to confirm:* enlistment requires the tracker
+    connection factory to be a **container-managed / XA-capable** resource
+    (JNDI `java:comp/env`, WebSphere-managed). If `EJBHelper` instead
+    instantiates an `MQConnectionFactory` directly, the session would be
+    locally transacted, outside JTA, and genuinely never committed. Check how
+    that factory is obtained. The empirical check (production tracker queue
+    `MSGENQCOUNT`, or asking the consumers) still outranks reading the code.
 
 16. Is the tracker put in the **same transaction** as the source get?
 17. Does the tracker message carry the full source body, or only the rewritten
@@ -275,7 +280,12 @@ Keeping it requires answering 21.
 
 ## E. Transaction and failure semantics
 
-22. Is the MDB container-managed or bean-managed? What transaction attribute?
+22. ~~Is the MDB container-managed or bean-managed?~~ **ANSWERED —
+    container-managed.** The MDBs rely on container rollback by throwing
+    exceptions out of `onMessage()`. Still useful to capture the exact
+    transaction attribute (`Required`, etc.) and whether the MQ and tracker
+    connection factories are XA/managed resources — that last point is what
+    C15's remaining question turns on.
 23. Is the HDFS write inside the MQ transaction, and in which order relative to
     the commit?
 24. On HDFS failure, does the MQ transaction roll back, or is the message
