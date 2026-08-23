@@ -67,12 +67,24 @@ public class BindingConfigValidator {
         }
     }
 
+    /**
+     * A source queue is identified by (mq-connection, queue name), not by name
+     * alone. The same queue name legitimately exists on more than one queue
+     * manager — a feed spread across an HA/load-shared pair presents the same
+     * queue on each, and both must be consumed. Keying on the name alone would
+     * reject that configuration at startup as a false duplicate.
+     */
     private void validateNoDuplicateSourceQueues(List<BindingConfig> bindings, List<String> errors) {
         Set<String> seen = new HashSet<>();
         for (BindingConfig binding : bindings) {
-            if (binding.getSourceQueue() != null && !seen.add(binding.getSourceQueue())) {
+            if (binding.getSourceQueue() == null) {
+                continue;
+            }
+            String key = binding.getMqConnection() + "::" + binding.getSourceQueue();
+            if (!seen.add(key)) {
                 errors.add("Duplicate source queue: " + binding.getSourceQueue() +
-                        " (binding: " + binding.getId() + ")");
+                        " on mq-connection '" + binding.getMqConnection() +
+                        "' (binding: " + binding.getId() + ")");
             }
         }
     }

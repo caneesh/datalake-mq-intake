@@ -369,3 +369,50 @@ baseline rather than guesses about one.
     parsing, or tolerant? (Determines whether Option B is survivable.)
 34. **[human]** DESIGN item #24: validate the captured tracker format against
     the actual tracker-queue consumers before cutover.
+
+---
+
+## H. Environment topology — from the RMS/tracker connection details
+
+Test-environment connection details reviewed 2026-08-23. Specific hostnames,
+queue-manager names, queue names and the service account are **deliberately not
+recorded here** — this repository is not the right place for environment
+identifiers. They belong in deployment config held wherever that environment's
+secrets live. Only the structural facts are captured, which is all the design
+needs.
+
+The RMS tracker destination is presented on **two distinct queue managers**,
+same port and channel, same queue name on each.
+
+**They are two independent queue managers, not a multi-instance pair.** A
+multi-instance QM shares one name across hosts; these have different names. So
+the same queue name exists on both and traffic is spread between them — meaning
+**both must be consumed**, and a message's tracker put must go to the tracker
+queue on *its own* queue manager, since the put shares the transacted session
+with the get.
+
+Consequences for this service:
+
+- Modelled as **two bindings**, one per `mq-connection`. That is already what
+  the binding model supports. A connection-name-list would be wrong here: that
+  gives failover semantics, but these messages genuinely live on both.
+- **Fixed:** `validateNoDuplicateSourceQueues` keyed uniqueness on queue name
+  alone and would have rejected this configuration at startup as a false
+  duplicate. It now keys on (mq-connection, queue name).
+- Each binding gets its own `DegradedModeManager`, metrics and health entry.
+  That is correct — a poison loop on one queue manager must not degrade the
+  other — but it means one logical feed reports as two bindings, which
+  dashboards and alerting need to expect.
+
+Open:
+
+35. Are the two queue managers **active/active** (traffic shared) or
+    **active/passive** (one idle until failover)? Active/active means both
+    bindings run continuously; active/passive means one sits idle and its lag
+    and health signals need interpreting differently.
+36. Does the **source** queue for each feed follow the same two-QM pattern, or
+    only the tracker destination?
+37. Are `BOTHRESH`/`BOQNAME` configured identically on both queue managers? A
+    binding's threshold must match the queue manager it actually consumes.
+38. Does the aggregate memory ceiling still hold once a feed is two bindings?
+    `batch_bytes × listener_threads` is now counted twice per logical feed.

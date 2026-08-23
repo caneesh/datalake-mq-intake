@@ -67,18 +67,40 @@ class BindingConfigValidatorTest {
     }
 
     @Test
-    void duplicateSourceQueueFails() {
+    void duplicateSourceQueueOnSameConnectionFails() {
         BindingConfig binding1 = createValidTrackedBinding("binding1");
         binding1.setSourceQueue("SAME.QUEUE");
+        binding1.setMqConnection("qm1");
 
         BindingConfig binding2 = createValidLandOnlyBinding("binding2");
         binding2.setSourceQueue("SAME.QUEUE");
+        binding2.setMqConnection("qm1");
 
         properties.setBindings(Arrays.asList(binding1, binding2));
 
         assertThatThrownBy(() -> validator.validate(properties))
                 .isInstanceOf(BindingConfigurationException.class)
                 .hasMessageContaining("Duplicate source queue: SAME.QUEUE");
+    }
+
+    @Test
+    void sameQueueNameOnDifferentQueueManagersIsAllowed() {
+        // A feed spread across an HA / load-shared queue-manager pair presents
+        // the same queue name on each, and both must be consumed. Keying
+        // uniqueness on the name alone would reject a valid deployment at
+        // startup — which is the real topology of at least one feed, where the
+        // same queue name is presented on two independent queue managers.
+        BindingConfig onQm1 = createValidLandOnlyBinding("feed-qm1");
+        onQm1.setSourceQueue("SHARED.QUEUE.NAME");
+        onQm1.setMqConnection("qm1");
+
+        BindingConfig onQm2 = createValidLandOnlyBinding("feed-qm2");
+        onQm2.setSourceQueue("SHARED.QUEUE.NAME");
+        onQm2.setMqConnection("qm2");
+
+        properties.setBindings(Arrays.asList(onQm1, onQm2));
+
+        assertThatCode(() -> validator.validate(properties)).doesNotThrowAnyException();
     }
 
     @Test
