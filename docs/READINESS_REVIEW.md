@@ -90,7 +90,7 @@ chain minus tracker send, with BISECT + suspect-tracking poison isolation
 | 6 | MQ reconnect recreates JMS resources | proven on real MQ, both outage severities | Bounded exponential backoff w/ jitter, non-recoverable detection, interruptible. `sessionRecoveryAfterRealChannelOutage` breaks a live loop with `STOP CHANNEL ... MODE(FORCE)`; `recoveryAfterRealQueueManagerRestart` takes the whole queue manager down (~12s) and additionally proves the batch left uncommitted is replayed, not lost. The documented residual risk — that recovery reuses the injected `Connection` — **did not materialise**: the IBM MQ client re-establishes lazily on `createSession()` across both outages, so no change to `MqConnectionManager` is needed. Remaining gaps are outage *variants*, not the mechanism — see G6 |
 | 7 | Audit store concurrency-safe | proven | Immutable one-file-per-batch (`audit_{datafile}.json`); no append anywhere |
 | 8 | Partition reconciliation exists | code + tests, **not scheduled** | `PartitionReconciliationService` fully tested (11 tests) but no production scheduler invokes it yet — see D3 |
-| 9 | Serializers contractual or gated | gate proven; contract now partly known | `PlaceholderSerializer` marker + `SerializerValidator.validateOrFail` invoked in `IntakeRuntimeManager.start()`; production mode fails fast. MDB evidence since narrows the target: types are `LongWritable`/`Text` under `RECORD` (now matched — D1 fixed), the payload is whitespace-normalised not verbatim (D2), and metadata Option A is unjustified because the key varies per record |
+| 9 | Serializers contractual or gated | gate proven; contract now partly known | `PlaceholderSerializer` marker + `SerializerValidator.validateOrFail` invoked in `IntakeRuntimeManager.start()`; production mode fails fast. MDB evidence since narrows the target: types are `LongWritable`/`Text` under `RECORD` (now matched — D1 fixed), the payload is whitespace-normalised not verbatim (now reproduced — D2 done), and metadata Option A is unjustified because the key varies per record |
 | 10 | RMS tracker contract complete or gated | gated (proven) | §20.4 artifacts still missing → `RmsConfiguration.validateTrackerContract` blocks TRACKED production startup; `RmsTrackerContractGatingTest` |
 | 11 | Claims identity explicit & approved | gated (proven) | `claims.identity-field` required; production fails without it; missing identity in payload fails the batch; `ClaimsIdentityGatingTest` |
 | 12 | Health/metrics wired to live runtime | proven | Loop drives HEALTHY/DEGRADED/RECOVERING/UNHEALTHY; `BindingsHealthIndicator` reports per-binding via actuator; reconnect/audit/reconciliation counters exist (reconciliation counter fires only when reconciliation runs — see D3) |
@@ -132,9 +132,10 @@ instead of silent wrong output.
 Two further reasons, independent of the gates, that were not visible at the
 last review:
 
-- **Output is not yet contract-compatible.** Writable types now match
-  production (D1 fixed), but the payload is still not whitespace-normalised as
-  the MDB does, and the key's value expression is unconfirmed (D2).
+- **Output is closer but not confirmed contract-compatible.** Writable types
+  and payload normalisation now match production (D1, D2 done), but the key's
+  value expression is still unconfirmed (MDB_QUESTIONS A3) and record metadata
+  is absent pending open item #2.
 - **Load behaviour is unproven** on a path where the last attempted change
   failed under load (R-1, R-2).
 
@@ -159,12 +160,19 @@ Removing the gates alone would therefore not make this deployable.
    (sidecar) would restore it without touching these data files.
 2. Production `RecordSerializer`s once metadata placement (open item #2) is
    approved — replace placeholders, drop the marker, keep value bytes
-   contract-compatible. Note the payload is **not** verbatim in the MDB:
-   `processMessage` replaces `\n`, `\r` and `\t` each with a single space, with
-   no `trim()`. Parity requires reproducing that; we currently store the body
-   untouched. Also unresolved: the key is a positional ordinal in our
-   implementation, but the live writer's exact key expression is unconfirmed
-   (MDB_QUESTIONS A3) — the *type* matches production, the *value* may not.
+   contract-compatible.
+
+   *Payload normalisation is now done:* `PayloadNormalizer` in core reproduces
+   `processMessage` — each `\n`, `\r`, `\t` replaced by one space, runs not
+   collapsed, no `trim()` — and both serializers apply it. It lives in core
+   because the MDB applies it upstream of the per-feed write, so both feeds
+   share it. Claims extracts identity *after* normalising, so the identity
+   corresponds to what is actually written rather than to a raw form no reader
+   of the file could recover.
+
+   *Still unresolved:* the key is a positional ordinal in our implementation,
+   but the live writer's exact key expression is unconfirmed (MDB_QUESTIONS
+   A3) — the *type* matches production, the *value* may not.
 3. Reconciliation scheduling: `PartitionReconciliationService` needs a
    production trigger (in-process scheduler or external cron) and quarantine
    policy decision. Code and tests exist; nothing invokes it in production.

@@ -1,5 +1,6 @@
 package com.hcsc.datalake.mqintake.rms.serializer;
 
+import com.hcsc.datalake.mqintake.core.serializer.PayloadNormalizer;
 import com.hcsc.datalake.mqintake.core.serializer.PlaceholderSerializer;
 import com.hcsc.datalake.mqintake.core.serializer.RecordMetadata;
 import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
@@ -79,8 +80,10 @@ public class RmsRecordSerializer implements RecordSerializer, PlaceholderSeriali
             throws SerializationException {
 
         try {
-            // Extract payload
-            String payload = extractPayload(message);
+            // Extract the body, then apply the MDB's whitespace normalisation
+            // (\n, \r, \t -> single space, no collapsing, no trim). Consumers
+            // have only ever seen normalised payloads, so this is parity.
+            String payload = PayloadNormalizer.normalize(extractPayload(message));
 
 
             // Production layout: LongWritable key, Text value (§9.1).
@@ -90,10 +93,8 @@ public class RmsRecordSerializer implements RecordSerializer, PlaceholderSeriali
             // the VALUE does not yet.
             LongWritable key = new LongWritable(metadata.getRecordOffset());
 
-            // Value is the payload as Text, matching the production value type.
-            // NOTE: not yet whitespace-normalised the way the MDB's
-            // processMessage does (\n, \r, \t → single space). Tracked as
-            // readiness blocker D2.
+            // Value is the normalised payload as Text, matching the
+            // production value type.
             Text value = new Text(payload);
 
             return new SerializedRecord(key, value);

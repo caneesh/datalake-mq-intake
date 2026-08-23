@@ -1,5 +1,6 @@
 package com.hcsc.datalake.mqintake.claims.serializer;
 
+import com.hcsc.datalake.mqintake.core.serializer.PayloadNormalizer;
 import com.hcsc.datalake.mqintake.core.serializer.PlaceholderSerializer;
 import com.hcsc.datalake.mqintake.core.serializer.RecordMetadata;
 import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
@@ -99,7 +100,11 @@ public class ClaimsRecordSerializer implements RecordSerializer, PlaceholderSeri
             throws SerializationException {
 
         try {
-            String payload = extractPayload(message);
+            // Normalise first (MDB parity: \n, \r, \t -> single space), then
+            // extract identity FROM THE NORMALISED payload, so the identity
+            // corresponds to what is actually written to the file rather than
+            // to a raw form no reader could recover.
+            String payload = PayloadNormalizer.normalize(extractPayload(message));
 
             String payloadIdentity = identityExtractor.extractIdentity(payload);
             if (payloadIdentity != null && payloadIdentity.isBlank()) {
@@ -117,8 +122,6 @@ public class ClaimsRecordSerializer implements RecordSerializer, PlaceholderSeri
             // production while the VALUE does not yet.
             LongWritable key = new LongWritable(metadata.getRecordOffset());
 
-            // NOTE: not yet whitespace-normalised the way the MDB's
-            // processMessage does (\n, \r, \t -> single space). Blocker D2.
             Text value = new Text(payload);
 
             return new SerializedRecord(key, value);

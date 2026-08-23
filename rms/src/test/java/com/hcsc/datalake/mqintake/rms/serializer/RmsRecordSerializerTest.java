@@ -18,8 +18,8 @@ import static org.assertj.core.api.Assertions.*;
  * <p>The layout under test is {@code LongWritable} key / {@code Text} value,
  * matching the production SequenceFile types established from the legacy MDB.
  * This remains a PLACEHOLDER serializer: the key's exact expression is
- * unconfirmed, the payload is not yet whitespace-normalised as the MDB does,
- * and record metadata has no home in this layout pending open item #2.
+ * unconfirmed, and record metadata has no home in this layout pending open
+ * item #2. The payload IS whitespace-normalised as the MDB does.
  */
 class RmsRecordSerializerTest {
 
@@ -175,5 +175,24 @@ class RmsRecordSerializerTest {
         assertThatThrownBy(() -> serializer.serialize(message, metadata))
                 .isInstanceOf(RecordSerializer.SerializationException.class)
                 .hasMessageContaining("TextMessage");
+    }
+
+    @Test
+    void valueIsWhitespaceNormalisedLikeTheMdb() throws Exception {
+        // Multi-line payload: the MDB's processMessage replaces each \n, \r
+        // and \t with a single space before writing. Without this the file
+        // bytes diverge from what consumers have always received.
+        String payload = "<MemberEvent>\n\t<MessageID>guid-1</MessageID>\r\n</MemberEvent>";
+        TextMessage message = session.createTextMessage(payload);
+
+        RecordMetadata metadata = RecordMetadata.builder()
+                .bindingId("rms").sourceFile("test.seq").recordOffset(0).build();
+
+        String stored = serializer.serialize(message, metadata).getValue().toString();
+
+        assertThat(stored).doesNotContain("\n").doesNotContain("\r").doesNotContain("\t");
+        // One space per character, runs not collapsed: \n\t -> two spaces,
+        // \r\n -> two spaces
+        assertThat(stored).isEqualTo("<MemberEvent>  <MessageID>guid-1</MessageID>  </MemberEvent>");
     }
 }

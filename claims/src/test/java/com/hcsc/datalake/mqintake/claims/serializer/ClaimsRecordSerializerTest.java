@@ -346,4 +346,38 @@ class ClaimsRecordSerializerTest {
                 .recordOffset(0)
                 .build();
     }
+
+    @Test
+    void valueIsWhitespaceNormalisedLikeTheMdb() throws Exception {
+        ClaimsRecordSerializer serializer = new ClaimsRecordSerializer();
+
+        String payload = "<Claim>\n\t<CLM_XMITSN_ID>id-1</CLM_XMITSN_ID>\r\n</Claim>";
+        TextMessage message = session.createTextMessage(payload);
+
+        String stored = serializer.serialize(message, buildMinimalMetadata())
+                .getValue().toString();
+
+        assertThat(stored).doesNotContain("\n").doesNotContain("\r").doesNotContain("\t");
+        assertThat(stored).isEqualTo("<Claim>  <CLM_XMITSN_ID>id-1</CLM_XMITSN_ID>  </Claim>");
+    }
+
+    @Test
+    void identityIsExtractedFromTheNormalisedPayload() throws Exception {
+        // Identity must correspond to what is written to the file. Extracting
+        // from the raw body could yield a value containing newlines that no
+        // reader of the stored payload could ever recover.
+        ClaimsRecordSerializer serializer = new ClaimsRecordSerializer(
+                ClaimsIdentityExtractor.forTag("CLM_XMITSN_ID"));
+
+        String payload = "<Claim><CLM_XMITSN_ID>\nid-2\n</CLM_XMITSN_ID></Claim>";
+        TextMessage message = session.createTextMessage(payload);
+
+        String stored = serializer.serialize(message, buildMinimalMetadata())
+                .getValue().toString();
+
+        // The stored payload carries spaces, so the recoverable identity does too
+        assertThat(stored).contains("<CLM_XMITSN_ID> id-2 </CLM_XMITSN_ID>");
+        assertThat(serializer.getIdentityExtractor().extractIdentity(stored))
+                .isEqualTo(" id-2 ");
+    }
 }
