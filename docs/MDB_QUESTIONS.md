@@ -69,23 +69,74 @@ seen the code that actually writes production SequenceFiles.
 1. **Which method writes the production SequenceFile?** Full call path from
    `onMessage` to `SequenceFile.Writer.append(...)`, in the **deployed**
    revision.
-2. **How many records per file?** This is the decisive question for metadata
-   placement. If each file holds exactly **one** record, then every production
-   file has key `129` — not because the key is constant by design, but because
-   `getLength()` on an empty file returns the header length and there is never a
-   second record. That would explain the identical samples across two unrelated
-   feeds far better than truncation does, and it would mean no consumer *can*
-   depend on a varying key. If files hold many records, keys run
-   `129, 130, 131, …` and the key carries positional meaning.
-3. **What is the key expression** on that path — `getLength()`, a counter, or a
-   constant?
-4. Does the live path stage to a temp file and rename, or write directly into
-   the partition?
+2. ~~How many records per file?~~ **ANSWERED — no fixed record count.**
+   From `DMIHRiskStrat_ejb/.../hdfs/writer/HDFSWriter.java`: `write(...)` calls
+   `updateWriter()` before each append, and `updateWriter()` rolls the file
+   **only when `namedPath.getPathName()` changes**. There is no `maxRecords`,
+   no record counter, no "N messages then rotate". Records per file are
+   variable — all messages written while the path name holds steady — so the
+   count depends on message rate per instance during that path window.
+   Filenames include path + PID + IP + writerId + instance to keep concurrent
+   writers apart.
+
+   *Consequence:* files hold **many** records, so keys vary within a file and
+   no consumer-safety argument can be built on "the key is always 129". The
+   design's identical samples across two feeds are explained by truncation to
+   record 1, which always receives 129. **Metadata Option A remains
+   unjustified** pending G32 (does any consumer read the key?).
+
+3. **What is the key expression** on the live path — `getLength()`, a counter,
+   or a constant? Still unknown: the only `append` we have seen is in the
+   dormant, internally inconsistent `flushBatchInternal`. This is the last
+   unknown blocking the production serializer.
+4. **Does `updateWriter()` stage to a temp file and rename on roll, or write in
+   place?** Path-triggered rollover implies the file stays *open across many
+   MQ transactions*, and an open file cannot be renamed — so this may be a
+   direct write with no visibility barrier at all. If so, our close→rename
+   ordering is an addition, and a deliberate improvement rather than parity.
 5. Which durability call precedes close: `hflush()`, `hsync()`, or neither?
 6. Is `processMessage`'s whitespace normalisation applied on this branch?
+7. **What is in `namedPath.getPathName()`?** Its granularity sets the real file
+   cadence. If it is time-based, what window — hourly, quarter-hour, daily?
+   This is needed to compare file counts (see A″).
+8. On crash with a file open mid-window, what is left behind, and does anything
+   close or clean it up?
 
 **Unblocks:** the production `RecordSerializer`, the metadata-placement
 decision, and therefore the placeholder-serializer startup gate.
+
+## A″. File-count regression risk — raised by the A2 answer
+
+The MDB rolls a file **only when the path name changes**. Our service rolls on
+whichever of three triggers fires first: `batch_size` (8000 claims / 4000 RMS),
+`batch_bytes` (128 MB), or `batch_interval_ms` (**30 s**), per listener thread.
+
+Those cadences diverge sharply at low volume, in the wrong direction:
+
+| Arrival rate | MDB files per path window | Ours per window (4 threads) |
+|---|---|---|
+| High | 1 per writer instance (large file) | volume ÷ 8000, size-triggered |
+| Low / trickle | **still 1** — file stays open, accumulating | up to one file **per message** |
+
+At trickle volume the 30-second timer dominates and a batch of one flushes to
+its own file — **the same one-file-per-message shape as the JSONL attempt that
+brought the listeners down**. Nights, weekends, and quiet periods on either
+feed would sit in exactly that regime.
+
+This is not necessarily wrong: the 30 s interval buys freshness, and unlike the
+MDB we close and rename so data is visible promptly rather than trapped in an
+open file until the window ends. But it is a real trade the design should make
+knowingly, given the one operational failure we know about on this path was
+file-count related.
+
+Questions:
+
+- What is the actual arrival-rate profile per feed, including quiet periods?
+- Is `batch_interval_ms = 30 s` driven by a stated freshness requirement, or is
+  it a default?
+- Should flushing align to the **partition boundary** (as the MDB effectively
+  does via path change) rather than a fixed timer, so quiet windows produce one
+  file instead of many?
 
 ## A′. The failed JSONL migration — read this as a design constraint
 
