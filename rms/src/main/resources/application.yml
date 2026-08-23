@@ -5,7 +5,10 @@ spring:
 intake:
   instance-id: ${HOSTNAME:rms-instance-1}
   maxumsgs: 10000
-  aggregate-memory-ceiling-bytes: 1073741824  # 1 GB
+  # Unset: derived from 50% of the JVM's max heap. A fixed value has no
+  # relationship to the -Xmx the container actually gets, so it can approve a
+  # config that will OOM. Set it explicitly only to go BELOW the derived value.
+  # aggregate-memory-ceiling-bytes:
 
   mq-connections:
     primary:

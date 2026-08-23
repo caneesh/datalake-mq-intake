@@ -16,7 +16,15 @@ public class IntakeProperties {
     private List<BindingConfig> bindings = new ArrayList<>();
     private Map<String, MqConnectionConfig> mqConnections = new HashMap<>();
     private int maxumsgs = 10_000;
-    private long aggregateMemoryCeilingBytes = 1_073_741_824L;
+    /**
+     * Ceiling on the summed in-memory batch budget across all bindings.
+     *
+     * <p>Leave unset (0) to derive it from the JVM's actual max heap, which is
+     * almost always what you want: a fixed byte count has no relationship to
+     * the heap the process was given, so it can approve a configuration that is
+     * certain to OOM, or reject one that is perfectly safe.
+     */
+    private long aggregateMemoryCeilingBytes = 0L;
     private String instanceId;
 
     private MqProperties mq = new MqProperties();

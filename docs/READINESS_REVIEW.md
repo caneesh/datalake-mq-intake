@@ -251,6 +251,13 @@ should not be assumed from unit-scale tests.
 ## E. ENVIRONMENT/PLATFORM DEPENDENCIES
 - IBM MQ: BOTHRESH/BOQNAME configured per queue to match app thresholds
   (claims BISECT requires BOTHRESH ≥ 14 for batch 8000); MAXUMSGS ≥ 2×batch.
+  Where a feed is presented on two independent queue managers it is modelled as
+  two bindings, so both queue managers need matching settings.
+- **JVM heap sizing is now load-bearing.** `aggregate_memory_ceiling_bytes` is
+  derived from 50% of max heap when unset, so `-Xmx` must be set deliberately
+  per environment. Batch budget is `batch_bytes × listener_threads` per
+  binding, counted once per binding — a feed split across two queue managers
+  counts twice. Startup fails with the arithmetic if the config does not fit.
 - HDFS: binding base paths + `_tmp` + audit base pre-created and writable;
   RECORD/NONE compression assumption on erasure-coded paths.
 - Kerberos: principal/keytab; renewal interval tuning.

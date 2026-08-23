@@ -18,10 +18,36 @@ public class BindingConfigValidator {
 
     private static final Logger log = LoggerFactory.getLogger(BindingConfigValidator.class);
 
-    private final HdfsPathValidator hdfsPathValidator;
+    /**
+     * Fraction of max heap used as the batch-memory ceiling when none is
+     * configured. Deliberately conservative: {@code batch_bytes} counts
+     * estimated payload size, while the retained cost of the JMS messages
+     * holding it — object overhead, UTF-16 strings, MQ client buffers — is
+     * materially higher. The unused half is that headroom, plus room for
+     * everything else in the process.
+     */
+    private static final double DEFAULT_HEAP_FRACTION = 0.5;
 
+    /**
+     * An explicitly configured ceiling above this fraction of max heap is
+     * treated as a misconfiguration rather than an intention: batches alone
+     * would leave the process no room to run.
+     */
+    private static final double MAX_SAFE_HEAP_FRACTION = 0.7;
+
+    private final HdfsPathValidator hdfsPathValidator;
+    private final java.util.function.LongSupplier maxHeapSupplier;
+
+    @org.springframework.beans.factory.annotation.Autowired
     public BindingConfigValidator(HdfsPathValidator hdfsPathValidator) {
+        this(hdfsPathValidator, () -> Runtime.getRuntime().maxMemory());
+    }
+
+    /** Visible for testing: lets a test supply a heap size. */
+    BindingConfigValidator(HdfsPathValidator hdfsPathValidator,
+                           java.util.function.LongSupplier maxHeapSupplier) {
         this.hdfsPathValidator = hdfsPathValidator;
+        this.maxHeapSupplier = maxHeapSupplier;
     }
 
     /**
@@ -150,16 +176,51 @@ public class BindingConfigValidator {
     }
 
     private void validateAggregateMemory(List<BindingConfig> bindings,
-                                         long ceiling, List<String> errors) {
+                                         long configuredCeiling, List<String> errors) {
+        long maxHeap = maxHeapSupplier.getAsLong();
+        long safeCeiling = (long) (maxHeap * MAX_SAFE_HEAP_FRACTION);
+
+        long ceiling;
+        if (configuredCeiling > 0) {
+            ceiling = configuredCeiling;
+            // A ceiling the heap cannot honour is worse than no ceiling: it
+            // reports "validated" and then OOMs under load.
+            if (ceiling > safeCeiling) {
+                errors.add("aggregate_memory_ceiling_bytes " + formatBytes(ceiling) +
+                        " exceeds " + (int) (MAX_SAFE_HEAP_FRACTION * 100) +
+                        "% of JVM max heap (" + formatBytes(maxHeap) + "). Batches alone " +
+                        "would leave the process no room to run. Raise -Xmx, or lower the " +
+                        "ceiling and the bindings' batch_bytes / listener_threads.");
+                return;
+            }
+        } else {
+            ceiling = (long) (maxHeap * DEFAULT_HEAP_FRACTION);
+            log.info("aggregate_memory_ceiling_bytes not set — derived {} from {}% of max heap {}",
+                    formatBytes(ceiling), (int) (DEFAULT_HEAP_FRACTION * 100), formatBytes(maxHeap));
+        }
+
         long total = 0;
         for (BindingConfig binding : bindings) {
             total += binding.getMemoryFootprint();
         }
 
         if (total > ceiling) {
-            errors.add("Aggregate memory " + formatBytes(total) +
-                    " exceeds ceiling " + formatBytes(ceiling) +
-                    " (sum of batch_bytes * listener_threads across all bindings)");
+            StringBuilder detail = new StringBuilder();
+            detail.append("Aggregate batch memory ").append(formatBytes(total))
+                  .append(" exceeds ceiling ").append(formatBytes(ceiling));
+            if (configuredCeiling <= 0) {
+                detail.append(" (").append((int) (DEFAULT_HEAP_FRACTION * 100))
+                      .append("% of max heap ").append(formatBytes(maxHeap)).append(")");
+            }
+            detail.append(". Per binding (batch_bytes × listener_threads): ");
+            for (BindingConfig binding : bindings) {
+                detail.append(binding.getId()).append("=")
+                      .append(formatBytes(binding.getBatchBytes())).append("×")
+                      .append(binding.getListenerThreads()).append("=")
+                      .append(formatBytes(binding.getMemoryFootprint())).append(" ");
+            }
+            detail.append("— reduce batch_bytes or listener_threads, or raise -Xmx.");
+            errors.add(detail.toString().trim());
         }
     }
 

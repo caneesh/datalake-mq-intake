@@ -224,7 +224,7 @@ class BindingConfigValidatorTest {
 
         assertThatThrownBy(() -> validator.validate(properties))
                 .isInstanceOf(BindingConfigurationException.class)
-                .hasMessageContaining("Aggregate memory")
+                .hasMessageContaining("Aggregate batch memory")
                 .hasMessageContaining("exceeds ceiling");
     }
 
@@ -240,7 +240,7 @@ class BindingConfigValidatorTest {
 
         assertThatThrownBy(() -> validator.validate(properties))
                 .isInstanceOf(BindingConfigurationException.class)
-                .hasMessageContaining("Aggregate memory")
+                .hasMessageContaining("Aggregate batch memory")
                 .hasMessageContaining("exceeds ceiling");
     }
 
@@ -454,5 +454,84 @@ class BindingConfigValidatorTest {
         binding.setBatchIntervalMs(30_000);
         binding.setListenerThreads(4);
         return binding;
+    }
+
+    // --- Heap-derived ceiling ---
+
+    @Test
+    void ceilingIsDerivedFromMaxHeapWhenUnset() {
+        // 1 GB heap -> 512 MB derived ceiling, so 600 MB of batches must fail.
+        BindingConfigValidator heapAware =
+                new BindingConfigValidator(alwaysValidPathValidator, () -> 1_073_741_824L);
+
+        properties.setAggregateMemoryCeilingBytes(0); // unset -> derive
+        BindingConfig binding = createValidLandOnlyBinding("claims");
+        binding.setBatchBytes(600_000_000L);
+        binding.setListenerThreads(1);
+        properties.setBindings(Collections.singletonList(binding));
+
+        assertThatThrownBy(() -> heapAware.validate(properties))
+                .isInstanceOf(BindingConfigurationException.class)
+                .hasMessageContaining("Aggregate batch memory")
+                .hasMessageContaining("max heap");
+    }
+
+    @Test
+    void derivedCeilingAcceptsAConfigThatFitsTheHeap() {
+        // The same 600 MB passes on an 8 GB heap. A fixed ceiling cannot adapt
+        // like this — it approves or rejects regardless of the actual -Xmx.
+        BindingConfigValidator heapAware =
+                new BindingConfigValidator(alwaysValidPathValidator, () -> 8L * 1_073_741_824L);
+
+        properties.setAggregateMemoryCeilingBytes(0);
+        BindingConfig binding = createValidLandOnlyBinding("claims");
+        binding.setBatchBytes(600_000_000L);
+        binding.setListenerThreads(1);
+        properties.setBindings(Collections.singletonList(binding));
+
+        assertThatCode(() -> heapAware.validate(properties)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void configuredCeilingLargerThanTheHeapIsRejected() {
+        // The dangerous case the old fixed default allowed: a 1 GB ceiling on a
+        // 512 MB heap passed validation, then OOMed under load.
+        BindingConfigValidator heapAware =
+                new BindingConfigValidator(alwaysValidPathValidator, () -> 536_870_912L);
+
+        properties.setAggregateMemoryCeilingBytes(1_073_741_824L);
+        BindingConfig binding = createValidLandOnlyBinding("claims");
+        binding.setBatchBytes(1_000_000L);
+        binding.setListenerThreads(1);
+        properties.setBindings(Collections.singletonList(binding));
+
+        assertThatThrownBy(() -> heapAware.validate(properties))
+                .isInstanceOf(BindingConfigurationException.class)
+                .hasMessageContaining("exceeds 70% of JVM max heap")
+                .hasMessageContaining("Raise -Xmx");
+    }
+
+    @Test
+    void twoBindingsPerFeedFitOnAnAdequateHeap() {
+        // The two-queue-manager topology: one logical feed as two bindings, so
+        // batch_bytes x listener_threads is counted twice.
+        BindingConfigValidator heapAware =
+                new BindingConfigValidator(alwaysValidPathValidator, () -> 4L * 1_073_741_824L);
+
+        properties.setAggregateMemoryCeilingBytes(0);
+        BindingConfig qm1 = createValidLandOnlyBinding("feed-qm1");
+        qm1.setMqConnection("qm1");
+        qm1.setBatchBytes(134_217_728L);
+        qm1.setListenerThreads(4);
+
+        BindingConfig qm2 = createValidLandOnlyBinding("feed-qm2");
+        qm2.setMqConnection("qm2");
+        qm2.setBatchBytes(134_217_728L);
+        qm2.setListenerThreads(4);
+
+        properties.setBindings(Arrays.asList(qm1, qm2));
+
+        // 2 x 512 MB = 1 GB against a 2 GB derived ceiling
+        assertThatCode(() -> heapAware.validate(properties)).doesNotThrowAnyException();
     }
 }
