@@ -87,11 +87,10 @@ public class RmsRecordSerializer implements RecordSerializer, PlaceholderSeriali
 
 
             // Production layout: LongWritable key, Text value (§9.1).
-            // The key is a positional ordinal. The exact expression the live
-            // MDB uses is still unconfirmed (MDB_QUESTIONS A3) — it seeds from
-            // getLength() and increments — so the TYPE matches production while
-            // the VALUE does not yet.
-            LongWritable key = new LongWritable(metadata.getRecordOffset());
+            // The key is the record's byte offset in the file, matching the
+            // legacy writer's `long offset = sequenceFileWriter.getLength()`
+            // read before each append (MDB_QUESTIONS A3).
+            LongWritable key = new LongWritable(metadata.getFileByteOffset());
 
             // Value is the normalised payload as Text, matching the
             // production value type.

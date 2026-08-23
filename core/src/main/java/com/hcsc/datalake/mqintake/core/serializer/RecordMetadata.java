@@ -16,6 +16,7 @@ public class RecordMetadata {
     private final Instant consumeTimestamp;
     private final String sourceFile;
     private final int recordOffset;
+    private final long fileByteOffset;
 
     private RecordMetadata(Builder builder) {
         this.bindingId = builder.bindingId;
@@ -24,6 +25,7 @@ public class RecordMetadata {
         this.consumeTimestamp = builder.consumeTimestamp;
         this.sourceFile = builder.sourceFile;
         this.recordOffset = builder.recordOffset;
+        this.fileByteOffset = builder.fileByteOffset;
     }
 
     public String getBindingId() {
@@ -46,6 +48,23 @@ public class RecordMetadata {
         return sourceFile;
     }
 
+    /**
+     * Byte position at which this record begins in the destination
+     * SequenceFile — the writer's length immediately before the append.
+     *
+     * <p>This is the production key semantic: the legacy writer does
+     * {@code long offset = sequenceFileWriter.getLength()} before each append
+     * and uses it as the {@code LongWritable} key. It is distinct from
+     * {@link #getRecordOffset()}, which is the record's index within its batch
+     * and is traceability metadata rather than the key.
+     *
+     * <p>Only the component owning the writer can supply this, so it is set by
+     * the batch writer rather than derived by the serializer.
+     */
+    public long getFileByteOffset() {
+        return fileByteOffset;
+    }
+
     public int getRecordOffset() {
         return recordOffset;
     }
@@ -61,6 +80,7 @@ public class RecordMetadata {
         private Instant consumeTimestamp;
         private String sourceFile;
         private int recordOffset;
+        private long fileByteOffset;
 
         public Builder bindingId(String bindingId) {
             this.bindingId = bindingId;
@@ -84,6 +104,11 @@ public class RecordMetadata {
 
         public Builder sourceFile(String sourceFile) {
             this.sourceFile = sourceFile;
+            return this;
+        }
+
+        public Builder fileByteOffset(long fileByteOffset) {
+            this.fileByteOffset = fileByteOffset;
             return this;
         }
 

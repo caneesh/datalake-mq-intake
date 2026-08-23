@@ -179,18 +179,20 @@ Removing the gates alone would therefore not make this deployable.
    delete), and now logged once rather than degrading silently. Reconciliation
    cannot classify duplicates until item #2 gives metadata a home; Option C
    (sidecar) would restore it without touching these data files.
-1a. **Key VALUES are wrong, though the type is right.** Production keys are the
-   record's **byte offset** in the file — `long offset = sequenceFileWriter.getLength()`
-   re-read before each append — so they grow with record size and restart at the
-   header length (129) in each new file. Both our serializers instead emit
-   `metadata.getRecordOffset()`, a per-batch ordinal (0, 1, 2 …).
+1a. ~~Key VALUES are wrong.~~ **FIXED.** Keys are now the record's byte offset
+   in the file, matching `long offset = sequenceFileWriter.getLength()` read
+   before each append. `SequenceFileBatchWriter` reads `writer.getLength()` per
+   record and passes it via a new `RecordMetadata.fileByteOffset`, which keeps
+   the `RecordSerializer` seam intact — the writer supplies the fact, the
+   serializer still decides the key. `recordOffset` remains the batch index for
+   traceability; the two are deliberately separate fields.
 
-   Fixing this needs the byte offset to reach the serializer, which the current
-   `RecordSerializer.serialize(message, metadata)` seam does not carry —
-   `SequenceFileBatchWriter` would have to read `writer.getLength()` before each
-   record and pass it through `RecordMetadata`. Worth doing only if a consumer
-   actually reads the key (G32); if none does, the ordinal is harmless and this
-   can be closed as "known divergence, no impact".
+   Proven end to end by `ByteOffsetKeyIntegrationTest`, which drives the real
+   writer and reads the file back: the first record of a fresh file lands on
+   **129** — the value seen in production samples — offsets grow by each
+   record's encoded size rather than by 1, a longer payload advances the offset
+   further, and keys restart at the header in each new file. A third test
+   re-derives the expected keys independently from `getLength()`.
 
 2. Production `RecordSerializer`s once metadata placement (open item #2) is
    approved — replace placeholders, drop the marker, keep value bytes

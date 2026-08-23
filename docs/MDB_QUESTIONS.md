@@ -127,10 +127,11 @@ seen the code that actually writes production SequenceFiles.
    This finally explains the `129` samples completely — not a constant, not an
    ordinal, but "first record of a fresh file starts at byte 129".
 
-   **Our implementation is wrong here.** Both serializers use
-   `metadata.getRecordOffset()`, a per-batch record ordinal (0, 1, 2 …).
-   Production keys are byte offsets that grow with record size. See readiness
-   blocker D-key.
+   **Reproduced.** Both serializers now emit `metadata.getFileByteOffset()`,
+   supplied by `SequenceFileBatchWriter` from `writer.getLength()` before each
+   append. Verified end to end by `ByteOffsetKeyIntegrationTest`: first record
+   of a fresh file lands on 129, offsets grow by encoded record size, and keys
+   restart at the header per file.
 
 4. **Does `updateWriter()` stage to a temp file and rename on roll, or write in
    place?** Path-triggered rollover implies the file stays *open across many

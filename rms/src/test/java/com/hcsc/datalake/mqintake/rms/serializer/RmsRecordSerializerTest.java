@@ -72,7 +72,8 @@ class RmsRecordSerializerTest {
                 .mqPutTimestamp(Instant.parse("2026-08-22T10:30:00Z"))
                 .consumeTimestamp(Instant.parse("2026-08-22T10:30:01Z"))
                 .sourceFile("rms_inst1_123_1.seq")
-                .recordOffset(5)
+                .recordOffset(5)          // batch index — traceability only
+                .fileByteOffset(129L)     // byte position — this is the key
                 .build();
 
         RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
@@ -80,20 +81,29 @@ class RmsRecordSerializerTest {
         assertThat(record.getKey()).isInstanceOf(LongWritable.class);
         assertThat(record.getValue()).isInstanceOf(Text.class);
 
-        assertThat(((LongWritable) record.getKey()).get()).isEqualTo(5L);
+        // The key is the byte offset, not the batch index — 129, not 5
+        assertThat(((LongWritable) record.getKey()).get()).isEqualTo(129L);
         assertThat(record.getValue().toString()).isEqualTo(payload);
     }
 
     @Test
-    void keyTracksRecordOffset() throws Exception {
+    void keyTracksFileByteOffsetNotBatchIndex() throws Exception {
         TextMessage message = session.createTextMessage("<Test><MessageID>g</MessageID></Test>");
 
-        for (int offset = 0; offset < 3; offset++) {
+        // Byte offsets grow by record size, so they are neither sequential nor
+        // equal to the batch index. Pinning both here catches a regression that
+        // swapped one for the other.
+        long[] byteOffsets = {129L, 174L, 220L};
+
+        for (int i = 0; i < byteOffsets.length; i++) {
             RecordMetadata metadata = RecordMetadata.builder()
-                    .bindingId("rms").sourceFile("test.seq").recordOffset(offset).build();
+                    .bindingId("rms").sourceFile("test.seq")
+                    .recordOffset(i)
+                    .fileByteOffset(byteOffsets[i])
+                    .build();
 
             RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
-            assertThat(((LongWritable) record.getKey()).get()).isEqualTo(offset);
+            assertThat(((LongWritable) record.getKey()).get()).isEqualTo(byteOffsets[i]);
         }
     }
 

@@ -117,10 +117,10 @@ public class ClaimsRecordSerializer implements RecordSerializer, PlaceholderSeri
             }
 
             // Production layout: LongWritable key, Text value (§9.1).
-            // The key is a positional ordinal; the exact expression the live
-            // MDB uses is unconfirmed (MDB_QUESTIONS A3), so the TYPE matches
-            // production while the VALUE does not yet.
-            LongWritable key = new LongWritable(metadata.getRecordOffset());
+            // The key is the record's byte offset in the file, matching the
+            // legacy writer's `long offset = sequenceFileWriter.getLength()`
+            // read before each append (MDB_QUESTIONS A3).
+            LongWritable key = new LongWritable(metadata.getFileByteOffset());
 
             Text value = new Text(payload);
 

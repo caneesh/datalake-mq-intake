@@ -172,7 +172,15 @@ public class SequenceFileBatchWriter implements BatchWriter {
 
             for (int i = 0; i < messages.size(); i++) {
                 Message message = messages.get(i);
-                RecordMetadata metadata = buildMetadata(bindingId, message, filename, i);
+
+                // Byte position where this record will begin. Read immediately
+                // before the append, matching the legacy writer's
+                // `long offset = sequenceFileWriter.getLength()`. Only this
+                // class can supply it — the serializer has no view of the file.
+                long fileByteOffset = writer.getLength();
+
+                RecordMetadata metadata =
+                        buildMetadata(bindingId, message, filename, i, fileByteOffset);
                 RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
                 writer.append(record.getKey(), record.getValue());
             }
@@ -184,11 +192,13 @@ public class SequenceFileBatchWriter implements BatchWriter {
         return endPos - startPos;
     }
 
-    private RecordMetadata buildMetadata(String bindingId, Message message, String filename, int offset) {
+    private RecordMetadata buildMetadata(String bindingId, Message message, String filename,
+                                          int offset, long fileByteOffset) {
         RecordMetadata.Builder builder = RecordMetadata.builder()
                 .bindingId(bindingId)
                 .sourceFile(filename)
                 .recordOffset(offset)
+                .fileByteOffset(fileByteOffset)
                 .consumeTimestamp(Instant.now(clock));
 
         try {

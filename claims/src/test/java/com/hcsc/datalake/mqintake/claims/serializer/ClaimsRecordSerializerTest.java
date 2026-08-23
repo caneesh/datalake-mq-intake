@@ -62,7 +62,8 @@ class ClaimsRecordSerializerTest {
                 .mqPutTimestamp(Instant.parse("2026-08-22T14:30:00Z"))
                 .consumeTimestamp(Instant.parse("2026-08-22T14:30:01Z"))
                 .sourceFile("claims_inst1_789_1.seq")
-                .recordOffset(3)
+                .recordOffset(3)          // batch index — traceability only
+                .fileByteOffset(129L)     // byte position — this is the key
                 .build();
 
         RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
@@ -70,7 +71,8 @@ class ClaimsRecordSerializerTest {
         // Production layout: positional LongWritable key, Text value
         assertThat(record.getKey()).isInstanceOf(LongWritable.class);
         assertThat(record.getValue()).isInstanceOf(Text.class);
-        assertThat(((LongWritable) record.getKey()).get()).isEqualTo(3L);
+        // The key is the byte offset, not the batch index — 129, not 3
+        assertThat(((LongWritable) record.getKey()).get()).isEqualTo(129L);
         assertThat(record.getValue().toString()).isEqualTo(payload);
 
         // The metadata that used to ride in the key has no home in this layout.
