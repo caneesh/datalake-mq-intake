@@ -57,7 +57,7 @@ These were answered about the JSONL path and may not describe production:
 |---|---|---|
 | Temp-then-rename | Yes, `.tmp` → atomic rename | Does the live SequenceFile path also stage and rename? |
 | Durability | `BufferedWriter.flush()`, no `hflush`/`hsync` | What does the live SequenceFile path call? |
-| Payload transform | `processMessage` replaces `\n`, `\r`, `\t` each with one space, no `trim()` | Almost certainly shared — `processMessage` sits upstream of `writeToHDFS` — but confirm it applies on the SequenceFile branch too. **Parity requires reproducing this**; our serializers currently store the body untouched. |
+| Payload transform | `processMessage` replaces `\n`, `\r`, `\t` each with one space, no `trim()` | Almost certainly shared — `processMessage` sits upstream of `writeToHDFS` — but confirm it applies on the SequenceFile branch too (A6). **Now reproduced** by `PayloadNormalizer` in core; both serializers apply it. If the SequenceFile branch turns out NOT to normalise, this must be reverted. |
 
 ---
 
