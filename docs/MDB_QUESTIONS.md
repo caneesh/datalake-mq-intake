@@ -13,81 +13,99 @@ rather than by accident.
 
 ---
 
-## ⚠ Premise correction — production does not write SequenceFiles
+## Production format: SequenceFile. Read this before trusting code analysis.
 
-Answers received 2026-08-22 establish that the **live** MDB path writes
-**JSONL**, not SequenceFile:
+**SequenceFile is the production contract.** The JSONL path
+(`OdpJsonLineWriter`, `.tmp` → `.jsonl`) was an *attempt to replace*
+SequenceFile that was **backed out**: it brought the WebSphere MQ listeners
+down. `AbstractDualWriteIngest` is the residue of that migration.
 
-```
-HDFSIngest.onMessage / HPSHDFSIngest.onMessage
-  → extractMessageContent(...) | extractMessageContentHps(...)
-  → isValidMessage(...)
-  → processMessage(...)
-  → writeToHDFS(processedMessage, messageId, ingestionTs)   [AbstractDualWriteIngest]
-  → odpJsonLineWriter.write(message, messageId, ingestionTs) [OdpJsonLineWriter]
-  → ugi.doAs(...) → writeMessageSync(...)
-  → create temp .tmp → write ONE JSON line → close → atomic rename to .jsonl
-```
+This matters procedurally, not just factually. A static reading of the MDB
+source described the JSONL path as "the current authoritative path" — the
+opposite of operational reality. Treat **what is deployed** as the contract,
+confirmed by an operator, not what reads as authoritative in the repository.
+Two independent conclusions in this document were wrong because they trusted
+code shape over deployment reality.
 
-`SequenceFile.Writer.append(...)` is **never called on the active path**. It
-exists only in `HDFSWriter.flushBatchInternal`, which is dormant *and*
-internally inconsistent (`Foffset` is read from `getLength()` while the append
-uses an unresolved `offset`), so it is not authoritative for anything.
+**Open discrepancy to resolve:** if HEAD presents JSONL as authoritative while
+production runs SequenceFile, then the deployed artifact is not HEAD — or a
+flag/config selects the path. Establish which revision is deployed before
+extracting any contract detail from source.
 
-**Consequences:**
+### Settled
 
-- DESIGN §8/§9.1 is built on a SequenceFile contract. If consumers read
-  `.jsonl`, that entire framing — and the Option A/B/C metadata decision —
-  addresses a format the landing zone may no longer produce.
-- Our `SequenceFileBatchWriter` may be targeting the wrong format outright.
-- The `129` key observation in DESIGN cannot describe current output. It must
-  come from historical files, a different path, or a different system.
+| Question | Answer | Confidence |
+|---|---|---|
+| Production output format | **SequenceFile** | Operator-confirmed |
+| Key Writable type | `LongWritable` | High — the 129 header length observed on both feeds is a fingerprint of the key/value class names, and `LongWritable`/`Text` reproduces it exactly |
+| Value Writable type | `Text` | High — same fingerprint. `Text` and `BytesWritable` have different wire formats, so this is not cosmetic |
+| Compression | `RECORD` | High — with `NONE` the same classes give header 86, not 129 |
+| Is `129` a constant key? | Not resolvable yet — see A2 below. `129` is the empty-file header length, so it is what record 1 always receives | — |
 
-**Retracted** (previously listed here as settled):
+### Known-not-live
 
-| Previously stated | Status |
-|---|---|
-| Key type `LongWritable` | **Retracted** — no SequenceFile key is written on the live path |
-| Value type `Text` | **Retracted** — value is a JSON field, not a Writable |
-| Compression `RECORD` | **Retracted** — no SequenceFile is produced |
-| `129` is not a constant | Still true arithmetically (it is the empty-file header length), but moot if no SequenceFile is written |
+`HDFSWriter.flushBatchInternal` (batched SequenceFile write) is **not running
+in production**, and is internally inconsistent besides — it reads `Foffset`
+from `getLength()` but appends using an unresolved `offset`. Useful as evidence
+of intended types; not authoritative for behaviour.
 
-**Still valid and useful:**
+### Carried over from the JSONL analysis — verify against the SequenceFile path
 
-| Question | Answer |
-|---|---|
-| Does the MDB stage via temp and rename? (B6) | **Yes** — `.tmp` → close → atomic rename to `.jsonl`. Our rename-based visibility barrier is **parity, not an addition**. |
-| Durability call before close? (A5) | `BufferedWriter.flush()` then close, then rename. **No `hflush`/`hsync`** on the live path. Our `hflush` is therefore *no weaker* than production. |
-| Is the payload verbatim? (A4) | **No — transformed.** `processMessage` replaces `\n`, `\r`, `\t` each with a single space. No `trim()`. Result stored as JSON field `payload` in `JsonLineRecord`. Parity requires applying the same normalisation. |
-| File granularity | **One JSON line per file** — one file per message. At claims volumes this is a NameNode small-file problem, and a strong motivation for the replacement's batching. |
+These were answered about the JSONL path and may not describe production:
+
+| Detail | JSONL path | Must confirm for SequenceFile path |
+|---|---|---|
+| Temp-then-rename | Yes, `.tmp` → atomic rename | Does the live SequenceFile path also stage and rename? |
+| Durability | `BufferedWriter.flush()`, no `hflush`/`hsync` | What does the live SequenceFile path call? |
+| Payload transform | `processMessage` replaces `\n`, `\r`, `\t` each with one space, no `trim()` | Almost certainly shared — `processMessage` sits upstream of `writeToHDFS` — but confirm it applies on the SequenceFile branch too. **Parity requires reproducing this**; our serializers currently store the body untouched. |
 
 ---
 
-## A. Output format — now the highest-priority open question
+## A. The live SequenceFile write path — highest priority
 
-Section A as originally posed is **answered** (see the premise correction
-above). It is replaced by a larger question the answers exposed.
+`flushBatchInternal` is not it, and the JSONL path is not it. We still have not
+seen the code that actually writes production SequenceFiles.
 
-1. **Which format is the contract the replacement must produce — `.jsonl` or
-   SequenceFile?** Everything else depends on this. Our writer currently
-   produces SequenceFiles; the live MDB produces JSONL.
-2. **What does `AbstractDualWriteIngest` dual-write to?** The name implies two
-   destinations. Is the SequenceFile path a disabled second destination, a
-   different landing zone, or dead code retained from an earlier design? If
-   dual-write is live, **both** formats are contracts.
-3. **What is the exact `JsonLineRecord` schema?** Field names, types, ordering,
-   null handling. `messageId`, `ingestionTs` and `payload` are known; the full
-   set is not. This is the real metadata contract.
-4. **Where did DESIGN's SequenceFile samples (key `129`) come from?** Historical
-   files, a different zone, or another system? If historical, §8/§9.1 describes
-   a superseded contract.
-5. **[human]** Do consumers read `.jsonl`, SequenceFile, or both today? Ask the
-   landing-zone consumers directly — this decides the answer to A1.
+1. **Which method writes the production SequenceFile?** Full call path from
+   `onMessage` to `SequenceFile.Writer.append(...)`, in the **deployed**
+   revision.
+2. **How many records per file?** This is the decisive question for metadata
+   placement. If each file holds exactly **one** record, then every production
+   file has key `129` — not because the key is constant by design, but because
+   `getLength()` on an empty file returns the header length and there is never a
+   second record. That would explain the identical samples across two unrelated
+   feeds far better than truncation does, and it would mean no consumer *can*
+   depend on a varying key. If files hold many records, keys run
+   `129, 130, 131, …` and the key carries positional meaning.
+3. **What is the key expression** on that path — `getLength()`, a counter, or a
+   constant?
+4. Does the live path stage to a temp file and rename, or write directly into
+   the partition?
+5. Which durability call precedes close: `hflush()`, `hsync()`, or neither?
+6. Is `processMessage`'s whitespace normalisation applied on this branch?
 
-**Unblocks:** the `BatchWriter` implementation itself, not merely the
-serializer. If the target is JSONL, `SequenceFileBatchWriter` is the wrong
-component and metadata placement becomes "add JSON fields", collapsing the
-Option A/B/C decision entirely.
+**Unblocks:** the production `RecordSerializer`, the metadata-placement
+decision, and therefore the placeholder-serializer startup gate.
+
+## A′. The failed JSONL migration — read this as a design constraint
+
+The JSONL attempt was reverted because **the WebSphere MQ listeners came
+down**. That is the most valuable operational signal we have, and it bears
+directly on the replacement's risk.
+
+7. **What was the actual failure mechanism?** The likely chain is: one file per
+   message → NameNode/RPC pressure → HDFS writes slow → `onMessage` blocks →
+   listener thread pool exhausts → WebSphere stops the listener port. Confirm,
+   because it determines whether the replacement is immune.
+8. Was the trigger file *count*, write *latency*, or transaction timeout?
+9. At what volume did it fail, and on which feed?
+
+**Why it matters:** our design batches, so it creates far fewer files — which
+addresses the presumed cause directly. But it also holds a transaction open
+across N messages, so slow HDFS produces long-running transactions and MQ log
+pressure instead. Different mechanism, same root cause. The replacement is not
+automatically safe just because it writes fewer files, and this incident is the
+closest thing to a load test anyone has run on this path.
 
 ## B. File lifecycle and visibility
 
