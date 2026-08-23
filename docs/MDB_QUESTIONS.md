@@ -66,9 +66,31 @@ These were answered about the JSONL path and may not describe production:
 `flushBatchInternal` is not it, and the JSONL path is not it. We still have not
 seen the code that actually writes production SequenceFiles.
 
-1. **Which method writes the production SequenceFile?** Full call path from
-   `onMessage` to `SequenceFile.Writer.append(...)`, in the **deployed**
-   revision.
+1. ~~Which method writes the production SequenceFile?~~ **ANSWERED —
+   `HDFSWriter.write(String message)`.** Call path:
+
+   ```
+   HPSHDFSIngest.onMessage(...) | HDFSIngest.onMessage(...)
+     → processMessage(...)
+     → writeToHDFS(...)
+     → odpHdfsWriter.write(...) / hdfsWriter.write(...)
+     → HDFSWriter.write(...)
+       → updateWriter()
+         → openOutput(...) if the path bucket changed
+       → sequenceFileWriter.append(new LongWritable(offset), new Text(message))
+   ```
+
+   Confirms three things we had inferred: the append really is
+   `LongWritable`/`Text` (our declared types are right); rollover is driven by
+   the **path bucket changing**, which is what our partition-aligned flush
+   reproduces; and `processMessage` runs upstream of the dispatch, so it
+   reaches this branch (see A6).
+
+   *Still open:* `writeToHDFS` dispatches to **both** `odpHdfsWriter` and
+   `hdfsWriter`. Confirm whether the ODP/JSONL half is still invoked in the
+   deployed revision or was disabled with the reverted migration — if both run,
+   both formats are live contracts.
+
 2. ~~How many records per file?~~ **ANSWERED — no fixed record count.**
    From `DMIHRiskStrat_ejb/.../hdfs/writer/HDFSWriter.java`: `write(...)` calls
    `updateWriter()` before each append, and `updateWriter()` rolls the file
@@ -85,17 +107,26 @@ seen the code that actually writes production SequenceFiles.
    record 1, which always receives 129. **Metadata Option A remains
    unjustified** pending G32 (does any consumer read the key?).
 
-3. **What is the key expression** on the live path — `getLength()`, a counter,
-   or a constant? Still unknown: the only `append` we have seen is in the
-   dormant, internally inconsistent `flushBatchInternal`. This is the last
-   unknown blocking the production serializer.
+3. **What is `offset` in `new LongWritable(offset)`?** Partially answered: the
+   key is a `LongWritable` built from a variable named `offset`, but its
+   definition and lifecycle are still unseen. Specifically — is it a field or a
+   local, is it seeded from `sequenceFileWriter.getLength()`, and **is it reset
+   when `openOutput(...)` rolls to a new file?** That last point decides
+   whether keys restart per file (so every file begins at the header length,
+   129) or run continuously across files. Our implementation uses a per-batch
+   record ordinal, which matches neither if the answer is `getLength()`.
+
 4. **Does `updateWriter()` stage to a temp file and rename on roll, or write in
    place?** Path-triggered rollover implies the file stays *open across many
    MQ transactions*, and an open file cannot be renamed — so this may be a
    direct write with no visibility barrier at all. If so, our close→rename
    ordering is an addition, and a deliberate improvement rather than parity.
 5. Which durability call precedes close: `hflush()`, `hsync()`, or neither?
-6. Is `processMessage`'s whitespace normalisation applied on this branch?
+6. ~~Is `processMessage`'s whitespace normalisation applied on this branch?~~
+   **ANSWERED — yes.** `processMessage` maps `\n`, `\r` and `\t` each to a
+   space, and **both** ingest paths call it before `writeToHDFS(...)`, so it
+   applies to the SequenceFile branch. `PayloadNormalizer` is therefore correct
+   and does **not** need reverting.
 7. **What is in `namedPath.getPathName()`?** Its granularity sets the real file
    cadence. If it is time-based, what window — hourly, quarter-hour, daily?
    This is needed to compare file counts (see A″).
@@ -189,10 +220,33 @@ The four artifacts named in DESIGN §20.4, all expected to be in the MDB source:
 
 Behavioural questions on the same path:
 
-15. **Is the tracker session ever committed?** DESIGN open item #26 suspects it
-    is not, which per spec would roll back on close — meaning tracker messages
-    may not be arriving in production at all. Answer this *first*: it decides
-    whether this is a rewrite or a repair, and could make items 11–14 moot.
+15. ~~Is the tracker session ever committed?~~ **ANSWERED — not by
+    application code.** In `EJBHelper.forwardToMessageTracker(...)` the code
+    creates a transacted session with `connection.createSession(true, 0)` and
+    there is **no `session.commit()`** anywhere in `EJBHelper.java`.
+
+    **Do not yet conclude that trackers are not arriving.** Absence of
+    `session.commit()` is exactly what a *container-managed* transaction looks
+    like: with a managed/XA connection factory the session is enlisted in the
+    container's transaction and committed by WebSphere at method end, and an
+    explicit `session.commit()` would itself be an error. So the code reads the
+    same whether trackers are delivered reliably or never at all. Resolving it
+    needs two more facts:
+
+    - **E22 — is the MDB container-managed or bean-managed, and is the tracker
+      connection factory XA/managed?** If CMT + managed factory, the container
+      commits and trackers do arrive. If BMT, or a non-managed factory, they do
+      not.
+    - **The empirical check, which outranks both:** is anything actually on the
+      tracker queue in production, and do its consumers see messages? DESIGN
+      item #26 asks precisely this. A queue depth or a consumer confirmation
+      settles it without any code reasoning.
+
+    *Why it matters:* if trackers never arrive, the §20.4 artifacts (C11–C14)
+    are moot — there is no live consumer contract to preserve, and RMS becomes
+    a decision about whether to send trackers at all rather than a
+    reimplementation. That would remove a production gate.
+
 16. Is the tracker put in the **same transaction** as the source get?
 17. Does the tracker message carry the full source body, or only the rewritten
     header properties? (DESIGN item #25 — `FULL_COPY` roughly doubles RMS MQ

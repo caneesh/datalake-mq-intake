@@ -91,7 +91,7 @@ chain minus tracker send, with BISECT + suspect-tracking poison isolation
 | 7 | Audit store concurrency-safe | proven | Immutable one-file-per-batch (`audit_{datafile}.json`); no append anywhere |
 | 8 | Partition reconciliation exists | code + tests, **not scheduled** | `PartitionReconciliationService` fully tested (11 tests) but no production scheduler invokes it yet — see D3 |
 | 9 | Serializers contractual or gated | gate proven; contract now partly known | `PlaceholderSerializer` marker + `SerializerValidator.validateOrFail` invoked in `IntakeRuntimeManager.start()`; production mode fails fast. MDB evidence since narrows the target: types are `LongWritable`/`Text` under `RECORD` (now matched — D1 fixed), the payload is whitespace-normalised not verbatim (now reproduced — D2 done), and metadata Option A is unjustified because the key varies per record |
-| 10 | RMS tracker contract complete or gated | gated (proven) | §20.4 artifacts still missing → `RmsConfiguration.validateTrackerContract` blocks TRACKED production startup; `RmsTrackerContractGatingTest` |
+| 10 | RMS tracker contract complete or gated | gated (proven); **scope may shrink** | §20.4 artifacts still missing → `RmsConfiguration.validateTrackerContract` blocks TRACKED production startup; `RmsTrackerContractGatingTest`. New MDB evidence: `EJBHelper.forwardToMessageTracker` creates a transacted session and **never calls `session.commit()`**. That is either a genuine defect (trackers never delivered) or normal container-managed behaviour — the code reads identically both ways. If trackers are not arriving today, C11–C14 are moot and this gate can be removed rather than satisfied. See F3 |
 | 11 | Claims identity explicit & approved | gated (proven) | `claims.identity-field` required; production fails without it; missing identity in payload fails the batch; `ClaimsIdentityGatingTest` |
 | 12 | Health/metrics wired to live runtime | proven | Loop drives HEALTHY/DEGRADED/RECOVERING/UNHEALTHY; `BindingsHealthIndicator` reports per-binding via actuator; reconnect/audit/reconciliation counters exist (reconciliation counter fires only when reconciliation runs — see D3) |
 | 13 | One proven shutdown path | proven | `GracefulShutdownHandler` (unused duplicate) **removed**; the single path is SmartLifecycle → `IntakeRuntimeManager.stop()` → bounded drain → commit-or-rollback, proven by `gracefulShutdownWithInFlightBatchLosesNothing` |
@@ -142,8 +142,11 @@ last review:
 Removing the gates alone would therefore not make this deployable.
 
 ## D. CODE BLOCKERS
-1. ~~Writable types are wrong.~~ **FIXED.** Both serializers now declare
-   `LongWritable` key / `Text` value, matching production. Guarded by
+1. ~~Writable types are wrong.~~ **FIXED and CONFIRMED.** Both serializers now
+   declare `LongWritable` key / `Text` value. The live writer's actual append
+   line — `sequenceFileWriter.append(new LongWritable(offset), new Text(message))`
+   in `HDFSWriter.write(...)` — confirms this directly, independently of the
+   header-length fingerprint that first established it. Guarded by
    `ProductionLayoutFingerprintTest` in each module, which writes an empty
    SequenceFile from the serializer's declared classes and asserts the header
    is 129 bytes — the production fingerprint. The previous
@@ -162,13 +165,13 @@ Removing the gates alone would therefore not make this deployable.
    approved — replace placeholders, drop the marker, keep value bytes
    contract-compatible.
 
-   *Payload normalisation is now done:* `PayloadNormalizer` in core reproduces
-   `processMessage` — each `\n`, `\r`, `\t` replaced by one space, runs not
-   collapsed, no `trim()` — and both serializers apply it. It lives in core
-   because the MDB applies it upstream of the per-feed write, so both feeds
-   share it. Claims extracts identity *after* normalising, so the identity
-   corresponds to what is actually written rather than to a raw form no reader
-   of the file could recover.
+   *Payload normalisation is done and CONFIRMED:* `PayloadNormalizer` in core
+   reproduces `processMessage` — each `\n`, `\r`, `\t` replaced by one space,
+   runs not collapsed, no `trim()` — and both serializers apply it. The MDB
+   confirms both ingest paths call `processMessage` before `writeToHDFS`, so it
+   genuinely applies to the SequenceFile branch; no revert needed. Claims
+   extracts identity *after* normalising, so the identity corresponds to what
+   is actually written rather than to a raw form no reader could recover.
 
    *Still unresolved:* the key is a positional ordinal in our implementation,
    but the live writer's exact key expression is unconfirmed (MDB_QUESTIONS
@@ -233,7 +236,15 @@ should not be assumed from unit-scale tests.
    dedup, this field exists solely to serve reconciliation — a capability the
    MDB does not have. Dropping reconciliation removes this gate entirely.
 3. Legacy tracker rewrite artifacts (§20.4) — blocks RMS TRACKED production.
-   Gate open item #26 first (is the tracker session ever committed?).
+   **Answer DESIGN item #26 before spending any effort here.** The MDB creates
+   the tracker session with `createSession(true, 0)` and never calls
+   `session.commit()`. Under a container-managed transaction with a managed
+   connection factory that is correct and the container commits; under
+   bean-managed, or a non-managed factory, the send is never committed and
+   trackers have never been delivered. Static reading cannot separate the two.
+   Settle it empirically — tracker queue depth, or ask the consumers — and if
+   trackers are not arriving, this stops being a reimplementation and becomes a
+   decision about whether to send trackers at all.
 4. Quarantine/retention policy for reconciliation duplicates.
 5. **Freshness SLA per feed.** `batch_interval_ms` is now 0, so a message may
    wait until its partition window closes (~15 min worst case). Confirm both
