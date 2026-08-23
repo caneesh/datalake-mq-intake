@@ -13,20 +13,36 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * Production identity reader for landed SequenceFiles.
+ * Identity reader for landed SequenceFiles carrying a composite metadata key.
  *
- * <p>Both binding serializers write a Text key of the form
- * {@code binding_id=...|payload_guid=...|mq_message_id=...|...}. This reader
- * iterates the file's keys and extracts {@code payload_guid}, falling back to
- * {@code mq_message_id} when the payload identity is absent (§10: identity is
- * payload_guid with mq_message_id as fallback).
+ * <p>Reads a Text key of the form
+ * {@code binding_id=...|payload_guid=...|mq_message_id=...|...}, extracting
+ * {@code payload_guid} and falling back to {@code mq_message_id} when the
+ * payload identity is absent (§10: identity is payload_guid with
+ * mq_message_id as fallback).
  *
  * <p>Only keys are interpreted — record values are never deserialized beyond
  * what the SequenceFile format requires, keeping reconciliation cheap (§12).
+ *
+ * <p><strong>Not applicable to the production layout.</strong> Production
+ * SequenceFiles use a {@code LongWritable} positional key, which carries no
+ * identity, and the binding serializers now match that. Against such a file
+ * this reader returns no identities, which propagates as
+ * {@code INCONCLUSIVE} through {@link com.hcsc.datalake.mqintake.core.audit.OrphanFileClassifier}
+ * — the safe direction, since INCONCLUSIVE means KEEP, never delete. It does
+ * mean reconciliation cannot classify duplicates until metadata placement
+ * (open item #2) gives identity a home; a sidecar file (Option C) would
+ * restore it without altering the data files. The condition is logged once per
+ * reader rather than failing silently.
  */
 public class SequenceFileIdentityReader implements IdentityExtractor {
 
+    private static final org.slf4j.Logger log =
+            org.slf4j.LoggerFactory.getLogger(SequenceFileIdentityReader.class);
+
     private final Configuration conf;
+    private final java.util.concurrent.atomic.AtomicBoolean warnedNoIdentityKey =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public SequenceFileIdentityReader(Configuration conf) {
         this.conf = Objects.requireNonNull(conf, "conf required");
@@ -47,6 +63,14 @@ public class SequenceFileIdentityReader implements IdentityExtractor {
                 if (identity != null) {
                     identities.add(identity);
                 }
+            }
+
+            if (identities.isEmpty() && warnedNoIdentityKey.compareAndSet(false, true)) {
+                log.warn("No record identities found in {} (key class {}). Files using the " +
+                        "production positional key carry no identity, so reconciliation " +
+                        "cannot classify duplicates and will report INCONCLUSIVE (files are " +
+                        "KEPT). Resolve metadata placement (open item #2) to restore this.",
+                        filePath, reader.getKeyClass().getSimpleName());
             }
         }
 

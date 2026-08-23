@@ -3,12 +3,11 @@ package com.hcsc.datalake.mqintake.rms.serializer;
 import com.hcsc.datalake.mqintake.core.serializer.RecordMetadata;
 import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
 import org.apache.activemq.ActiveMQConnectionFactory;
-import org.apache.hadoop.io.BytesWritable;
+import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.junit.jupiter.api.*;
 
 import javax.jms.*;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.*;
@@ -16,9 +15,11 @@ import static org.assertj.core.api.Assertions.*;
 /**
  * Tests for RmsRecordSerializer.
  *
- * <p>WARNING: This tests a PLACEHOLDER serializer (§9.1). Output format
- * is non-contractual and will change when metadata placement decision
- * (open item #2) is finalized.
+ * <p>The layout under test is {@code LongWritable} key / {@code Text} value,
+ * matching the production SequenceFile types established from the legacy MDB.
+ * This remains a PLACEHOLDER serializer: the key's exact expression is
+ * unconfirmed, the payload is not yet whitespace-normalised as the MDB does,
+ * and record metadata has no home in this layout pending open item #2.
  */
 class RmsRecordSerializerTest {
 
@@ -42,8 +43,26 @@ class RmsRecordSerializerTest {
         if (connection != null) connection.close();
     }
 
+    // --- Production layout ---
+
     @Test
-    void serializesTextMessageWithMetadata() throws Exception {
+    void keyClassIsLongWritable() {
+        // Production writes LongWritable keys. Declaring Text here would make
+        // every file unreadable by a consumer opening it with the production
+        // key class, even though the payload bytes would be identical.
+        assertThat(serializer.getKeyClass()).isEqualTo(LongWritable.class);
+    }
+
+    @Test
+    void valueClassIsText() {
+        // Text and BytesWritable have different wire formats — Text writes a
+        // VInt length prefix, BytesWritable a fixed 4-byte int — so this is a
+        // compatibility requirement, not a cosmetic preference.
+        assertThat(serializer.getValueClass()).isEqualTo(Text.class);
+    }
+
+    @Test
+    void serializesToLongWritableKeyAndTextValue() throws Exception {
         String payload = "<MemberEvent><MessageID>f935a79a-e782-43b6-b874-test</MessageID></MemberEvent>";
         TextMessage message = session.createTextMessage(payload);
 
@@ -58,85 +77,87 @@ class RmsRecordSerializerTest {
 
         RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
 
-        assertThat(record.getKey()).isInstanceOf(Text.class);
-        assertThat(record.getValue()).isInstanceOf(BytesWritable.class);
+        assertThat(record.getKey()).isInstanceOf(LongWritable.class);
+        assertThat(record.getValue()).isInstanceOf(Text.class);
 
-        // Key contains metadata
-        String key = record.getKey().toString();
-        assertThat(key).contains("binding_id=rms");
-        assertThat(key).contains("payload_guid=f935a79a-e782-43b6-b874-test");
-        assertThat(key).contains("mq_message_id=ID:test-123");
-        assertThat(key).contains("source_file=rms_inst1_123_1.seq");
-        assertThat(key).contains("record_offset=5");
-
-        // Value is the raw payload
-        BytesWritable value = (BytesWritable) record.getValue();
-        String valueStr = new String(value.getBytes(), 0, value.getLength(), StandardCharsets.UTF_8);
-        assertThat(valueStr).isEqualTo(payload);
+        assertThat(((LongWritable) record.getKey()).get()).isEqualTo(5L);
+        assertThat(record.getValue().toString()).isEqualTo(payload);
     }
 
     @Test
-    void extractsMessageIdFromRawTags() throws Exception {
-        String payload = "<Root><MessageID>uuid-12345-abcde</MessageID></Root>";
-        TextMessage message = session.createTextMessage(payload);
+    void keyTracksRecordOffset() throws Exception {
+        TextMessage message = session.createTextMessage("<Test><MessageID>g</MessageID></Test>");
 
-        RecordMetadata metadata = RecordMetadata.builder()
-                .bindingId("rms")
-                .sourceFile("test.seq")
-                .recordOffset(0)
-                .build();
+        for (int offset = 0; offset < 3; offset++) {
+            RecordMetadata metadata = RecordMetadata.builder()
+                    .bindingId("rms").sourceFile("test.seq").recordOffset(offset).build();
 
-        RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
-
-        String key = record.getKey().toString();
-        assertThat(key).contains("payload_guid=uuid-12345-abcde");
+            RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
+            assertThat(((LongWritable) record.getKey()).get()).isEqualTo(offset);
+        }
     }
 
     @Test
-    void extractsMessageIdFromEscapedTags() throws Exception {
-        String payload = "&lt;Root&gt;&lt;MessageID&gt;escaped-uuid-67890&lt;/MessageID&gt;&lt;/Root&gt;";
+    void valuePreservesPayloadExactlyIncludingUnicode() throws Exception {
+        String payload = "<Test><Name>Tëst Üñîcödé 日本語</Name><MessageID>unicode-guid</MessageID></Test>";
         TextMessage message = session.createTextMessage(payload);
 
         RecordMetadata metadata = RecordMetadata.builder()
-                .bindingId("rms")
-                .sourceFile("test.seq")
-                .recordOffset(0)
-                .build();
+                .bindingId("rms").sourceFile("test.seq").recordOffset(0).build();
 
         RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
 
-        String key = record.getKey().toString();
-        assertThat(key).contains("payload_guid=escaped-uuid-67890");
+        assertThat(record.getValue().toString()).isEqualTo(payload);
+    }
+
+    // --- Payload GUID extraction ---
+    // Survives whichever metadata placement is chosen, so it is kept and
+    // tested even though the value is not currently written to the file.
+
+    @Test
+    void extractsPayloadGuidFromRawTags() {
+        assertThat(serializer.extractPayloadGuid(
+                "<Root><MessageID>uuid-12345-abcde</MessageID></Root>"))
+                .isEqualTo("uuid-12345-abcde");
     }
 
     @Test
-    void handlesPayloadWithoutMessageId() throws Exception {
-        String payload = "<MemberEvent><Name>Test</Name></MemberEvent>";
-        TextMessage message = session.createTextMessage(payload);
+    void extractsPayloadGuidFromEscapedTags() {
+        // Some upstream senders deliver XML-escaped content (§20.3); handling
+        // only one variant would silently stop identifying those messages.
+        assertThat(serializer.extractPayloadGuid(
+                "&lt;Root&gt;&lt;MessageID&gt;escaped-uuid-67890&lt;/MessageID&gt;&lt;/Root&gt;"))
+                .isEqualTo("escaped-uuid-67890");
+    }
+
+    @Test
+    void payloadGuidIsNullWhenAbsent() {
+        assertThat(serializer.extractPayloadGuid("<MemberEvent><Name>Test</Name></MemberEvent>"))
+                .isNull();
+        assertThat(serializer.extractPayloadGuid(null)).isNull();
+    }
+
+    @Test
+    void payloadWithoutMessageIdStillSerializes() throws Exception {
+        // Metadata is not written today, so a missing GUID must not fail the
+        // record. If a future placement makes the GUID contractual, this
+        // becomes a validation point — as it already is for claims.
+        TextMessage message = session.createTextMessage("<MemberEvent><Name>Test</Name></MemberEvent>");
 
         RecordMetadata metadata = RecordMetadata.builder()
-                .bindingId("rms")
-                .sourceFile("test.seq")
-                .recordOffset(0)
-                .build();
+                .bindingId("rms").sourceFile("test.seq").recordOffset(0).build();
 
-        RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
-
-        String key = record.getKey().toString();
-        // payload_guid should be empty but key should still be valid
-        assertThat(key).contains("payload_guid=");
-        assertThat(key).contains("binding_id=rms");
+        assertThatCode(() -> serializer.serialize(message, metadata)).doesNotThrowAnyException();
     }
+
+    // --- Failure modes ---
 
     @Test
     void throwsOnNullMessageBody() throws Exception {
         TextMessage message = session.createTextMessage(null);
 
         RecordMetadata metadata = RecordMetadata.builder()
-                .bindingId("rms")
-                .sourceFile("test.seq")
-                .recordOffset(0)
-                .build();
+                .bindingId("rms").sourceFile("test.seq").recordOffset(0).build();
 
         assertThatThrownBy(() -> serializer.serialize(message, metadata))
                 .isInstanceOf(RecordSerializer.SerializationException.class)
@@ -149,61 +170,10 @@ class RmsRecordSerializerTest {
         message.writeBytes("test".getBytes());
 
         RecordMetadata metadata = RecordMetadata.builder()
-                .bindingId("rms")
-                .sourceFile("test.seq")
-                .recordOffset(0)
-                .build();
+                .bindingId("rms").sourceFile("test.seq").recordOffset(0).build();
 
         assertThatThrownBy(() -> serializer.serialize(message, metadata))
                 .isInstanceOf(RecordSerializer.SerializationException.class)
                 .hasMessageContaining("TextMessage");
-    }
-
-    @Test
-    void keyClassIsText() {
-        assertThat(serializer.getKeyClass()).isEqualTo(Text.class);
-    }
-
-    @Test
-    void valueClassIsBytesWritable() {
-        assertThat(serializer.getValueClass()).isEqualTo(BytesWritable.class);
-    }
-
-    @Test
-    void handlesNullMetadataFields() throws Exception {
-        String payload = "<Test><MessageID>guid-test</MessageID></Test>";
-        TextMessage message = session.createTextMessage(payload);
-
-        RecordMetadata metadata = RecordMetadata.builder()
-                .bindingId("rms")
-                .sourceFile("test.seq")
-                .recordOffset(0)
-                // Other fields null
-                .build();
-
-        RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
-
-        String key = record.getKey().toString();
-        assertThat(key).contains("binding_id=rms");
-        assertThat(key).contains("mq_message_id=");  // Empty but present
-        assertThat(key).contains("mq_put_datetime=");
-    }
-
-    @Test
-    void preservesUnicodeInPayload() throws Exception {
-        String payload = "<Test><Name>Tëst Üñîcödé 日本語</Name><MessageID>unicode-guid</MessageID></Test>";
-        TextMessage message = session.createTextMessage(payload);
-
-        RecordMetadata metadata = RecordMetadata.builder()
-                .bindingId("rms")
-                .sourceFile("test.seq")
-                .recordOffset(0)
-                .build();
-
-        RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
-
-        BytesWritable value = (BytesWritable) record.getValue();
-        String valueStr = new String(value.getBytes(), 0, value.getLength(), StandardCharsets.UTF_8);
-        assertThat(valueStr).contains("Tëst Üñîcödé 日本語");
     }
 }

@@ -3,14 +3,13 @@ package com.hcsc.datalake.mqintake.claims.serializer;
 import com.hcsc.datalake.mqintake.core.serializer.PlaceholderSerializer;
 import com.hcsc.datalake.mqintake.core.serializer.RecordMetadata;
 import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
-import org.apache.hadoop.io.BytesWritable;
+import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 
 import javax.jms.JMSException;
 import javax.jms.Message;
 import javax.jms.TextMessage;
-import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
 /**
@@ -60,7 +59,7 @@ public class ClaimsRecordSerializer implements RecordSerializer, PlaceholderSeri
 
     /**
      * Creates a serializer for TEST/DEV use with the non-production fixture
-     * extractor. Missing identity is tolerated (null in the key).
+     * extractor. Missing identity is tolerated.
      *
      * <p><strong>Not for production.</strong> Production wiring must use
      * {@link #ClaimsRecordSerializer(ClaimsIdentityExtractor, boolean)} with an
@@ -112,11 +111,15 @@ public class ClaimsRecordSerializer implements RecordSerializer, PlaceholderSeri
                         "identity is required for reconciliation (open item #17)");
             }
 
-            String keyData = buildMetadataKey(metadata, payloadIdentity);
-            Text key = new Text(keyData);
+            // Production layout: LongWritable key, Text value (§9.1).
+            // The key is a positional ordinal; the exact expression the live
+            // MDB uses is unconfirmed (MDB_QUESTIONS A3), so the TYPE matches
+            // production while the VALUE does not yet.
+            LongWritable key = new LongWritable(metadata.getRecordOffset());
 
-            byte[] valueBytes = payload.getBytes(StandardCharsets.UTF_8);
-            BytesWritable value = new BytesWritable(valueBytes);
+            // NOTE: not yet whitespace-normalised the way the MDB's
+            // processMessage does (\n, \r, \t -> single space). Blocker D2.
+            Text value = new Text(payload);
 
             return new SerializedRecord(key, value);
 
@@ -138,38 +141,15 @@ public class ClaimsRecordSerializer implements RecordSerializer, PlaceholderSeri
                         ". Expected TextMessage.");
     }
 
-    /**
-     * Builds the metadata key string.
-     *
-     * <p><strong>PLACEHOLDER FORMAT — NOT CONTRACTUAL.</strong>
-     * Format will change when metadata placement decision (item #2) is finalized.
-     */
-    private String buildMetadataKey(RecordMetadata metadata, String payloadIdentity) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("binding_id=").append(nullSafe(metadata.getBindingId()));
-        sb.append("|payload_guid=").append(nullSafe(payloadIdentity));
-        sb.append("|mq_message_id=").append(nullSafe(metadata.getMqMessageId()));
-        sb.append("|mq_put_datetime=").append(
-                metadata.getMqPutTimestamp() != null ? metadata.getMqPutTimestamp().toString() : "");
-        sb.append("|consume_ts_utc=").append(
-                metadata.getConsumeTimestamp() != null ? metadata.getConsumeTimestamp().toString() : "");
-        sb.append("|source_file=").append(nullSafe(metadata.getSourceFile()));
-        sb.append("|record_offset=").append(metadata.getRecordOffset());
-        return sb.toString();
-    }
-
-    private String nullSafe(String value) {
-        return value != null ? value : "";
-    }
 
     @Override
     public Class<? extends Writable> getKeyClass() {
-        return Text.class;
+        return LongWritable.class;
     }
 
     @Override
     public Class<? extends Writable> getValueClass() {
-        return BytesWritable.class;
+        return Text.class;
     }
 
     /**

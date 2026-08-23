@@ -3,7 +3,7 @@ package com.hcsc.datalake.mqintake.claims.serializer;
 import com.hcsc.datalake.mqintake.core.serializer.RecordMetadata;
 import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
 import org.apache.activemq.ActiveMQConnectionFactory;
-import org.apache.hadoop.io.BytesWritable;
+import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.junit.jupiter.api.*;
 
@@ -67,19 +67,17 @@ class ClaimsRecordSerializerTest {
 
         RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
 
-        assertThat(record.getKey()).isInstanceOf(Text.class);
-        assertThat(record.getValue()).isInstanceOf(BytesWritable.class);
+        // Production layout: positional LongWritable key, Text value
+        assertThat(record.getKey()).isInstanceOf(LongWritable.class);
+        assertThat(record.getValue()).isInstanceOf(Text.class);
+        assertThat(((LongWritable) record.getKey()).get()).isEqualTo(3L);
+        assertThat(record.getValue().toString()).isEqualTo(payload);
 
-        String key = record.getKey().toString();
-        assertThat(key).contains("binding_id=claims");
-        assertThat(key).contains("payload_guid=claim-id-12345");
-        assertThat(key).contains("mq_message_id=ID:claims-456");
-        assertThat(key).contains("source_file=claims_inst1_789_1.seq");
-        assertThat(key).contains("record_offset=3");
-
-        BytesWritable value = (BytesWritable) record.getValue();
-        String valueStr = new String(value.getBytes(), 0, value.getLength(), StandardCharsets.UTF_8);
-        assertThat(valueStr).isEqualTo(payload);
+        // The metadata that used to ride in the key has no home in this layout.
+        // Identity is still extracted — it drives the failOnMissingIdentity
+        // check — but is not written to the file (open item #2).
+        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
+                .isEqualTo("claim-id-12345");
     }
 
     // --- Default extractor priority (CLM_XMITSN_ID then REC_CTL_NBR) ---
@@ -92,10 +90,13 @@ class ClaimsRecordSerializerTest {
         TextMessage message = session.createTextMessage(payload);
 
         RecordMetadata metadata = buildMinimalMetadata();
-        RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
+        serializer.serialize(message, metadata); // must still serialize
 
-        String key = record.getKey().toString();
-        assertThat(key).contains("payload_guid=xmit-id");
+        // Identity no longer rides in the key (production uses a LongWritable
+        // positional key). The extraction strategy is still live — it drives
+        // the failOnMissingIdentity check — so assert it directly.
+        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
+                .isEqualTo("xmit-id");
     }
 
     @Test
@@ -106,10 +107,13 @@ class ClaimsRecordSerializerTest {
         TextMessage message = session.createTextMessage(payload);
 
         RecordMetadata metadata = buildMinimalMetadata();
-        RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
+        serializer.serialize(message, metadata); // must still serialize
 
-        String key = record.getKey().toString();
-        assertThat(key).contains("payload_guid=fallback-ctl-123");
+        // Identity no longer rides in the key (production uses a LongWritable
+        // positional key). The extraction strategy is still live — it drives
+        // the failOnMissingIdentity check — so assert it directly.
+        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
+                .isEqualTo("fallback-ctl-123");
     }
 
     // --- Pluggable identity extractor ---
@@ -123,10 +127,13 @@ class ClaimsRecordSerializerTest {
         TextMessage message = session.createTextMessage(payload);
 
         RecordMetadata metadata = buildMinimalMetadata();
-        RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
+        serializer.serialize(message, metadata); // must still serialize
 
-        String key = record.getKey().toString();
-        assertThat(key).contains("payload_guid=custom-extracted-id");
+        // Identity no longer rides in the key (production uses a LongWritable
+        // positional key). The extraction strategy is still live — it drives
+        // the failOnMissingIdentity check — so assert it directly.
+        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
+                .isEqualTo("custom-extracted-id");
     }
 
     @Test
@@ -138,10 +145,13 @@ class ClaimsRecordSerializerTest {
         TextMessage message = session.createTextMessage(payload);
 
         RecordMetadata metadata = buildMinimalMetadata();
-        RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
+        serializer.serialize(message, metadata); // must still serialize
 
-        String key = record.getKey().toString();
-        assertThat(key).contains("payload_guid=adjustment-001");
+        // Identity no longer rides in the key (production uses a LongWritable
+        // positional key). The extraction strategy is still live — it drives
+        // the failOnMissingIdentity check — so assert it directly.
+        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
+                .isEqualTo("adjustment-001");
     }
 
     @Test
@@ -162,10 +172,13 @@ class ClaimsRecordSerializerTest {
         TextMessage message = session.createTextMessage(payload);
 
         RecordMetadata metadata = buildMinimalMetadata();
-        RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
+        serializer.serialize(message, metadata); // must still serialize
 
-        String key = record.getKey().toString();
-        assertThat(key).contains("payload_guid=escaped-id-999");
+        // Identity no longer rides in the key (production uses a LongWritable
+        // positional key). The extraction strategy is still live — it drives
+        // the failOnMissingIdentity check — so assert it directly.
+        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
+                .isEqualTo("escaped-id-999");
     }
 
     // --- Handles missing identity ---
@@ -180,9 +193,10 @@ class ClaimsRecordSerializerTest {
         RecordMetadata metadata = buildMinimalMetadata();
         RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
 
-        String key = record.getKey().toString();
-        assertThat(key).contains("payload_guid=");
-        assertThat(key).contains("binding_id=claims");
+        // No identity in the payload: tolerated here because this serializer
+        // was built without failOnMissingIdentity.
+        assertThat(serializer.getIdentityExtractor().extractIdentity(payload)).isNull();
+        assertThat(record.getValue().toString()).isEqualTo(payload);
     }
 
     // --- Error cases ---
@@ -222,15 +236,15 @@ class ClaimsRecordSerializerTest {
     // --- Key/value classes ---
 
     @Test
-    void keyClassIsText() {
+    void keyClassIsLongWritable() {
         ClaimsRecordSerializer serializer = new ClaimsRecordSerializer();
-        assertThat(serializer.getKeyClass()).isEqualTo(Text.class);
+        assertThat(serializer.getKeyClass()).isEqualTo(LongWritable.class);
     }
 
     @Test
-    void valueClassIsBytesWritable() {
+    void valueClassIsText() {
         ClaimsRecordSerializer serializer = new ClaimsRecordSerializer();
-        assertThat(serializer.getValueClass()).isEqualTo(BytesWritable.class);
+        assertThat(serializer.getValueClass()).isEqualTo(Text.class);
     }
 
     // --- Handles null metadata fields ---
@@ -248,12 +262,12 @@ class ClaimsRecordSerializerTest {
                 .recordOffset(0)
                 .build();
 
+        // Null metadata fields are simply absent from the record now that the
+        // key is positional — serialization must still succeed.
         RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
 
-        String key = record.getKey().toString();
-        assertThat(key).contains("binding_id=claims");
-        assertThat(key).contains("mq_message_id=");
-        assertThat(key).contains("mq_put_datetime=");
+        assertThat(((LongWritable) record.getKey()).get()).isEqualTo(0L);
+        assertThat(record.getValue().toString()).isEqualTo(payload);
     }
 
     // --- Unicode preservation ---
@@ -268,8 +282,7 @@ class ClaimsRecordSerializerTest {
         RecordMetadata metadata = buildMinimalMetadata();
         RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
 
-        BytesWritable value = (BytesWritable) record.getValue();
-        String valueStr = new String(value.getBytes(), 0, value.getLength(), StandardCharsets.UTF_8);
+        String valueStr = record.getValue().toString();
         assertThat(valueStr).contains("日本語テスト");
     }
 
@@ -287,8 +300,7 @@ class ClaimsRecordSerializerTest {
         RecordMetadata metadata = buildMinimalMetadata();
         RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
 
-        BytesWritable value = (BytesWritable) record.getValue();
-        String valueStr = new String(value.getBytes(), 0, value.getLength(), StandardCharsets.UTF_8);
+        String valueStr = record.getValue().toString();
         assertThat(valueStr).contains("2025-05-21-12.45.00.835539");
     }
 
@@ -304,8 +316,7 @@ class ClaimsRecordSerializerTest {
         RecordMetadata metadata = buildMinimalMetadata();
         RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
 
-        BytesWritable value = (BytesWritable) record.getValue();
-        String valueStr = new String(value.getBytes(), 0, value.getLength(), StandardCharsets.UTF_8);
+        String valueStr = record.getValue().toString();
         assertThat(valueStr).contains("<EVENT_TYPE>I</EVENT_TYPE>");
     }
 
@@ -319,10 +330,13 @@ class ClaimsRecordSerializerTest {
         TextMessage message = session.createTextMessage(payload);
 
         RecordMetadata metadata = buildMinimalMetadata();
-        RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
+        serializer.serialize(message, metadata); // must still serialize
 
-        String key = record.getKey().toString();
-        assertThat(key).contains("payload_guid=000042");
+        // Identity no longer rides in the key (production uses a LongWritable
+        // positional key). The extraction strategy is still live — it drives
+        // the failOnMissingIdentity check — so assert it directly.
+        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
+                .isEqualTo("000042");
     }
 
     private RecordMetadata buildMinimalMetadata() {

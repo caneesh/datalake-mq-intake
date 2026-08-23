@@ -134,14 +134,16 @@ class ClaimsIdentityGatingTest {
         TextMessage first = session.createTextMessage(payload);
         TextMessage second = session.createTextMessage(payload);
 
-        var record1 = serializer.serialize(first, testMetadata());
-        var record2 = serializer.serialize(second, testMetadata());
+        // Both must serialize, and both must yield the same business identity.
+        // Identity is not written to the file under the production layout, so
+        // assert it where it is actually produced and consumed.
+        serializer.serialize(first, testMetadata());
+        serializer.serialize(second, testMetadata());
 
-        String key1 = record1.getKey().toString();
-        String key2 = record2.getKey().toString();
-
-        assertThat(key1).contains("payload_guid=STABLE-42");
-        assertThat(key2).contains("payload_guid=STABLE-42");
+        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
+                .isEqualTo("STABLE-42");
+        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
+                .isEqualTo(serializer.getIdentityExtractor().extractIdentity(payload));
     }
 
     @Test
@@ -151,8 +153,10 @@ class ClaimsIdentityGatingTest {
 
         TextMessage message = session.createTextMessage("<Claim><OTHER>x</OTHER></Claim>");
 
+        // Tolerated: the fixture serializer is built without
+        // failOnMissingIdentity, so a payload with no identity still lands.
         var record = serializer.serialize(message, testMetadata());
-        assertThat(record.getKey().toString()).contains("payload_guid=");
+        assertThat(record.getValue().toString()).contains("<Claim>");
     }
 
     private RecordMetadata testMetadata() {

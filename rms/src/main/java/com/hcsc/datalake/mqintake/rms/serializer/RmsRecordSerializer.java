@@ -3,14 +3,13 @@ package com.hcsc.datalake.mqintake.rms.serializer;
 import com.hcsc.datalake.mqintake.core.serializer.PlaceholderSerializer;
 import com.hcsc.datalake.mqintake.core.serializer.RecordMetadata;
 import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
-import org.apache.hadoop.io.BytesWritable;
+import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 
 import javax.jms.JMSException;
 import javax.jms.Message;
 import javax.jms.TextMessage;
-import java.nio.charset.StandardCharsets;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -36,9 +35,20 @@ import java.util.regex.Pattern;
  * like SubscriberIdNumber, SourceLastUpdateTS). Those already exist in the
  * payload and core must stay schema-agnostic.
  *
- * <p>Current placeholder approach: metadata in key (Text), payload in value
- * (BytesWritable). This matches Option A from §9.1 pending verification that
- * no consumer depends on current key semantics.
+ * <p><strong>Layout:</strong> {@code LongWritable} key, {@code Text} value —
+ * matching the production SequenceFile types established from the legacy MDB.
+ * The key is a positional ordinal; the exact expression the live writer uses is
+ * still unconfirmed (MDB_QUESTIONS A3), so the type matches production while the
+ * value does not yet.
+ *
+ * <p><strong>The metadata above is therefore NOT written to the file.</strong>
+ * It previously rode in a composite Text key (Option A, §9.1), which the
+ * production types rule out — a {@code LongWritable} key has no room for it.
+ * Until metadata placement (open item #2) is resolved, records carry no
+ * payload_guid, so reconciliation and §10 orphan classification cannot identify
+ * records from file contents. Option C (sidecar file) would restore it without
+ * altering these data files. {@link #extractPayloadGuid} remains available for
+ * whichever placement is chosen.
  */
 public class RmsRecordSerializer implements RecordSerializer, PlaceholderSerializer {
 
@@ -72,16 +82,19 @@ public class RmsRecordSerializer implements RecordSerializer, PlaceholderSeriali
             // Extract payload
             String payload = extractPayload(message);
 
-            // Extract payload GUID from <MessageID> tag
-            String payloadGuid = extractMessageId(payload);
 
-            // Build metadata key (placeholder format — NOT contractual)
-            String keyData = buildMetadataKey(metadata, payloadGuid);
-            Text key = new Text(keyData);
+            // Production layout: LongWritable key, Text value (§9.1).
+            // The key is a positional ordinal. The exact expression the live
+            // MDB uses is still unconfirmed (MDB_QUESTIONS A3) — it seeds from
+            // getLength() and increments — so the TYPE matches production while
+            // the VALUE does not yet.
+            LongWritable key = new LongWritable(metadata.getRecordOffset());
 
-            // Value is the raw payload bytes
-            byte[] valueBytes = payload.getBytes(StandardCharsets.UTF_8);
-            BytesWritable value = new BytesWritable(valueBytes);
+            // Value is the payload as Text, matching the production value type.
+            // NOTE: not yet whitespace-normalised the way the MDB's
+            // processMessage does (\n, \r, \t → single space). Tracked as
+            // readiness blocker D2.
+            Text value = new Text(payload);
 
             return new SerializedRecord(key, value);
 
@@ -113,7 +126,7 @@ public class RmsRecordSerializer implements RecordSerializer, PlaceholderSeriali
      * @param payload the XML payload
      * @return the MessageID value, or null if not found
      */
-    private String extractMessageId(String payload) {
+    public String extractPayloadGuid(String payload) {
         if (payload == null) {
             return null;
         }
@@ -133,37 +146,14 @@ public class RmsRecordSerializer implements RecordSerializer, PlaceholderSeriali
         return null;
     }
 
-    /**
-     * Builds the metadata key string.
-     *
-     * <p><strong>PLACEHOLDER FORMAT — NOT CONTRACTUAL.</strong>
-     * Format will change when metadata placement decision (item #2) is finalized.
-     */
-    private String buildMetadataKey(RecordMetadata metadata, String payloadGuid) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("binding_id=").append(nullSafe(metadata.getBindingId()));
-        sb.append("|payload_guid=").append(nullSafe(payloadGuid));
-        sb.append("|mq_message_id=").append(nullSafe(metadata.getMqMessageId()));
-        sb.append("|mq_put_datetime=").append(
-                metadata.getMqPutTimestamp() != null ? metadata.getMqPutTimestamp().toString() : "");
-        sb.append("|consume_ts_utc=").append(
-                metadata.getConsumeTimestamp() != null ? metadata.getConsumeTimestamp().toString() : "");
-        sb.append("|source_file=").append(nullSafe(metadata.getSourceFile()));
-        sb.append("|record_offset=").append(metadata.getRecordOffset());
-        return sb.toString();
-    }
-
-    private String nullSafe(String value) {
-        return value != null ? value : "";
-    }
 
     @Override
     public Class<? extends Writable> getKeyClass() {
-        return Text.class;
+        return LongWritable.class;
     }
 
     @Override
     public Class<? extends Writable> getValueClass() {
-        return BytesWritable.class;
+        return Text.class;
     }
 }
