@@ -47,7 +47,13 @@ intake:
       hdfs-base-path: /data/raw/membership/hps
       batch-size: 4000          # ≤ MAXUMSGS/2 for TRACKED mode (unit of work is 2N)
       batch-bytes: 134217728    # 128 MB
-      batch-interval-ms: 30000  # 30 seconds
+      # 0 = no fixed timer. Flushes on batch-size, batch-bytes, or the partition
+      # boundary. This matches the legacy writer, which rolls a file only when
+      # its partition path changes, and keeps a quiet window to one file instead
+      # of one per interval. Trade-off: a message can wait until the end of its
+      # quarter-hour window (worst case ~15 min) before landing. Set a positive
+      # value here if a freshness SLA requires it.
+      batch-interval-ms: 0
       listener-threads: 4
       backout-queue: MQ.HPS.MEMBERSHIP.BACKOUT
       backout-threshold: 5

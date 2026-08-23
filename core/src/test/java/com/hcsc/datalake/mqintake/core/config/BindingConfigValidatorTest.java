@@ -8,6 +8,7 @@ import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 class BindingConfigValidatorTest {
 
@@ -294,15 +295,28 @@ class BindingConfigValidatorTest {
     }
 
     @Test
-    void zeroBatchIntervalMsFails() {
+    void zeroBatchIntervalMsIsAllowedAndDisablesTheFixedTimer() {
         BindingConfig binding = createValidTrackedBinding("rms");
+        // 0 means "no fixed timer" — the partition boundary remains an
+        // unconditional flush trigger, so a batch is still bounded in time.
         binding.setBatchIntervalMs(0);
+
+        properties.setBindings(Collections.singletonList(binding));
+
+        assertThatCode(() -> validator.validate(properties))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void negativeBatchIntervalMsFails() {
+        BindingConfig binding = createValidTrackedBinding("rms");
+        binding.setBatchIntervalMs(-1);
 
         properties.setBindings(Collections.singletonList(binding));
 
         assertThatThrownBy(() -> validator.validate(properties))
                 .isInstanceOf(BindingConfigurationException.class)
-                .hasMessageContaining("batch_interval_ms must be positive");
+                .hasMessageContaining("batch_interval_ms must not be negative");
     }
 
     @Test

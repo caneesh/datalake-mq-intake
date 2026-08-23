@@ -178,8 +178,12 @@ public class BindingConfigValidator {
                 errors.add(prefix + " batch_bytes must be positive");
             }
 
-            if (binding.getBatchIntervalMs() <= 0) {
-                errors.add(prefix + " batch_interval_ms must be positive");
+            // 0 disables the fixed timer, leaving the partition boundary as the
+            // only time-based flush trigger (§7.1 cadence, matching the legacy
+            // writer's roll-on-path-change behaviour). Negative is meaningless.
+            if (binding.getBatchIntervalMs() < 0) {
+                errors.add(prefix + " batch_interval_ms must not be negative " +
+                        "(0 disables the fixed timer; the partition boundary still flushes)");
             }
 
             if (binding.getListenerThreads() <= 0) {
