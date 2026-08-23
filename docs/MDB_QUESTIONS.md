@@ -107,29 +107,58 @@ seen the code that actually writes production SequenceFiles.
    record 1, which always receives 129. **Metadata Option A remains
    unjustified** pending G32 (does any consumer read the key?).
 
-3. **What is `offset` in `new LongWritable(offset)`?** Partially answered: the
-   key is a `LongWritable` built from a variable named `offset`, but its
-   definition and lifecycle are still unseen. Specifically — is it a field or a
-   local, is it seeded from `sequenceFileWriter.getLength()`, and **is it reset
-   when `openOutput(...)` rolls to a new file?** That last point decides
-   whether keys restart per file (so every file begins at the header length,
-   129) or run continuously across files. Our implementation uses a per-batch
-   record ordinal, which matches neither if the answer is `getLength()`.
+3. ~~What is `offset`?~~ **ANSWERED — it is the record's BYTE OFFSET in the
+   file, not an ordinal.**
+
+   ```java
+   updateWriter();
+   long offset = sequenceFileWriter.getLength();   // local, re-read every write
+   sequenceFileWriter.append(new LongWritable(offset), new Text(message));
+   ```
+
+   `offset` is a **local variable**, recomputed from `getLength()` on every
+   append — not a field, not a running counter. So the key is the byte position
+   at which that record begins. On rollover `updateWriter()` does
+   `closeOutput()` then `openOutput(newPath)`, and because the value is
+   re-derived per write it does not carry across files: a new file's first
+   record gets that file's header length (129), and a file reopened in append
+   mode continues from its current byte length.
+
+   This finally explains the `129` samples completely — not a constant, not an
+   ordinal, but "first record of a fresh file starts at byte 129".
+
+   **Our implementation is wrong here.** Both serializers use
+   `metadata.getRecordOffset()`, a per-batch record ordinal (0, 1, 2 …).
+   Production keys are byte offsets that grow with record size. See readiness
+   blocker D-key.
 
 4. **Does `updateWriter()` stage to a temp file and rename on roll, or write in
    place?** Path-triggered rollover implies the file stays *open across many
    MQ transactions*, and an open file cannot be renamed — so this may be a
    direct write with no visibility barrier at all. If so, our close→rename
    ordering is an addition, and a deliberate improvement rather than parity.
-5. **Which durability call does `HDFSWriter.write(...)` make, if any —
-   `hflush()`, `hsync()`, or neither?** Now the sharpest open question on this
-   branch, because of what CMT implies. The container commits when
-   `onMessage()` returns, but the SequenceFile stays **open** across many
-   messages (it rolls only on path change). So unless `write(...)` syncs per
-   record, MQ acknowledges a message while its data is still in an unflushed
-   open file — a data-loss window in the legacy system, not just a difference
-   from ours. If it *does* sync per record, that is an fsync per message and
-   likely a throughput factor worth knowing before sizing the replacement.
+5. ~~Which durability call does `HDFSWriter.write(...)` make?~~ **ANSWERED —
+   `hsync()` after every single append.**
+
+   ```java
+   sequenceFileWriter.append(...);
+   sequenceFileWriter.hsync();
+   ```
+
+   This **disproves the durability window** hypothesised earlier. Each record is
+   synced to the datanodes before `onMessage()` returns, so the container never
+   commits ahead of durable data. The legacy system is safe on this axis.
+
+   What remains is a *visibility* difference, not a durability one: the MDB
+   appends into an open file that already sits in the partition directory, so a
+   reader scanning that partition can see a partially written file. Our
+   `_tmp` → close → rename makes files visible only when complete.
+
+   *Throughput note:* an `hsync()` per message is a round trip to the datanode
+   pipeline on every record. That is a significant per-message cost and is
+   worth carrying into any sizing comparison — our design syncs once per batch
+   and then closes, so it should do far fewer.
+
 6. ~~Is `processMessage`'s whitespace normalisation applied on this branch?~~
    **ANSWERED — yes.** `processMessage` maps `\n`, `\r` and `\t` each to a
    space, and **both** ingest paths call it before `writeToHDFS(...)`, so it
@@ -264,10 +293,26 @@ production entirely.
 
 ## D. Identity and duplicate handling — scope-defining
 
-19. Does the MDB extract any **identity/GUID** from the payload at all, for any
-    purpose? For RMS (`MessageID`) and for claims separately.
-20. Is there any dedup, idempotency, or replay-detection logic anywhere, keyed
-    on anything?
+19. ~~Does the MDB extract any identity/GUID from the payload?~~ **ANSWERED —
+    no.**
+20. ~~Is there any dedup, idempotency, or replay-detection logic?~~
+    **ANSWERED — no.**
+
+    **This is scope-defining and now actionable.** Record identity exists in our
+    design solely to serve reconciliation and §10 orphan classification —
+    neither of which the MDB has. So the claims-identity gate guards a
+    capability the legacy system never provided, and under a "nothing new
+    beyond the MDB" rule it is optional:
+
+    - **Keep reconciliation** → open item #17 (approved claims identity) and
+      item #2 (metadata placement) must both be answered, and metadata needs a
+      home the production layout allows — Option C (sidecar), since the key is
+      a byte offset and the value is contractual.
+    - **Drop reconciliation** → the claims-identity gate and the metadata
+      placement decision both disappear, along with a code blocker. What is
+      lost is any automated way to classify a file that landed without an audit
+      record, which is the §10 safety net for at-least-once duplicates.
+
 21. **[human]** For claims specifically: is there an approved stable identity in
     the payload — `CLM_XMITSN_ID`, `REC_CTL_NBR`, or a wrapper field? (DESIGN
     open item #17, owner: source system team.)

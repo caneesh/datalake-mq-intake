@@ -46,20 +46,23 @@ came down. It wrote one file per message. This is the only real-world evidence
 anyone has about how this path behaves under production volume, and it points
 at file count / write latency as the failure mode.
 
-**2a. CMT plus path-based rollover implies a durability window in the legacy
-system.** The MDBs are container-managed, so the transaction commits when
-`onMessage()` returns — but `HDFSWriter` appends to a SequenceFile that stays
-open across many messages, rolling only when the path bucket changes. Unless
-`write(...)` syncs per record (unconfirmed — MDB_QUESTIONS A5), MQ acknowledges
-a message while its data sits in an unflushed open file, and a crash loses
-data that MQ has already released.
+**2a. RETRACTED — there is no durability window in the legacy system.** An
+earlier revision of this review reasoned that CMT plus an always-open file
+meant MQ acknowledged messages whose data was still unflushed. That was wrong:
+`HDFSWriter.write(...)` calls `sequenceFileWriter.hsync()` after **every**
+append, so each record is durable before `onMessage()` returns. The inference
+was sound given what was known; the fact was missing.
 
-Our close → rename → commit ordering is strictly stronger and is **a deliberate
-divergence from MDB parity**, mandated by the standing constraint that nothing
-is acknowledged before HDFS visibility. Worth stating explicitly: under a
-"nothing new beyond the MDB" rule this is the one place we should knowingly
-*not* match the legacy behaviour, because matching it would reintroduce the
-defect the project exists to remove.
+What does differ is **visibility, not durability**. The MDB appends into an
+open file already sitting in the partition directory, so a reader scanning that
+partition can observe a partially written file. Our `_tmp` → close → rename
+makes a file visible only once complete. That remains a deliberate divergence
+from parity, mandated by the standing constraint that nothing is acknowledged
+before HDFS visibility.
+
+*Carry into sizing:* `hsync()` per message is a datanode round trip on every
+record. Our design syncs once per batch and then closes, so it should perform
+far fewer — a point in favour of batching that is independent of file count.
 
 **3. Our flush cadence was heading for the same shape.** Before this review's
 changes, a fixed 30 s interval meant a quiet feed produced one file per
@@ -176,6 +179,19 @@ Removing the gates alone would therefore not make this deployable.
    delete), and now logged once rather than degrading silently. Reconciliation
    cannot classify duplicates until item #2 gives metadata a home; Option C
    (sidecar) would restore it without touching these data files.
+1a. **Key VALUES are wrong, though the type is right.** Production keys are the
+   record's **byte offset** in the file — `long offset = sequenceFileWriter.getLength()`
+   re-read before each append — so they grow with record size and restart at the
+   header length (129) in each new file. Both our serializers instead emit
+   `metadata.getRecordOffset()`, a per-batch ordinal (0, 1, 2 …).
+
+   Fixing this needs the byte offset to reach the serializer, which the current
+   `RecordSerializer.serialize(message, metadata)` seam does not carry —
+   `SequenceFileBatchWriter` would have to read `writer.getLength()` before each
+   record and pass it through `RecordMetadata`. Worth doing only if a consumer
+   actually reads the key (G32); if none does, the ordinal is harmless and this
+   can be closed as "known divergence, no impact".
+
 2. Production `RecordSerializer`s once metadata placement (open item #2) is
    approved — replace placeholders, drop the marker, keep value bytes
    contract-compatible.
@@ -245,11 +261,19 @@ should not be assumed from unit-scale tests.
    the SequenceFile key?* If yes, Option A is out and Option C (sidecar file,
    data files byte-identical) is the only route that preserves parity while
    still carrying the metadata reconciliation needs.
-2. Claims stable identity (§9.2, open item #17) — blocks claims
-   reconciliation readiness (`CLM_XMITSN_ID` vs `REC_CTL_NBR` vs wrapper).
-   **Scope-defining:** if the MDB extracts no payload identity and performs no
-   dedup, this field exists solely to serve reconciliation — a capability the
-   MDB does not have. Dropping reconciliation removes this gate entirely.
+2. **Reconciliation: in or out?** This is now the decision, and it subsumes
+   the claims-identity question. **Confirmed: the MDB extracts no payload
+   identity and performs no dedup.** So record identity exists in our design
+   solely to serve reconciliation and §10 orphan classification — capabilities
+   the legacy system never had.
+   - *Keep it* → open item #17 (approved claims identity) and item #2 (metadata
+     placement) both need answers, and metadata needs a home the production
+     layout permits. The key is a byte offset and the value is contractual, so
+     that means **Option C (sidecar)**.
+   - *Drop it* → the claims-identity gate and the metadata-placement decision
+     both disappear, along with a code blocker. Cost: no automated way to
+     classify a file that landed without an audit record — the §10 safety net
+     for at-least-once duplicates.
 3. Legacy tracker rewrite artifacts (§20.4) — blocks RMS TRACKED production.
    DESIGN item #26 is effectively resolved: the MDBs are container-managed, so
    the missing `session.commit()` is correct CMT code and the container commits
