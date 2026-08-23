@@ -180,7 +180,11 @@ public class TransactedReceiveLoop implements Runnable {
                         flushTrigger.reset();
                     }
                 } else {
-                    if (!batch.isEmpty() && flushTrigger.isTimeoutExpired()) {
+                    // Idle poll. shouldFlush() rather than isTimeoutExpired()
+                    // so the partition boundary is noticed here too — otherwise
+                    // a quiet batch would sit until the next message arrived,
+                    // and land in a later partition than the one it belongs to.
+                    if (!batch.isEmpty() && flushTrigger.shouldFlush()) {
                         processBatch(batch);
                         batch.clear();
                         flushTrigger.reset();

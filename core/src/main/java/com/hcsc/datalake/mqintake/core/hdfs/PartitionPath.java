@@ -22,8 +22,28 @@ import java.time.ZonedDateTime;
  */
 public final class PartitionPath {
 
+    /** Length of one partition window: a quarter hour. */
+    private static final long WINDOW_MILLIS = 15L * 60L * 1000L;
+
     private PartitionPath() {
         // Static utility class
+    }
+
+    /**
+     * Returns an identifier for the partition window containing the instant.
+     *
+     * <p>Two instants share a window identifier exactly when {@link #compute}
+     * would place them in the same partition directory. Epoch milliseconds
+     * divide evenly into quarter hours, so this agrees with the UTC
+     * {@code minute / 15} arithmetic in {@code compute} without repeating it.
+     *
+     * <p>Used to keep a batch from spanning a partition boundary: a batch that
+     * accumulated in one window is flushed before messages from the next join
+     * it, so each window produces its own file rather than everything landing
+     * in whichever partition happened to be current at flush time.
+     */
+    public static long windowId(Instant instant) {
+        return Math.floorDiv(instant.toEpochMilli(), WINDOW_MILLIS);
     }
 
     /**

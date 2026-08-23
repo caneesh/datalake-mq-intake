@@ -1,5 +1,7 @@
 package com.hcsc.datalake.mqintake.core.loop;
 
+import com.hcsc.datalake.mqintake.core.hdfs.PartitionPath;
+
 import javax.jms.JMSException;
 import javax.jms.Message;
 import java.time.Clock;
@@ -7,20 +9,39 @@ import java.time.Clock;
 /**
  * Determines when a batch should be flushed.
  *
- * <p>Three triggers, whichever fires first:
+ * <p>Four triggers, whichever fires first:
  * <ul>
  *   <li>Message count: batch_size reached</li>
  *   <li>Accumulated bytes: batch_bytes reached</li>
- *   <li>Elapsed time: batch_interval_ms since batch opened</li>
+ *   <li>Partition boundary: the batch would otherwise span two partition
+ *       windows (always active — see below)</li>
+ *   <li>Elapsed time: batch_interval_ms since the batch opened. Set
+ *       batch_interval_ms to 0 to disable, leaving the partition boundary as
+ *       the only time-based trigger.</li>
  * </ul>
  *
  * <p>The two feeds hit opposite constraints:
  * <ul>
- *   <li>RMS (lower volume): usually flushes on TIME trigger</li>
+ *   <li>RMS (lower volume): usually flushes on TIME or PARTITION trigger</li>
  *   <li>Claims (higher volume): usually flushes on SIZE or BYTES trigger</li>
  * </ul>
  *
- * <p>Do not assume one trigger dominates — all three must be implemented correctly.
+ * <p>Do not assume one trigger dominates — all must be implemented correctly.
+ *
+ * <p><strong>Why the partition trigger is unconditional.</strong> The legacy
+ * writer rolls a file only when its partition path changes, so a quiet window
+ * yields one file. A fixed interval instead yields one file per interval, and
+ * at trickle volume approaches one file per message — the shape of the failed
+ * JSONL migration that exhausted the MQ listeners. Bounding a batch to a single
+ * partition window restores the legacy cadence as a floor, independently of how
+ * batch_interval_ms is tuned, and keeps a window's data in one file rather than
+ * spread across whichever partitions were current at each flush.
+ *
+ * <p><strong>The interval measures from the first message, not from reset.</strong>
+ * Otherwise an idle gap longer than the interval counts against the next
+ * message, which flushes it alone the moment it arrives — again one file per
+ * message. The interval bounds how long a message waits, so it starts when
+ * there is a message to wait.
  */
 public class FlushTrigger {
 
@@ -31,7 +52,8 @@ public class FlushTrigger {
         NONE,
         SIZE,
         BYTES,
-        TIME
+        TIME,
+        PARTITION
     }
 
     private final int maxBatchSize;
@@ -40,6 +62,8 @@ public class FlushTrigger {
     private final Clock clock;
 
     private long batchStartTimeMs;
+    private long batchWindowId;
+    private boolean batchOpen;
     private long accumulatedBytes;
     private int messageCount;
 
@@ -66,6 +90,8 @@ public class FlushTrigger {
      */
     public void reset() {
         this.batchStartTimeMs = clock.millis();
+        this.batchWindowId = PartitionPath.windowId(clock.instant());
+        this.batchOpen = false;
         this.accumulatedBytes = 0;
         this.messageCount = 0;
     }
@@ -75,16 +101,36 @@ public class FlushTrigger {
      * Call this for each message added to the batch.
      */
     public void trackMessage(Message message) {
-        messageCount++;
-        accumulatedBytes += estimateMessageSize(message);
+        trackMessage(estimateMessageSize(message));
     }
 
     /**
      * Tracks a message with explicit size (for testing or pre-computed sizes).
      */
     public void trackMessage(long sizeBytes) {
+        openBatch();
         messageCount++;
         accumulatedBytes += sizeBytes;
+    }
+
+    /**
+     * Marks the batch as opened by its first message, anchoring both the
+     * interval and the partition window to that moment.
+     */
+    private void openBatch() {
+        if (!batchOpen) {
+            batchOpen = true;
+            batchStartTimeMs = clock.millis();
+            batchWindowId = PartitionPath.windowId(clock.instant());
+        }
+    }
+
+    /**
+     * Returns true if the batch has messages and the clock has since moved into
+     * a different partition window.
+     */
+    public boolean isPartitionBoundaryCrossed() {
+        return batchOpen && PartitionPath.windowId(clock.instant()) != batchWindowId;
     }
 
     /**
@@ -98,7 +144,7 @@ public class FlushTrigger {
 
     /**
      * Returns which trigger would cause a flush, or NONE.
-     * Triggers are checked in order: SIZE, BYTES, TIME.
+     * Triggers are checked in order: SIZE, BYTES, PARTITION, TIME.
      */
     public Trigger getActiveTrigger() {
         if (messageCount == 0) {
@@ -115,8 +161,13 @@ public class FlushTrigger {
             return Trigger.BYTES;
         }
 
-        // Time trigger: batch_interval_ms elapsed
-        if (getElapsedMs() >= maxBatchIntervalMs) {
+        // Partition trigger: the batch must not span two partition windows
+        if (isPartitionBoundaryCrossed()) {
+            return Trigger.PARTITION;
+        }
+
+        // Time trigger: batch_interval_ms elapsed (0 or less disables it)
+        if (maxBatchIntervalMs > 0 && getElapsedMs() >= maxBatchIntervalMs) {
             return Trigger.TIME;
         }
 
@@ -126,9 +177,10 @@ public class FlushTrigger {
     /**
      * Checks if the time trigger has expired.
      * Used for flushing partial batches on timeout.
+     * Always false when the interval is disabled (0 or less).
      */
     public boolean isTimeoutExpired() {
-        return getElapsedMs() >= maxBatchIntervalMs;
+        return maxBatchIntervalMs > 0 && getElapsedMs() >= maxBatchIntervalMs;
     }
 
     /**

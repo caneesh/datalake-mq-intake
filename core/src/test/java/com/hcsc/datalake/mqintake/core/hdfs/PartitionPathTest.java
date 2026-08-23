@@ -194,4 +194,40 @@ class PartitionPathTest {
 
         assertThat(path).endsWith("hour=04/quarter=3");
     }
+
+    // --- windowId must agree with compute() ---
+
+    @Test
+    void windowIdAgreesWithComputedPartitionAcrossADay() {
+        // Sweep a full day at one-minute resolution: two instants must share a
+        // window id exactly when they land in the same partition directory.
+        // If these ever disagree, batches would be bounded to the wrong window.
+        Instant start = Instant.parse("2026-08-22T00:00:00Z");
+        for (long minute = 0; minute < 24 * 60; minute++) {
+            Instant a = start.plusSeconds(minute * 60);
+            Instant b = start.plusSeconds((minute + 1) * 60);
+
+            boolean samePath = PartitionPath.compute("/base", a)
+                    .equals(PartitionPath.compute("/base", b));
+            boolean sameWindow = PartitionPath.windowId(a) == PartitionPath.windowId(b);
+
+            assertThat(sameWindow)
+                    .as("minute %d: path-equal=%s but window-equal=%s", minute, samePath, sameWindow)
+                    .isEqualTo(samePath);
+        }
+    }
+
+    @Test
+    void windowIdChangesExactlyOnQuarterBoundaries() {
+        Instant justBefore = Instant.parse("2026-08-22T10:14:59.999Z");
+        Instant atBoundary = Instant.parse("2026-08-22T10:15:00Z");
+        Instant withinNext = Instant.parse("2026-08-22T10:29:59.999Z");
+
+        assertThat(PartitionPath.windowId(justBefore))
+                .isNotEqualTo(PartitionPath.windowId(atBoundary));
+        assertThat(PartitionPath.windowId(atBoundary))
+                .isEqualTo(PartitionPath.windowId(withinNext));
+        assertThat(PartitionPath.windowId(atBoundary))
+                .isEqualTo(PartitionPath.windowId(justBefore) + 1);
+    }
 }

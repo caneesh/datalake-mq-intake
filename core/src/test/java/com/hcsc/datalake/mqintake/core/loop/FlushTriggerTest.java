@@ -175,20 +175,123 @@ class FlushTriggerTest {
     }
 
     @Test
-    void isTimeoutExpiredIndependentOfMessageCount() {
+    void intervalAnchorsToFirstMessageNotToReset() {
         TestClock clock = new TestClock();
         FlushTrigger trigger = new FlushTrigger(Integer.MAX_VALUE, Long.MAX_VALUE, 1000, clock);
 
-        // No messages, timeout not expired
+        // With no messages the interval is measured from reset
         assertThat(trigger.isTimeoutExpired()).isFalse();
-
-        // Advance past timeout
         clock.advance(1500);
         assertThat(trigger.isTimeoutExpired()).isTrue();
 
-        // Add a message - timeout still expired
+        // The first message opens the batch and re-anchors the interval, so an
+        // idle gap does not count against it. Previously the message would
+        // arrive already timed out and flush alone — one file per message at
+        // trickle volume, the shape that exhausted the MQ listeners.
         trigger.trackMessage(100);
-        assertThat(trigger.isTimeoutExpired()).isTrue();
+        assertThat(trigger.isTimeoutExpired()).isFalse();
+        assertThat(trigger.getActiveTrigger()).isEqualTo(FlushTrigger.Trigger.NONE);
+
+        // It then gets its own full interval to accumulate
+        clock.advance(1000);
+        assertThat(trigger.getActiveTrigger()).isEqualTo(FlushTrigger.Trigger.TIME);
+    }
+
+    // --- Partition Boundary Trigger ---
+
+    /** Quarter-hour partition window, in ms. */
+    private static final long WINDOW = 15L * 60L * 1000L;
+
+    @Test
+    void partitionBoundaryFlushesEvenWhenIntervalDisabled() {
+        TestClock clock = new TestClock();
+        // Interval disabled: the partition boundary is the only time trigger
+        FlushTrigger trigger = new FlushTrigger(Integer.MAX_VALUE, Long.MAX_VALUE, 0, clock);
+
+        clock.set(WINDOW * 100 + 60_000); // one minute into a window
+        trigger.reset();
+        trigger.trackMessage(100);
+
+        // Still inside the same window
+        clock.advance(60_000);
+        assertThat(trigger.getActiveTrigger()).isEqualTo(FlushTrigger.Trigger.NONE);
+
+        // Crossing into the next window forces the flush
+        clock.set(WINDOW * 101);
+        assertThat(trigger.isPartitionBoundaryCrossed()).isTrue();
+        assertThat(trigger.getActiveTrigger()).isEqualTo(FlushTrigger.Trigger.PARTITION);
+    }
+
+    @Test
+    void partitionBoundaryDoesNotFireWithoutMessages() {
+        TestClock clock = new TestClock();
+        FlushTrigger trigger = new FlushTrigger(Integer.MAX_VALUE, Long.MAX_VALUE, 0, clock);
+
+        clock.set(WINDOW * 100);
+        trigger.reset();
+
+        // An empty batch spanning a boundary must not produce an empty file
+        clock.set(WINDOW * 102);
+        assertThat(trigger.isPartitionBoundaryCrossed()).isFalse();
+        assertThat(trigger.getActiveTrigger()).isEqualTo(FlushTrigger.Trigger.NONE);
+    }
+
+    @Test
+    void sizeTriggerTakesPriorityOverPartition() {
+        TestClock clock = new TestClock();
+        FlushTrigger trigger = new FlushTrigger(2, Long.MAX_VALUE, 0, clock);
+
+        clock.set(WINDOW * 100);
+        trigger.reset();
+        trigger.trackMessage(100);
+        trigger.trackMessage(100);
+
+        clock.set(WINDOW * 101); // boundary crossed as well
+        assertThat(trigger.getActiveTrigger()).isEqualTo(FlushTrigger.Trigger.SIZE);
+    }
+
+    @Test
+    void resetClearsPartitionAnchor() {
+        TestClock clock = new TestClock();
+        FlushTrigger trigger = new FlushTrigger(Integer.MAX_VALUE, Long.MAX_VALUE, 0, clock);
+
+        clock.set(WINDOW * 100);
+        trigger.reset();
+        trigger.trackMessage(100);
+        clock.set(WINDOW * 101);
+        assertThat(trigger.getActiveTrigger()).isEqualTo(FlushTrigger.Trigger.PARTITION);
+
+        // After the flush, the next batch anchors to the new window
+        trigger.reset();
+        trigger.trackMessage(100);
+        assertThat(trigger.getActiveTrigger()).isEqualTo(FlushTrigger.Trigger.NONE);
+    }
+
+    @Test
+    void batchSpanningQuietWindowsProducesOneFilePerWindow() {
+        TestClock clock = new TestClock();
+        // No size/bytes pressure and no interval: only the boundary flushes
+        FlushTrigger trigger = new FlushTrigger(Integer.MAX_VALUE, Long.MAX_VALUE, 0, clock);
+
+        clock.set(WINDOW * 100);
+        trigger.reset();
+
+        int flushes = 0;
+        // One message every 5 minutes across three windows = 9 messages.
+        // With a 30s interval this was 9 files; aligned to the boundary it is
+        // one file per window.
+        for (int i = 0; i < 9; i++) {
+            trigger.trackMessage(100);
+            clock.advance(5L * 60L * 1000L);
+            if (trigger.shouldFlush()) {
+                flushes++;
+                trigger.reset();
+            }
+        }
+
+        assertThat(flushes)
+                .as("one flush per partition window crossed, not one per message")
+                .isEqualTo(3);
     }
 
     // --- Trigger Priority Tests ---
