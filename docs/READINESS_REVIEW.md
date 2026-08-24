@@ -239,6 +239,37 @@ its window, worst case ~15 minutes, against 30 s previously. Raise
 
 Mitigated in design, **not proven under load** — see the scale gap below.
 
+**R-3 — claims message sizes make the current batch config unsafe.** Source
+documentation gives typical claims messages at ~30 KB with **some over 10 MB**.
+Against `batch_bytes` 128 MB and `batch_size` 8000:
+
+| Message size | Batch fills at | Notes |
+|---|---|---|
+| ~30 KB (typical) | ~4,400 messages | bytes trigger, well before `batch_size` |
+| >10 MB (tail) | **~13 messages** | a batch is a handful of very large objects |
+
+Two consequences:
+
+- **`batch_size` 8000 is effectively dead config** for claims — the bytes
+  trigger always fires first. Harmless, but it means the batch-size figure
+  gives a misleading impression of how many messages a unit of work holds.
+- **Heap risk is larger than the budget suggests.** `estimateMessageSize`
+  returns `text.length()` — a character count. A Java `String` holds ~2 bytes
+  per char (UTF-16), plus the JMS message and MQ client buffers, so retained
+  heap runs ~2–3× the estimate. A 128 MB budget × 4 threads is ~512 MB
+  estimated but plausibly **1–1.5 GB retained**, for claims alone. The
+  heap-derived ceiling (50% of max heap) exists to absorb exactly this, but it
+  means `-Xmx` must be sized for the *retained* figure, not the configured one.
+
+For UAT, lower claims `batch_bytes` (32 MB is a reasonable starting point) and
+size the heap from the retained estimate rather than the budget.
+
+**R-4 — 10 MB messages may exceed the queue manager's `MAXMSGL`.** IBM MQ
+defaults to 4 MB. If `MAXMSGL` is not raised on the claims queues *and* the
+channel, messages in the >10 MB tail cannot be put or got at all. Verify before
+UAT — this would present as a hard failure on the largest and most valuable
+messages, not as degradation.
+
 **R-2 — scale is untested by roughly three orders of magnitude.** The largest
 volume ever pushed through the production path in a test is 12 messages.
 Production is batch 8000 × 4 threads (claims) and 4000 × 4 (RMS). The acute
@@ -350,3 +381,4 @@ Still required before production cutover:
 | Crash after commit, before audit | file kept; retrospective audit | proven (embedded + reconciliation tests) |
 | Production message volume | batching bounds file count; partition-aligned flush | **not proven** — 12 messages max in test vs batch 8000 (R-2). The comparable prior attempt failed here (R-1) |
 | Quiet-period file cadence | one file per partition window | mitigated in design and unit-tested; unmeasured against a real feed (R-1) |
+| Out-of-order / redistributed delivery | landing order non-authoritative | **confirmed acceptable by the claims consumer**, which stores all messages and builds the current view on read |
