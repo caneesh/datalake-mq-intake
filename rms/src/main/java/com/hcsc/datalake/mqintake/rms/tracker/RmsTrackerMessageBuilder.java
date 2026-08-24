@@ -57,14 +57,18 @@ public class RmsTrackerMessageBuilder implements TrackerMessageBuilder {
     public static java.util.List<String> trackerContractGaps() {
         java.util.List<String> gaps = new java.util.ArrayList<>();
         if (HeaderRewriter.TAG_LIST.length == 0) {
-            gaps.add("tagList contents (§20.4): actual rewritten tag names not captured");
-            gaps.add("setReplacedTagData / getCompleteStartTag / getCompleteEndTag bodies not captured (§20.4)");
+            gaps.add("tagList contents not captured (§20.4)");
         }
         if (!HeaderRewriter.ROOT_END_TAG_VERIFIED) {
-            gaps.add("ROOT_END_TAG / ROOT_END_TAG_CHAR values unverified against legacy (§20.4)");
+            gaps.add("ROOT_END_TAG / ROOT_END_TAG_CHAR unverified against legacy (§20.4)");
+        }
+        if (!HeaderRewriter.TAG_VALUE_MAPPING_CAPTURED) {
+            gaps.add("buildResultData / setReplacedTagData bodies not captured (§20.4) — " +
+                    "which of the four supplied values each of the five tags receives is " +
+                    "not derivable from the call site");
         }
         if (!HeaderRewriter.GOLDEN_MASTER_AVAILABLE) {
-            gaps.add("No golden-master before/after MessageHeaderDetails fixture");
+            gaps.add("No before/after MessageHeaderDetails sample to validate against");
         }
         return gaps;
     }
@@ -234,20 +238,51 @@ public class RmsTrackerMessageBuilder implements TrackerMessageBuilder {
      */
     static class HeaderRewriter {
 
-        // TODO (§20.4): Replace with actual values from current implementation.
-        // Flip ROOT_END_TAG_VERIFIED to true once verified against legacy code.
-        static final boolean ROOT_END_TAG_VERIFIED = false;
-        private static final String ROOT_END_TAG = "</MessageHeaderDetails>";
-        private static final String ROOT_END_TAG_ESCAPED = "&lt;/MessageHeaderDetails&gt;";
+        // Captured from EJBHelper (§20.4). These are confirmed, not inferred.
+        static final boolean ROOT_END_TAG_VERIFIED = true;
+        static final String ROOT_END_TAG = "</MessageHeaderDetailsType>";
+        static final String ROOT_END_TAG_ESCAPED = "&lt;/MessageHeaderDetailsType&gt;";
 
-        // TODO (§20.4): Flip to true once a real before/after header fixture
-        // from the legacy system is checked into the test resources.
+        /** EJBHelper.tagList, in order. */
+        static final String[] TAG_LIST = {
+                "ReportingSystem",
+                "SourceSystem",
+                "DestSystem",
+                "MesgStatus",
+                "CreatedTimeStamp"
+        };
+
+        /** EJBHelper.escapeCharLessList / escapeCharGrtList — index 0 raw, 1 escaped. */
+        static final String[] LESS_THAN = {"<", "&lt;"};
+        static final String[] GREATER_THAN = {">", "&gt;"};
+
+        /**
+         * Still missing: the bodies of {@code setReplacedTagData} and
+         * {@code buildResultData}.
+         *
+         * <p>The surrounding algorithm is captured, but {@code buildResultData}
+         * decides which of the four supplied values each of the five tags
+         * receives, and that mapping is not derivable from the call site — it
+         * is passed all four values on every iteration. {@code DestSystem} in
+         * particular does not obviously correspond to the parameter named
+         * {@code destinationStatus}, and {@code CreatedTimeStamp} has no
+         * supplied value at all. Guessing it would produce tracker messages
+         * that look right and carry wrong values.
+         */
+        static final boolean TAG_VALUE_MAPPING_CAPTURED = false;
+
+        /** No before/after sample from the legacy system yet (§20.4). */
         static final boolean GOLDEN_MASTER_AVAILABLE = false;
 
-        // TODO (§20.4): Populate from tagList in current implementation
-        static final String[] TAG_LIST = {
-            // Placeholder — actual tag names TBD
-        };
+        /** EJBHelper.getCompleteStartTag — inferred, pending confirmation. */
+        static String completeStartTag(String tag, int variant) {
+            return LESS_THAN[variant] + tag + GREATER_THAN[variant];
+        }
+
+        /** EJBHelper.getCompleteEndTag — inferred, pending confirmation. */
+        static String completeEndTag(String tag, int variant) {
+            return LESS_THAN[variant] + "/" + tag + GREATER_THAN[variant];
+        }
 
         /**
          * Rewrites the header to inject tracker fields.

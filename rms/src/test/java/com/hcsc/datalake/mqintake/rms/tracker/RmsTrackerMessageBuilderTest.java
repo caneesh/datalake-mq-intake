@@ -60,7 +60,7 @@ class RmsTrackerMessageBuilderTest {
 
         TextMessage sourceMessage = session.createTextMessage("<Test>payload</Test>");
         sourceMessage.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS,
-                "<MessageHeaderDetails></MessageHeaderDetails>");
+                "<MessageHeaderDetailsType></MessageHeaderDetailsType>");
 
         Optional<Message> result = builder.build(session, sourceMessage);
 
@@ -96,7 +96,7 @@ class RmsTrackerMessageBuilderTest {
         String payload = "<MemberEvent><Data>Important content here</Data></MemberEvent>";
         TextMessage sourceMessage = session.createTextMessage(payload);
         sourceMessage.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS,
-                "<MessageHeaderDetails></MessageHeaderDetails>");
+                "<MessageHeaderDetailsType></MessageHeaderDetailsType>");
 
         Optional<Message> result = builder.build(session, sourceMessage);
 
@@ -113,7 +113,7 @@ class RmsTrackerMessageBuilderTest {
 
         TextMessage sourceMessage = session.createTextMessage("<Big>payload</Big>");
         sourceMessage.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS,
-                "<MessageHeaderDetails></MessageHeaderDetails>");
+                "<MessageHeaderDetailsType></MessageHeaderDetailsType>");
 
         Optional<Message> result = builder.build(session, sourceMessage);
 
@@ -130,7 +130,7 @@ class RmsTrackerMessageBuilderTest {
 
         TextMessage sourceMessage = session.createTextMessage("<Test>payload</Test>");
         sourceMessage.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS,
-                "<MessageHeaderDetails></MessageHeaderDetails>");
+                "<MessageHeaderDetailsType></MessageHeaderDetailsType>");
 
         Optional<Message> result = builder.build(session, sourceMessage);
 
@@ -147,7 +147,7 @@ class RmsTrackerMessageBuilderTest {
                 RmsTrackerMessageBuilder.TrackerFields.defaultRms());
 
         TextMessage sourceMessage = session.createTextMessage("<Test>payload</Test>");
-        String rawHeader = "<MessageHeaderDetails><SomeTag>value</SomeTag></MessageHeaderDetails>";
+        String rawHeader = "<MessageHeaderDetailsType><SomeTag>value</SomeTag></MessageHeaderDetailsType>";
         sourceMessage.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS, rawHeader);
 
         Optional<Message> result = builder.build(session, sourceMessage);
@@ -168,7 +168,7 @@ class RmsTrackerMessageBuilderTest {
                 RmsTrackerMessageBuilder.TrackerFields.defaultRms());
 
         TextMessage sourceMessage = session.createTextMessage("<Test>payload</Test>");
-        String escapedHeader = "&lt;MessageHeaderDetails&gt;&lt;SomeTag&gt;value&lt;/SomeTag&gt;&lt;/MessageHeaderDetails&gt;";
+        String escapedHeader = "&lt;MessageHeaderDetailsType&gt;&lt;SomeTag&gt;value&lt;/SomeTag&gt;&lt;/MessageHeaderDetailsType&gt;";
         sourceMessage.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS, escapedHeader);
 
         Optional<Message> result = builder.build(session, sourceMessage);
@@ -189,7 +189,7 @@ class RmsTrackerMessageBuilderTest {
                 RmsTrackerMessageBuilder.TrackerFields.defaultRms());
 
         TextMessage sourceMessage = session.createTextMessage("<Test>payload</Test>");
-        String header = "<MessageHeaderDetails><ExistingTag>data</ExistingTag></MessageHeaderDetails>";
+        String header = "<MessageHeaderDetailsType><ExistingTag>data</ExistingTag></MessageHeaderDetailsType>";
         sourceMessage.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS, header);
 
         Optional<Message> result = builder.build(session, sourceMessage);
@@ -200,7 +200,7 @@ class RmsTrackerMessageBuilderTest {
 
         // Fields should be spliced before the closing tag
         int reportingPos = rewrittenHeader.indexOf("<ReportingSystem>");
-        int closingPos = rewrittenHeader.indexOf("</MessageHeaderDetails>");
+        int closingPos = rewrittenHeader.indexOf("</MessageHeaderDetailsType>");
 
         assertThat(reportingPos).isLessThan(closingPos);
     }
@@ -229,7 +229,7 @@ class RmsTrackerMessageBuilderTest {
 
         TextMessage sourceMessage = session.createTextMessage("<Test>payload</Test>");
         sourceMessage.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS,
-                "<MessageHeaderDetails></MessageHeaderDetails>");
+                "<MessageHeaderDetailsType></MessageHeaderDetailsType>");
 
         Optional<Message> result = builder.build(session, sourceMessage);
 
@@ -253,7 +253,7 @@ class RmsTrackerMessageBuilderTest {
         TextMessage sourceMessage = session.createTextMessage("<Test>payload</Test>");
         sourceMessage.setJMSCorrelationID("correlation-12345");
         sourceMessage.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS,
-                "<MessageHeaderDetails></MessageHeaderDetails>");
+                "<MessageHeaderDetailsType></MessageHeaderDetailsType>");
 
         Optional<Message> result = builder.build(session, sourceMessage);
 
@@ -286,5 +286,39 @@ class RmsTrackerMessageBuilderTest {
 
         assertThat(builder.getBodyMode()).isEqualTo(TrackerBodyMode.HEADER_ONLY);
         assertThat(builder.getTrackerFields()).isSameAs(fields);
+    }
+
+    // --- Captured legacy constants (§20.4) ---
+    // These pin values taken from EJBHelper. They are cheap, and the cost of
+    // getting one wrong is a tracker message that looks correct and is not.
+
+    @Test
+    void rootEndTagMatchesTheLegacyConstant() {
+        // The placeholder used "</MessageHeaderDetailsType>". The real element is
+        // MessageHeaderDetailsType — a one-word difference that would make every
+        // splice miss and silently append at the end of the header instead.
+        assertThat(RmsTrackerMessageBuilder.HeaderRewriter.ROOT_END_TAG)
+                .isEqualTo("</MessageHeaderDetailsType>");
+        assertThat(RmsTrackerMessageBuilder.HeaderRewriter.ROOT_END_TAG_ESCAPED)
+                .isEqualTo("&lt;/MessageHeaderDetailsType&gt;");
+    }
+
+    @Test
+    void tagListMatchesTheLegacyOrderAndContents() {
+        assertThat(RmsTrackerMessageBuilder.HeaderRewriter.TAG_LIST)
+                .containsExactly("ReportingSystem", "SourceSystem", "DestSystem",
+                        "MesgStatus", "CreatedTimeStamp");
+    }
+
+    @Test
+    void tagsAreBuiltInBothRawAndEscapedForms() {
+        assertThat(RmsTrackerMessageBuilder.HeaderRewriter.completeStartTag("MesgStatus", 0))
+                .isEqualTo("<MesgStatus>");
+        assertThat(RmsTrackerMessageBuilder.HeaderRewriter.completeEndTag("MesgStatus", 0))
+                .isEqualTo("</MesgStatus>");
+        assertThat(RmsTrackerMessageBuilder.HeaderRewriter.completeStartTag("MesgStatus", 1))
+                .isEqualTo("&lt;MesgStatus&gt;");
+        assertThat(RmsTrackerMessageBuilder.HeaderRewriter.completeEndTag("MesgStatus", 1))
+                .isEqualTo("&lt;/MesgStatus&gt;");
     }
 }

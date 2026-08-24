@@ -248,15 +248,44 @@ addition; the reconciliation file-discovery logic.
 
 The four artifacts named in DESIGN §20.4, all expected to be in the MDB source:
 
-11. Contents of `tagList` — the actual tag names rewritten.
-12. `ROOT_END_TAG` and `ROOT_END_TAG_CHAR` values.
-13. Bodies of `getCompleteStartTag`, `getCompleteEndTag`, `setReplacedTagData`,
-    `buildResultData`.
-14. A sample `MessageHeaderDetails` value **before and after** rewriting —
-    DESIGN calls this "the highest-value artefact for validating a
-    reimplementation".
+11. ~~Contents of `tagList`~~ **CAPTURED:** ReportingSystem, SourceSystem,
+    DestSystem, MesgStatus, CreatedTimeStamp (in that order).
+12. ~~`ROOT_END_TAG` / `ROOT_END_TAG_CHAR`~~ **CAPTURED:**
+    `</MessageHeaderDetailsType>` and `&lt;/MessageHeaderDetailsType&gt;`.
+    Note the element is `MessageHeaderDetailsType`, not `MessageHeaderDetails`
+    — our placeholder had the latter, which would have made every splice miss.
+    Escape lists are `["<", "&lt;"]` and `[">", "&gt;"]`, index 0 raw, 1 escaped.
+13. **Bodies of `setReplacedTagData` and `buildResultData` — STILL MISSING, and
+    now the only thing blocking the RMS gate.** `getStringMessageHeader` is
+    captured, so the surrounding algorithm is known:
 
-Behavioural questions on the same path:
+    ```
+    for each tag in tagList:
+        build start/end tags in raw and escaped form
+        if header contains raw start   -> header = setReplacedTagData(header, raw start, raw end)
+        else if contains escaped start -> header = setReplacedTagData(header, esc start, esc end)
+        if header contains ROOT_END_TAG      -> buildResultData(sb, raw start, raw end, 4 values)
+        else if contains ROOT_END_TAG_CHAR   -> buildResultData(sb, esc start, esc end, 4 values)
+    if sb non-empty: append the matching root end tag, then replace it in header
+    ```
+
+    **Why it cannot be inferred:** `buildResultData` receives all four values
+    (`reportingSystem`, `sourceSystem`, `messageStatus`, `destinationStatus`) on
+    every iteration, so which tag consumes which is decided inside it. Two
+    specific unknowns: `DestSystem` does not obviously map to the parameter
+    named `destinationStatus`, and `CreatedTimeStamp` has no supplied value at
+    all — presumably a generated timestamp, but of what format? Guessing
+    produces well-formed tracker messages carrying wrong values, which is worse
+    than failing to start.
+14. A before/after `MessageHeaderDetails` sample — still the cheapest way to
+    validate whatever #13 turns out to be.
+
+    **Also captured, from the call site:** the values actually passed are
+    reportingSystem `DMIH/DL`, sourceSystem `IIB`, messageStatus `RCVD`,
+    destinationStatus empty — matching `TrackerFields.defaultRms()`. Body is a
+    full copy (`session.createTextMessage(textMessage.getText())`), confirming
+    `FULL_COPY` and closing DESIGN item #25. Null-header early return confirms
+    our suppress behaviour.
 
 15. ~~Is the tracker session ever committed?~~ **ANSWERED — yes, by the
     container, not by application code.**

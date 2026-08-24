@@ -19,10 +19,17 @@ class RmsTrackerContractGatingTest {
         // no golden-master fixture. If this test starts failing, the contract
         // was completed — remove the production gate expectations accordingly.
         assertThat(RmsTrackerMessageBuilder.isTrackerContractReady()).isFalse();
+
+        // tagList and the root-end constants ARE now captured from EJBHelper,
+        // so those gaps are gone. What remains is the tag -> value mapping
+        // inside buildResultData, which the call site does not reveal: all four
+        // values are passed on every iteration, so which tag receives which
+        // cannot be inferred. Guessing would emit well-formed tracker messages
+        // carrying wrong values.
         assertThat(RmsTrackerMessageBuilder.trackerContractGaps())
                 .isNotEmpty()
-                .anySatisfy(gap -> assertThat(gap).contains("tagList"))
-                .anySatisfy(gap -> assertThat(gap).contains("golden-master"));
+                .noneSatisfy(gap -> assertThat(gap).contains("tagList contents"))
+                .anySatisfy(gap -> assertThat(gap).contains("buildResultData"));
     }
 
     @Test
@@ -32,7 +39,7 @@ class RmsTrackerContractGatingTest {
         assertThatThrownBy(config::trackerMessageBuilderFactory)
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("production startup blocked")
-                .hasMessageContaining("tagList");
+                .hasMessageContaining("buildResultData");
     }
 
     @Test
