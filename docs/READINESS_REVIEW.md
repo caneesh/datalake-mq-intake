@@ -278,6 +278,26 @@ converges acceptably on the high-volume feed — the exact scenario BISECT was
 chosen for — is unmeasured. Given R-1's precedent, load behaviour on this path
 should not be assumed from unit-scale tests.
 
+## D″. Reviewed, known, deliberately not fixed before cutover
+
+A structured review of the delivery-critical classes (loop, writer/flush,
+poison/degraded) found twelve issues. Six were fixed, each with a regression
+test verified to fail against the unfixed code. The remaining six are recorded
+here rather than silently carried: none can lose a message, and all were judged
+higher-risk to change than to leave two days before cutover.
+
+| # | Finding | Why it can wait | Cost if it fires |
+|---|---|---|---|
+| 1 | **Suspect set has no TTL or cap.** `collectMessageIds` silently skips a message whose `getJMSMessageID()` throws, so that ID is never passed to `clearSuspects` and stays in the set forever. An admin purge or MQ-side expiry orphans IDs the same way. | Requires `getJMSMessageID()` to throw, which has not been observed. | `recordSuccess()` can never satisfy "no suspects outstanding" — the binding stays at reduced batch size until restarted. Throughput only; delivery is unaffected. Restart clears it. |
+| 2 | **`isSessionBroken()` is substring matching.** Whether a `JMSException` triggers `recoverSession()` is decided by searching the message and error code for keywords. A connection loss whose text does not match falls outside the backoff path and the loop retries tightly against a dead session. | The error codes that actually occur are covered, and both are exercised against a real queue manager (channel bounce and full QM restart). | Log flood and a spinning thread, not loss — each iteration still rolls back and clears the batch. Needs a restart. |
+| 3 | **`BatchWriteException` data-classification is text matching.** `FailureClassifier` looks for "serialize"/"parse"/"malformed"/"invalid"; the only production site that matches does so because its message happens to contain "serialize". No shared constant, no test pinning the coupling. | Works today; the primary data path (`SerializationException`) is classified by type, not text. | If the string is ever edited, that failure silently becomes `UNKNOWN`, which never enters degraded mode — a poison message would stop being isolated. Worth a typed fix in the next iteration. |
+| 4 | **HDFS rename failure classifies as `UNKNOWN`.** The `rename() == false` exception carries no cause and matches no HDFS keyword. | Both `UNKNOWN` and `HDFS_INFRASTRUCTURE` skip degraded mode, and `UNKNOWN` alerts more aggressively. | Muddies on-call triage of the rename step. No behavioural difference. |
+| 5 | **A clean message can reach the backout queue during a long outage.** Poison detection is delivery-count-only. Infrastructure failures deliberately do not shrink the batch, so every message in every rolled-back batch accrues delivery count at full rate; a long enough outage pushes an undamaged message past `BOTHRESH`. | **This is legacy parity, not a regression** — `BOTHRESH` is an MQ-level mechanism and the existing MDB behaves identically. | Valid messages diverted to the BOQ during an incident. Mitigated by sizing `BOTHRESH` above plausible outage windows; confirm that sizing with the MQ team (see §E). |
+| 6 | **A `RuntimeException` in the loop body outside `processBatch` kills the listener thread.** `runLoop()` catches only `JMSException`; `processBatch` catches `Exception` internally, so the exposure is the few statements around it. | No such path is known to throw. | `session.close()` in the `finally` rolls back per the JMS spec, so nothing is falsely committed — but that thread is gone until restart. Confirm the supervisor notices a dead loop thread. |
+
+Item 5 needs a sign-off decision from the MQ team rather than a code change.
+Items 1 and 3 are the two most likely to matter in week one.
+
 ## E. ENVIRONMENT/PLATFORM DEPENDENCIES
 - IBM MQ: BOTHRESH/BOQNAME configured per queue to match app thresholds
   (claims BISECT requires BOTHRESH ≥ 14 for batch 8000); MAXUMSGS ≥ 2×batch.
@@ -321,6 +341,22 @@ should not be assumed from unit-scale tests.
 5. **Freshness SLA per feed.** `batch_interval_ms` is now 0, so a message may
    wait until its partition window closes (~15 min worst case). Confirm both
    feeds tolerate that; it is the price of the legacy file cadence (R-1).
+6. **Which quarter-hour does a boundary-crossing batch belong to?** The
+   partition path is computed from the wall clock at flush time. A PARTITION
+   flush by definition fires just *after* the window closes, so a batch opened
+   at 10:14 is filed under the 10:15 window. The legacy MDB has no equivalent
+   skew because it writes one message per file at receive time.
+
+   The alternative — filing under the window the batch was opened in — was
+   considered and **not** adopted, because it writes into a partition that has
+   already closed, and any downstream job that sweeps partitions on a schedule
+   would miss the late arrival. Filing forward keeps every write landing in a
+   still-open partition. The cost is that a file in window N may contain
+   messages received in the last moments of window N-1.
+
+   Confirm with the downstream consumers that forward-filing is the behaviour
+   they want. This is a contract decision, not a code defect; it was left as
+   built rather than changed immediately before cutover.
 
 ## G. REQUIRED REAL-ENVIRONMENT TESTS
 

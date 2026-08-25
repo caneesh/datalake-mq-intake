@@ -54,6 +54,28 @@ untrue. Each was previously assumed and is now verified on the product.
 | Full Spring context, RMS | prod-path | `RmsApplicationSpringBootTest.rmsProductionPathLandsMessagesAndSendsTrackers` | Boots the real `RmsApplication`: startup validation → land → tracker → audit → actuator health UP. Only the MQ connection is substituted. |
 | Full Spring context, Claims | prod-path | `ClaimsApplicationSpringBootTest.claimsProductionPathLandsMessagesWithoutTracker` | Boots the real `ClaimsApplication`: LAND_ONLY, no tracker producer anywhere, audit, health UP. |
 
+## Regression tests for review findings
+
+Added with the fixes for the six defects in `READINESS_REVIEW.md` §D″. Each was
+run against the unfixed code first and confirmed to fail — a passing test that
+was never seen to fail proves nothing about the bug it claims to cover.
+
+| Defect | Test | Observed failure before the fix |
+|---|---|---|
+| Post-commit bookkeeping triggered a rollback and marked committed messages suspect, wedging the binding in degraded mode | `TransactedReceiveLoopTest.postCommitBookkeepingFailureDoesNotRollBackOrMarkSuspect` | `rollbackCount` expected 0, was 1 |
+| A data failure whose message mentioned "shutdown" classified as SHUTDOWN, so the poison was never isolated | `FailureClassifierTest.serializationFailureMentioningShutdownIsStillADataFailure` | expected `MESSAGE_DATA`, was `SHUTDOWN` |
+| Genuine interrupts must still classify as SHUTDOWN after the reordering | `FailureClassifierTest.genuineInterruptionIsStillClassifiedAsShutdown` | (guards the fix, not a bug) |
+| An infrastructure blip reset progress toward leaving degraded mode | `DegradedModeManagerTest.infrastructureBlipDoesNotDiscardProgressTowardRestore` | expected not degraded, was degraded |
+| Suspects were registered after the degraded-mode flip, letting a concurrent success restore full batch size with the poison in flight | `DegradedModeManagerTest.suspectsAreRegisteredBeforeDegradedModeBecomesVisible` | — |
+| `batch_bytes` counted UTF-16 code units, not the UTF-8 bytes actually written | `FlushTriggerTest.byteTriggerCountsUtf8BytesNotUtf16CodeUnits`, `.utf8ByteCountHandlesSurrogatePairs` | — |
+
+Two fixes are not directly covered and rely on the existing suite plus
+inspection: clearing the thread interrupt before the shutdown drain (it fails
+only against a real IBM MQ client that honours the flag, which the embedded
+broker does not), and temp-file cleanup when `rename()` returns false (HDFS
+returning false rather than throwing is not reproducible against the local
+filesystem). Both are called out in §D″ / R.
+
 ## R. Still requires a real environment
 
 Cannot be proven with embedded substitutes; required before production cutover.
@@ -87,7 +109,7 @@ docker-compose up -d ibm-mq
 MQ_USER=app MQ_PASSWORD=passw0rd mvn test
 ```
 
-Expected with MQ available: 465 tests, 0 failures, 0 skipped (10 of them
+Expected with MQ available: 516 tests, 0 failures, 0 skipped (10 of them
 real-MQ). Without `MQ_USER`: the same build passes with 10 skipped and every
 real-MQ assurance above degraded to untested.
 
