@@ -26,6 +26,16 @@ public class BindingConfig {
     private int backoutThreshold = 5;
 
     /**
+     * How often to sample the backout queue's depth, in milliseconds.
+     *
+     * <p>Feeds the gauge DESIGN §14 nominates as the pager condition. Sampling
+     * browses the queue, which is cheap while it is empty — the state we
+     * expect — and capped when it is not. 0 or less disables the monitor, and
+     * with it the backout-depth alert for this binding.
+     */
+    private long backoutDepthPollIntervalMs = 30_000;
+
+    /**
      * Whether a tracker build/send failure should fail the whole batch.
      *
      * <p>Default false, matching the legacy MDB: it catches and logs tracker
@@ -145,6 +155,14 @@ public class BindingConfig {
 
     public String getBackoutQueue() {
         return backoutQueue;
+    }
+
+    public long getBackoutDepthPollIntervalMs() {
+        return backoutDepthPollIntervalMs;
+    }
+
+    public void setBackoutDepthPollIntervalMs(long backoutDepthPollIntervalMs) {
+        this.backoutDepthPollIntervalMs = backoutDepthPollIntervalMs;
     }
 
     public void setBackoutQueue(String backoutQueue) {

@@ -9,6 +9,7 @@ import com.hcsc.datalake.mqintake.core.failure.DegradedModeManager;
 import com.hcsc.datalake.mqintake.core.hdfs.SequenceFileBatchWriter;
 import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.loop.TransactedReceiveLoop;
+import com.hcsc.datalake.mqintake.core.metrics.BackoutQueueDepthMonitor;
 import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
 import com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry;
 import com.hcsc.datalake.mqintake.core.mq.MqConnectionManager;
@@ -112,8 +113,11 @@ public class BindingRuntimeFactory {
                     config, jmsConnection, receiveTimeoutMs, batchWriter, trackerBuilder, poisonHandler, metrics);
 
             ExecutorService executor = createExecutor(config);
+            BackoutQueueDepthMonitor depthMonitor =
+                    createBackoutDepthMonitor(config, jmsConnection, metrics);
 
-            return new BindingRuntime(config, loops, executor, trackerBuilder != null);
+            return new BindingRuntime(
+                    config, loops, executor, trackerBuilder != null, depthMonitor);
 
         } catch (BindingRuntimeCreationException e) {
             throw e;
@@ -189,6 +193,24 @@ public class BindingRuntimeFactory {
         return new PoisonMessageHandler(
                 config.getBackoutThreshold(),
                 config.getBackoutQueue());
+    }
+
+    /**
+     * Creates the backout-depth monitor, or null when the binding has no
+     * backout queue to watch — the same guard used for the poison handler.
+     */
+    private BackoutQueueDepthMonitor createBackoutDepthMonitor(BindingConfig config,
+                                                               Connection jmsConnection,
+                                                               BindingMetrics metrics) {
+        if (config.getBackoutQueue() == null || config.getBackoutQueue().isBlank()) {
+            return null;
+        }
+        return new BackoutQueueDepthMonitor(
+                config.getId(),
+                config.getBackoutQueue(),
+                jmsConnection,
+                metrics,
+                config.getBackoutDepthPollIntervalMs());
     }
 
     private List<TransactedReceiveLoop> createLoops(BindingConfig config,

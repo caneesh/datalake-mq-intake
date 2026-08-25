@@ -3,6 +3,7 @@ package com.hcsc.datalake.mqintake.core.runtime;
 import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.BindingMode;
 import com.hcsc.datalake.mqintake.core.loop.TransactedReceiveLoop;
+import com.hcsc.datalake.mqintake.core.metrics.BackoutQueueDepthMonitor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,6 +45,7 @@ public class BindingRuntime {
     private final List<TransactedReceiveLoop> loops;
     private final ExecutorService executor;
     private final boolean hasTrackerBuilder;
+    private final BackoutQueueDepthMonitor backoutDepthMonitor;
     private final AtomicReference<State> state = new AtomicReference<>(State.CREATED);
     private volatile Throwable failureCause;
 
@@ -51,10 +53,19 @@ public class BindingRuntime {
                    List<TransactedReceiveLoop> loops,
                    ExecutorService executor,
                    boolean hasTrackerBuilder) {
+        this(config, loops, executor, hasTrackerBuilder, null);
+    }
+
+    BindingRuntime(BindingConfig config,
+                   List<TransactedReceiveLoop> loops,
+                   ExecutorService executor,
+                   boolean hasTrackerBuilder,
+                   BackoutQueueDepthMonitor backoutDepthMonitor) {
         this.config = Objects.requireNonNull(config, "config required");
         this.loops = new ArrayList<>(Objects.requireNonNull(loops, "loops required"));
         this.executor = Objects.requireNonNull(executor, "executor required");
         this.hasTrackerBuilder = hasTrackerBuilder;
+        this.backoutDepthMonitor = backoutDepthMonitor;  // null when no backout queue
 
         if (loops.isEmpty()) {
             throw new IllegalArgumentException("At least one receive loop required");
@@ -84,6 +95,9 @@ public class BindingRuntime {
             for (TransactedReceiveLoop loop : loops) {
                 executor.submit(loop);
             }
+            if (backoutDepthMonitor != null) {
+                backoutDepthMonitor.start();
+            }
             state.set(State.RUNNING);
             log.info("Binding '{}' started with {} listener threads", config.getId(), loops.size());
         } catch (Exception e) {
@@ -106,6 +120,13 @@ public class BindingRuntime {
         }
 
         log.info("Stopping binding '{}'", config.getId());
+
+        // Stopped first: its browse sessions are created from the same
+        // Connection the loops use, and there is no reason to keep sampling
+        // while they drain.
+        if (backoutDepthMonitor != null) {
+            backoutDepthMonitor.stop();
+        }
 
         for (TransactedReceiveLoop loop : loops) {
             loop.stop();
@@ -145,6 +166,11 @@ public class BindingRuntime {
 
     public boolean isRunning() {
         return state.get() == State.RUNNING;
+    }
+
+    /** The backout depth monitor, or null if the binding has no backout queue. */
+    public BackoutQueueDepthMonitor getBackoutDepthMonitor() {
+        return backoutDepthMonitor;
     }
 
     public boolean hasTrackerBuilder() {

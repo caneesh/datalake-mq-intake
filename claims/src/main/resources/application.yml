@@ -58,5 +58,9 @@ intake:
       # accumulate backout count too; a lower threshold would misroute them.
       # Set BOTHRESH on the queue manager to match.
       backout-threshold: 14
+      # Feeds the backout-depth gauge, which DESIGN §14 nominates as the
+      # pager condition. Sampled by browsing (read-only, does not consume).
+      # 0 disables the monitor and with it the alert.
+      backout-depth-poll-interval-ms: 30000
       degradation-strategy: BISECT  # Claims uses bisection per §6.1
       successes-required-to-restore: 10

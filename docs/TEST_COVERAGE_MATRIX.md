@@ -53,6 +53,7 @@ untrue. Each was previously assumed and is now verified on the product.
 |---|---|---|---|
 | Full Spring context, RMS | prod-path | `RmsApplicationSpringBootTest.rmsProductionPathLandsMessagesAndSendsTrackers` | Boots the real `RmsApplication`: startup validation → land → tracker → audit → actuator health UP. Only the MQ connection is substituted. |
 | Full Spring context, Claims | prod-path | `ClaimsApplicationSpringBootTest.claimsProductionPathLandsMessagesWithoutTracker` | Boots the real `ClaimsApplication`: LAND_ONLY, no tracker producer anywhere, audit, health UP. |
+| Backout-depth gauge wiring | prod-path | `ClaimsApplicationSpringBootTest.backoutQueueDepthGaugeIsPopulatedThroughTheRealWiring` | Proves the whole chain through the real context: the factory built a monitor, the runtime started it, an empty queue reads as an observed zero, a message put on the BOQ moves the gauge, and sampling did not consume it. Verified to fail when the factory is unwired. |
 
 ## Regression tests for review findings
 
@@ -75,6 +76,27 @@ only against a real IBM MQ client that honours the flag, which the embedded
 broker does not), and temp-file cleanup when `rename()` returns false (HDFS
 returning false rather than throwing is not reproducible against the local
 filesystem). Both are called out in §D″ / R.
+
+## Backout-depth monitoring
+
+`BackoutQueueDepthMonitor` feeds the gauge DESIGN §14 nominates as the pager
+condition. Component coverage in `BackoutQueueDepthMonitorTest` (embedded
+ActiveMQ, so the browse is real):
+
+| Behaviour | Test |
+|---|---|
+| Empty queue reads as an observed zero | `emptyBackoutQueueReportsZero` |
+| Depth reflects what is on the queue | `depthReflectsMessagesOnTheBackoutQueue` |
+| **Sampling does not consume what it counts** — otherwise monitoring would destroy the messages an operator was paged to inspect | `samplingDoesNotConsumeTheMessagesItCounts` |
+| Depth falls back to zero once the queue is cleared | `depthReturnsToZeroAfterTheQueueIsCleared` |
+| Count is capped so a deep queue cannot cost an unbounded enumeration | `countIsCappedSoADeepQueueCannotCostAnUnboundedEnumeration` |
+| **A failed sample leaves the gauge alone rather than zeroing it** — zeroing on error would suppress a page exactly when visibility was lost | `aFailedSampleLeavesTheGaugeAloneRatherThanZeroingIt` |
+| The scheduler actually drives sampling | `scheduledMonitorPopulatesTheGaugeWithoutBeingDrivenByHand` |
+| A non-positive interval disables it (and its alert) | `nonPositivePollIntervalDisablesTheMonitor` |
+
+Not covered here: behaviour against a real IBM MQ queue manager. Browsing
+semantics are standard JMS and ActiveMQ implements them faithfully, but depth
+sampling under a real BOTHRESH-driven routing event is part of R-3.
 
 ## R. Still requires a real environment
 
@@ -109,7 +131,7 @@ docker-compose up -d ibm-mq
 MQ_USER=app MQ_PASSWORD=passw0rd mvn test
 ```
 
-Expected with MQ available: 516 tests, 0 failures, 0 skipped (10 of them
+Expected with MQ available: 526 tests, 0 failures, 0 skipped (10 of them
 real-MQ). Without `MQ_USER`: the same build passes with 10 skipped and every
 real-MQ assurance above degraded to untested.
 

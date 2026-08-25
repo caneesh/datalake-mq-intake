@@ -58,6 +58,9 @@ class ClaimsApplicationSpringBootTest {
         registry.add("intake.bindings[0].batch-interval-ms", () -> 400);
         registry.add("intake.bindings[0].listener-threads", () -> 2);
         registry.add("intake.bindings[0].backout-queue", () -> "MQ.DMIH.CLAIMS.BACKOUT");
+        // Production default is 30s; sampled fast here so the test does not
+        // have to wait out a real interval
+        registry.add("intake.bindings[0].backout-depth-poll-interval-ms", () -> 200);
         // BISECT with batch 4 requires threshold >= ceil(log2(4)) + 1 = 3
         registry.add("intake.bindings[0].backout-threshold", () -> 3);
         registry.add("intake.bindings[0].degradation-strategy", () -> "BISECT");
@@ -99,6 +102,42 @@ class ClaimsApplicationSpringBootTest {
 
     @Autowired
     private BindingsHealthIndicator healthIndicator;
+
+    /**
+     * The backout-depth gauge is what DESIGN §14 nominates as the pager
+     * condition. It previously shipped as a permanent zero because nothing
+     * wrote to it, so this asserts the whole chain through the real context —
+     * BindingRuntimeFactory built a monitor, BindingRuntime started it, and it
+     * moves the gauge — rather than just that the monitor class works.
+     */
+    @Test
+    void backoutQueueDepthGaugeIsPopulatedThroughTheRealWiring() throws Exception {
+        var runtime = runtimeManager.getRuntime("claims");
+        assertThat(runtime.getBackoutDepthMonitor()).isNotNull();
+        assertThat(runtime.getBackoutDepthMonitor().isRunning()).isTrue();
+
+        var metrics = runtimeManager.getMetricsRegistry().forBinding("claims");
+
+        // An empty backout queue must read as an observed zero, not an
+        // unwritten default
+        awaitTrue(5_000, () -> runtime.getBackoutDepthMonitor().isDepthAvailable());
+        assertThat(runtime.getBackoutDepthMonitor().isDepthAvailable()).isTrue();
+        assertThat(metrics.getBackoutQueueDepth()).isZero();
+
+        // Put something on the backout queue and the gauge must follow
+        try (Session session = sharedConnection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+             MessageProducer producer = session.createProducer(
+                     session.createQueue("MQ.DMIH.CLAIMS.BACKOUT"))) {
+            producer.send(session.createTextMessage("<Claim>poison</Claim>"));
+        }
+
+        awaitTrue(5_000, () -> metrics.getBackoutQueueDepth() > 0);
+        assertThat(metrics.getBackoutQueueDepth()).isEqualTo(1);
+
+        // And sampling must not have consumed it — the operator still has the
+        // message to inspect
+        assertThat(countOnQueue("MQ.DMIH.CLAIMS.BACKOUT")).isEqualTo(1);
+    }
 
     @Test
     void claimsProductionPathLandsMessagesWithoutTracker() throws Exception {

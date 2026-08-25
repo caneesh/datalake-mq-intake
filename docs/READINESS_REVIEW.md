@@ -298,21 +298,34 @@ higher-risk to change than to leave two days before cutover.
 Item 5 needs a sign-off decision from the MQ team rather than a code change.
 Items 1 and 3 are the two most likely to matter in week one.
 
-**7. The queue-depth gauges are never populated.** `BindingMetrics` exposes
-`sourceQueueDepth`, `trackerQueueDepth`, and `backoutQueueDepth`, and DESIGN
-§14 specifies "backout queue depth (non-zero = page)" as an alert. Nothing in
-production code ever calls the setters, and nothing reads the getters — they
-are written only by their own unit tests. They ship as permanent zeros inside
-`MetricsSnapshot`.
+**7. ~~The queue-depth gauges are never populated.~~ RESOLVED for backout
+depth.** `BackoutQueueDepthMonitor` now samples each binding's backout queue
+on its own daemon thread and writes `backoutQueueDepth`, so the alert DESIGN
+§14 nominates as the pager condition can fire. Interval is
+`backout_depth_poll_interval_ms` (default 30s, 0 disables).
 
-This is not a delivery defect, but it means the one alert the design nominates
-as a pager — a message reaching the backout queue — **cannot fire**. Poison
-routing is still visible: `poisonMessagesRouted` is incremented on the real
-path, and health goes DEGRADED. Before cutover either wire the depths (an MQ
-admin query per binding on a timer) or point the alert at
-`poisonMessagesRouted` and the binding health status instead, so the gap is
-covered by something that actually moves. Whichever is chosen, the always-zero
-gauges should not stay in the snapshot implying they are live.
+Depth is read with a `QueueBrowser`, which does not consume — an operator
+paged about the backout queue still finds the messages there. There is no
+portable JMS depth API, and the alternatives were worse: PCF needs a command
+server and admin authority, and the IBM inquire APIs would tie the class to
+one provider. Browsing is cheap precisely because a healthy backout queue is
+empty, and the count is capped at 1000 so a deep queue cannot cost an
+unbounded enumeration.
+
+Two behaviours worth knowing when writing the alert:
+- **A failed sample leaves the gauge at its last value rather than zeroing
+  it.** Zeroing on error would suppress a page exactly when visibility was
+  lost. Staleness is exposed via the monitor's `isDepthAvailable()` and
+  `getLastSuccessfulPollMs()`, and repeated failures log at ERROR.
+- **The gauge is sampled, not event-driven**, so it lags a routing event by up
+  to one interval. For a faster signal, alert on `poisonMessagesRouted`, which
+  is incremented synchronously on the routing path; use depth for "messages
+  are sitting in the BOQ right now".
+
+Still outstanding: `sourceQueueDepth` and `trackerQueueDepth` remain
+unpopulated. Deliberately not wired the same way — those queues are deep by
+design, so browsing them would be genuinely expensive, unlike the backout
+queue. They need an MQ admin query (PCF or equivalent) if they are wanted.
 
 ## E. ENVIRONMENT/PLATFORM DEPENDENCIES
 - IBM MQ: BOTHRESH/BOQNAME configured per queue to match app thresholds

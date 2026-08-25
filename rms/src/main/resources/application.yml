@@ -60,5 +60,9 @@ intake:
       listener-threads: 4
       backout-queue: MQ.HPS.MEMBERSHIP.BACKOUT
       backout-threshold: 5
+      # Feeds the backout-depth gauge, which DESIGN §14 nominates as the
+      # pager condition. Sampled by browsing (read-only, does not consume).
+      # 0 disables the monitor and with it the alert.
+      backout-depth-poll-interval-ms: 30000
       degradation-strategy: BATCH_OF_ONE
       successes-required-to-restore: 10
