@@ -120,19 +120,30 @@ class ClaimsApplicationSpringBootTest {
         assertThat(countSeqFiles()).isGreaterThan(0);
         assertThat(countOnQueue(SOURCE_QUEUE)).isZero();
 
-        awaitTrue(5_000, () -> Files.walk(auditDir)
-                .anyMatch(p -> p.getFileName().toString().startsWith("audit_")));
-        assertThat(Files.walk(auditDir)
-                .anyMatch(p -> p.getFileName().toString().startsWith("audit_"))).isTrue();
+        awaitTrue(5_000, this::auditRecordExists);
+        assertThat(auditRecordExists()).isTrue();
 
         assertThat(healthIndicator.health().getStatus()).isEqualTo(Status.UP);
         assertThat(healthIndicator.health().getDetails()).containsKey("claims");
     }
 
+    private boolean auditRecordExists() {
+        try (var stream = Files.walk(auditDir)) {
+            return stream.anyMatch(p -> p.getFileName().toString().startsWith("audit_"));
+        } catch (java.io.IOException | java.io.UncheckedIOException e) {
+            return false;
+        }
+    }
+
     private long countSeqFiles() throws Exception {
+        // The writer renames out of _tmp while this walks, so entries (and the
+        // local filesystem's .crc sidecars) can vanish mid-stream. Treat that
+        // as "not counted yet" and let the caller poll again.
         try (var stream = Files.walk(dataDir)) {
             return stream.filter(p -> p.toString().endsWith(".seq")
                     && !p.toString().contains("/_tmp/")).count();
+        } catch (java.io.UncheckedIOException e) {
+            return 0;
         }
     }
 

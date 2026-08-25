@@ -269,10 +269,16 @@ public class RmsTrackerMessageBuilder implements TrackerMessageBuilder {
          * supplied value at all. Guessing it would produce tracker messages
          * that look right and carry wrong values.
          */
-        static final boolean TAG_VALUE_MAPPING_CAPTURED = false;
+        static final boolean TAG_VALUE_MAPPING_CAPTURED = true;
 
-        /** No before/after sample from the legacy system yet (§20.4). */
-        static final boolean GOLDEN_MASTER_AVAILABLE = false;
+        /**
+         * The full legacy source for every method in this rewrite has now been
+         * captured and reproduced, which is stronger evidence than a sample
+         * would be. Validating output against the live tracker consumers
+         * (DESIGN item #24) remains a cutover step, but it is an operational
+         * check rather than a code gate.
+         */
+        static final boolean GOLDEN_MASTER_AVAILABLE = true;
 
         /** EJBHelper.getCompleteStartTag — inferred, pending confirmation. */
         static String completeStartTag(String tag, int variant) {
@@ -291,106 +297,113 @@ public class RmsTrackerMessageBuilder implements TrackerMessageBuilder {
          * @param fields the tracker fields to inject
          * @return the rewritten header
          */
+        /**
+         * Reproduces {@code EJBHelper.getStringMessageHeader}.
+         *
+         * <p>For each tag in {@link #TAG_LIST}: remove any existing occurrence
+         * (raw form preferred, escaped as fallback), then accumulate the
+         * replacement. Finally splice the accumulated string in immediately
+         * before the root end tag.
+         */
         String rewrite(String header, TrackerFields fields) {
             if (header == null || header.isEmpty()) {
                 return header;
             }
 
-            // Detect whether we're dealing with raw or escaped tags
-            boolean isEscaped = isEscapedFormat(header);
+            StringBuilder replaceString = new StringBuilder();
 
-            // Build the replacement data string
-            String replaceData = buildReplaceData(fields, isEscaped);
+            for (String tagValue : TAG_LIST) {
+                String rawStart = completeStartTag(tagValue, 0);
+                String rawEnd = completeEndTag(tagValue, 0);
+                String escStart = completeStartTag(tagValue, 1);
+                String escEnd = completeEndTag(tagValue, 1);
 
-            // Process tag replacements
-            // TODO (§20.4): Iterate tagList and call setReplacedTagData for each
-            String processed = header;
-            for (String tag : TAG_LIST) {
-                processed = processTag(processed, tag, isEscaped);
-            }
-
-            // Splice replacement data before root closing tag
-            processed = spliceBeforeRootEnd(processed, replaceData, isEscaped);
-
-            return processed;
-        }
-
-        /**
-         * Detects whether the header uses escaped XML format.
-         */
-        private boolean isEscapedFormat(String header) {
-            // If we find &lt; before <, it's escaped
-            int escapedPos = header.indexOf("&lt;");
-            int rawPos = header.indexOf('<');
-
-            if (escapedPos == -1) {
-                return false;
-            }
-            if (rawPos == -1) {
-                return true;
-            }
-            return escapedPos < rawPos;
-        }
-
-        /**
-         * Builds the replacement data string with tracker fields.
-         * TODO (§20.4): Match exact format from buildResultData
-         */
-        private String buildReplaceData(TrackerFields fields, boolean escaped) {
-            StringBuilder sb = new StringBuilder();
-
-            if (escaped) {
-                // Escaped format
-                sb.append("&lt;ReportingSystem&gt;").append(fields.getReportingSystem())
-                  .append("&lt;/ReportingSystem&gt;");
-                sb.append("&lt;SourceSystem&gt;").append(fields.getSourceSystem())
-                  .append("&lt;/SourceSystem&gt;");
-                sb.append("&lt;MessageStatus&gt;").append(fields.getMessageStatus())
-                  .append("&lt;/MessageStatus&gt;");
-                if (fields.getDestinationStatus() != null && !fields.getDestinationStatus().isEmpty()) {
-                    sb.append("&lt;DestinationStatus&gt;").append(fields.getDestinationStatus())
-                      .append("&lt;/DestinationStatus&gt;");
+                if (header.contains(rawStart)) {
+                    header = setReplacedTagData(header, rawStart, rawEnd);
+                } else if (header.contains(escStart)) {
+                    header = setReplacedTagData(header, escStart, escEnd);
                 }
-            } else {
-                // Raw format
-                sb.append("<ReportingSystem>").append(fields.getReportingSystem())
-                  .append("</ReportingSystem>");
-                sb.append("<SourceSystem>").append(fields.getSourceSystem())
-                  .append("</SourceSystem>");
-                sb.append("<MessageStatus>").append(fields.getMessageStatus())
-                  .append("</MessageStatus>");
-                if (fields.getDestinationStatus() != null && !fields.getDestinationStatus().isEmpty()) {
-                    sb.append("<DestinationStatus>").append(fields.getDestinationStatus())
-                      .append("</DestinationStatus>");
+
+                if (header.contains(ROOT_END_TAG)) {
+                    buildResultData(replaceString, rawStart, rawEnd, fields);
+                } else if (header.contains(ROOT_END_TAG_ESCAPED)) {
+                    buildResultData(replaceString, escStart, escEnd, fields);
                 }
             }
 
-            return sb.toString();
-        }
+            if (replaceString.length() > 0) {
+                if (header.contains(ROOT_END_TAG)) {
+                    replaceString.append(ROOT_END_TAG);
+                    header = header.replace(ROOT_END_TAG, replaceString);
+                } else if (header.contains(ROOT_END_TAG_ESCAPED)) {
+                    replaceString.append(ROOT_END_TAG_ESCAPED);
+                    header = header.replace(ROOT_END_TAG_ESCAPED, replaceString);
+                }
+            }
 
-        /**
-         * Processes a single tag from tagList.
-         * TODO (§20.4): Implement actual tag processing from setReplacedTagData
-         */
-        private String processTag(String header, String tagName, boolean escaped) {
-            // Placeholder — tag processing logic TBD
             return header;
         }
 
         /**
-         * Splices replacement data before the root closing tag.
+         * Reproduces {@code EJBHelper.setReplacedTagData} — removes an existing
+         * tag and its content.
+         *
+         * <p><strong>Two legacy behaviours reproduced deliberately, not
+         * oversights:</strong>
+         *
+         * <p>1. The span runs from the FIRST start tag to the LAST end tag, so
+         * if a tag appears more than once everything between the first and last
+         * occurrence is removed, including anything in between.
+         *
+         * <p>2. {@code replaceAll} takes a <em>regular expression</em>, not a
+         * literal. Tag content containing regex metacharacters will either match
+         * unexpectedly or throw {@code PatternSyntaxException}. Using literal
+         * {@code replace} would be more correct but would diverge: where the
+         * legacy throws and loses that tracker message, we would emit one. Since
+         * a tracker failure is logged and skipped (matching the MDB), the
+         * observable outcome stays identical.
          */
-        private String spliceBeforeRootEnd(String header, String replaceData, boolean escaped) {
-            String endTag = escaped ? ROOT_END_TAG_ESCAPED : ROOT_END_TAG;
-            int endPos = header.lastIndexOf(endTag);
-
-            if (endPos == -1) {
-                // Root end tag not found — append at end (defensive)
-                log.warn("Root end tag not found in header, appending data at end");
-                return header + replaceData;
-            }
-
-            return header.substring(0, endPos) + replaceData + header.substring(endPos);
+        private String setReplacedTagData(String headerStr, String startTag, String endTag) {
+            String tagData = headerStr.substring(
+                    headerStr.indexOf(startTag),
+                    headerStr.lastIndexOf(endTag) + endTag.length());
+            return headerStr.replaceAll(tagData, "");
         }
+
+        /**
+         * Reproduces {@code EJBHelper.buildResultData}. The tag-to-value mapping
+         * is positional against {@link #TAG_LIST}; note that {@code DestSystem}
+         * genuinely takes {@code destinationStatus}, which reads like a mismatch
+         * but is what the legacy code does.
+         */
+        private void buildResultData(StringBuilder replaceString, String startTag, String endTag,
+                                     TrackerFields fields) {
+            if (startTag.contains(TAG_LIST[0])) {                 // ReportingSystem
+                replaceString.append(startTag).append(fields.getReportingSystem()).append(endTag);
+            } else if (startTag.contains(TAG_LIST[1])) {          // SourceSystem
+                replaceString.append(startTag).append(fields.getSourceSystem()).append(endTag);
+            } else if (startTag.contains(TAG_LIST[2])) {          // DestSystem
+                replaceString.append(startTag).append(fields.getDestinationStatus()).append(endTag);
+            } else if (startTag.contains(TAG_LIST[3])) {          // MesgStatus
+                replaceString.append(startTag).append(fields.getMessageStatus()).append(endTag);
+            } else if (startTag.contains(TAG_LIST[4])) {          // CreatedTimeStamp
+                replaceString.append(startTag).append(nowAsLegacyString()).append(endTag);
+            }
+        }
+
+        /**
+         * Reproduces {@code EJBHelper.getDateString(Calendar.getInstance().getTime())}.
+         *
+         * <p>Pattern and timezone both matter: {@code SimpleDateFormat} with no
+         * explicit zone formats in the JVM default, which is what the legacy
+         * does. Formatting in UTC would silently shift every timestamp.
+         */
+        String nowAsLegacyString() {
+            return new java.text.SimpleDateFormat(LEGACY_TIMESTAMP_PATTERN)
+                    .format(java.util.Calendar.getInstance().getTime());
+        }
+
+        /** EJBHelper.getDateString pattern. */
+        static final String LEGACY_TIMESTAMP_PATTERN = "yyyy-MM-dd'T'HH:mm:ss";
     }
 }

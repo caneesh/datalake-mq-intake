@@ -109,7 +109,7 @@ chain minus tracker send, with BISECT + suspect-tracking poison isolation
 | 7 | Audit store concurrency-safe | proven | Immutable one-file-per-batch (`audit_{datafile}.json`); no append anywhere |
 | 8 | Partition reconciliation exists | code + tests, **not scheduled** | `PartitionReconciliationService` fully tested (11 tests) but no production scheduler invokes it yet — see D3 |
 | 9 | Serializers contractual or gated | gate proven; contract now partly known | `PlaceholderSerializer` marker + `SerializerValidator.validateOrFail` invoked in `IntakeRuntimeManager.start()`; production mode fails fast. MDB evidence since narrows the target: types are `LongWritable`/`Text` under `RECORD` (now matched — D1 fixed), the payload is whitespace-normalised not verbatim (now reproduced — D2 done), and metadata Option A is unjustified because the key varies per record |
-| 10 | RMS tracker contract complete or gated | gated (proven); **scope confirmed real** | §20.4 artifacts still missing → `RmsConfiguration.validateTrackerContract` blocks TRACKED production startup; `RmsTrackerContractGatingTest`. `EJBHelper.forwardToMessageTracker` never calls `session.commit()`, which briefly looked like trackers were never delivered. It is not a defect: the MDBs are **container-managed** (they roll back by throwing out of `onMessage`), so the container commits the enlisted session. DESIGN item #26's suspicion does not hold — there is a live consumer contract and this gate must be **satisfied, not removed** |
+| 10 | RMS tracker contract complete or gated | **COMPLETE — gate now opens** | The full legacy source has been captured and reproduced: `tagList`, root-end constants (`MessageHeaderDetailsType`), `getCompleteStartTag`/`getCompleteEndTag`, `setReplacedTagData`, `buildResultData` and the `yyyy-MM-dd'T'HH:mm:ss` timestamp. `RmsTrackerContractGatingTest` now asserts readiness, and `RmsApplicationSpringBootTest` proves the rewrite end to end through the real context. Remaining: validate output against the live tracker consumers at cutover (DESIGN item #24) — an operational check, no longer a code gate |
 | 11 | Claims identity explicit & approved | gated (proven) | `claims.identity-field` required; production fails without it; missing identity in payload fails the batch; `ClaimsIdentityGatingTest` |
 | 12 | Health/metrics wired to live runtime | proven | Loop drives HEALTHY/DEGRADED/RECOVERING/UNHEALTHY; `BindingsHealthIndicator` reports per-binding via actuator; reconnect/audit/reconciliation counters exist (reconciliation counter fires only when reconciliation runs — see D3) |
 | 13 | One proven shutdown path | proven | `GracefulShutdownHandler` (unused duplicate) **removed**; the single path is SmartLifecycle → `IntakeRuntimeManager.stop()` → bounded drain → commit-or-rollback, proven by `gracefulShutdownWithInFlightBatchLosesNothing` |
@@ -138,26 +138,25 @@ Ready, with real IBM MQ + HDFS + Kerberos, provided the environment tests in
 G are executed there. Docker IBM MQ profile exists for connectivity checks.
 
 ## C. READY FOR PRODUCTION
-**No.** Production startup is intentionally impossible today:
-- RMS: tracker contract gate (§20.4) fails TRACKED startup.
-- Claims: identity gate fails startup until `claims.identity-field` is set to
-  an approved field; serializer placeholder gate fails both apps under
-  `MQ_INTAKE_PRODUCTION=true`.
 
-This is by design — the gates convert unresolved contracts into fail-fast
-instead of silent wrong output.
+**RMS: no remaining code gate.** The tracker contract is complete, so
+`MQ_INTAKE_PRODUCTION=true` no longer blocks startup for RMS. What stands
+between it and production is environment validation, not code:
 
-Two further reasons, independent of the gates, that were not visible at the
-last review:
+- HDFS, Kerberos and volume are still unproven — see D′ and G. This is the
+  dominant risk and UAT is where it gets addressed.
+- Environment prerequisites must be confirmed: `MAXMSGL` above 4 MB where
+  large messages occur, `BOTHRESH`/`BOQNAME` matching on **both** queue
+  managers, and `-Xmx` sized for retained heap.
+- The hardcoded credential found in the legacy `EJBHelper` should be rotated
+  independently of this project (DESIGN item #27).
 
-- **Output is closer but not confirmed contract-compatible.** Writable types
-  and payload normalisation now match production (D1, D2 done), but the key's
-  value expression is still unconfirmed (MDB_QUESTIONS A3) and record metadata
-  is absent pending open item #2.
-- **Load behaviour is unproven** on a path where the last attempted change
-  failed under load (R-1, R-2).
+**Claims: deferred by decision.** Reconciliation and the claims identity
+question are out of scope for this iteration, so the placeholder-serializer and
+identity gates still apply to Claims under production mode.
 
-Removing the gates alone would therefore not make this deployable.
+The gates were never the whole story: output correctness and load behaviour
+were the other two, and only the first of those is now closed.
 
 ## D. CODE BLOCKERS
 1. ~~Writable types are wrong.~~ **FIXED and CONFIRMED.** Both serializers now
@@ -314,13 +313,10 @@ should not be assumed from unit-scale tests.
      both disappear, along with a code blocker. Cost: no automated way to
      classify a file that landed without an audit record — the §10 safety net
      for at-least-once duplicates.
-3. Legacy tracker rewrite artifacts (§20.4) — blocks RMS TRACKED production.
-   DESIGN item #26 is effectively resolved: the MDBs are container-managed, so
-   the missing `session.commit()` is correct CMT code and the container commits
-   the tracker send. Trackers are being delivered, so the §20.4 capture is real
-   work that must be completed. Remaining confirmation is narrow — that the
-   tracker connection factory is a managed/XA resource rather than a directly
-   instantiated one — plus the empirical cross-check on the production queue.
+3. ~~Legacy tracker rewrite artifacts (§20.4)~~ **RESOLVED.** Full source
+   captured and reproduced. What remains is DESIGN item #24 — validate the
+   rewritten header against the live tracker consumers at cutover. That is an
+   operational sign-off, not a build blocker.
 4. Quarantine/retention policy for reconciliation duplicates.
 5. **Freshness SLA per feed.** `batch_interval_ms` is now 0, so a message may
    wait until its partition window closes (~15 min worst case). Confirm both

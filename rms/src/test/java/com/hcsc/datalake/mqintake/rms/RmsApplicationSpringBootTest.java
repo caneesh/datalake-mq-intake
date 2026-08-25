@@ -119,7 +119,8 @@ class RmsApplicationSpringBootTest {
                 TextMessage message = session.createTextMessage(
                         "<Member><MessageID>" + guid + "</MessageID></Member>");
                 message.setStringProperty("MessageHeaderDetails",
-                        "<MessageHeaderDetails><Origin>test</Origin></MessageHeaderDetails>");
+                        "<MessageHeaderDetailsType><Origin>test</Origin>"
+                                + "</MessageHeaderDetailsType>");
                 producer.send(message);
             }
         }
@@ -133,20 +134,54 @@ class RmsApplicationSpringBootTest {
         assertThat(countOnQueue(SOURCE_QUEUE)).isZero();
 
         // Immutable audit written for the committed batch
-        awaitTrue(5_000, () -> Files.walk(auditDir)
-                .anyMatch(p -> p.getFileName().toString().startsWith("audit_")));
-        assertThat(Files.walk(auditDir)
-                .anyMatch(p -> p.getFileName().toString().startsWith("audit_"))).isTrue();
+        awaitTrue(5_000, this::auditRecordExists);
+        assertThat(auditRecordExists()).isTrue();
+
+        // The legacy header rewrite ran end to end through the real context:
+        // all five tags injected inside the root element with the configured
+        // values from application.yml.
+        String header = firstTrackerHeader();
+        assertThat(header).contains("<ReportingSystem>DMIH/DL</ReportingSystem>");
+        assertThat(header).contains("<SourceSystem>IIB</SourceSystem>");
+        assertThat(header).contains("<MesgStatus>RCVD</MesgStatus>");
+        assertThat(header).contains("<DestSystem></DestSystem>");
+        assertThat(header).containsPattern(
+                "<CreatedTimeStamp>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}</CreatedTimeStamp>");
+        assertThat(header).contains("<Origin>test</Origin>");   // original content kept
+        assertThat(header).endsWith("</MessageHeaderDetailsType>");
 
         // Health indicator reports the binding
         assertThat(healthIndicator.health().getStatus()).isEqualTo(Status.UP);
         assertThat(healthIndicator.health().getDetails()).containsKey("rms");
     }
 
+    /** Browses (does not consume) the first tracker message's rewritten header. */
+    private String firstTrackerHeader() throws Exception {
+        try (Session s = sharedConnection.createSession(false, Session.AUTO_ACKNOWLEDGE)) {
+            QueueBrowser browser = s.createBrowser(s.createQueue(TRACKER_QUEUE));
+            var e = browser.getEnumeration();
+            assertThat(e.hasMoreElements()).as("a tracker message to inspect").isTrue();
+            return ((Message) e.nextElement()).getStringProperty("MessageHeaderDetails");
+        }
+    }
+
+    private boolean auditRecordExists() {
+        try (var stream = Files.walk(auditDir)) {
+            return stream.anyMatch(p -> p.getFileName().toString().startsWith("audit_"));
+        } catch (java.io.IOException | java.io.UncheckedIOException e) {
+            return false;
+        }
+    }
+
     private long countSeqFiles() throws Exception {
+        // The writer renames out of _tmp while this walks, so entries (and the
+        // local filesystem's .crc sidecars) can vanish mid-stream. Treat that
+        // as "not counted yet" and let the caller poll again.
         try (var stream = Files.walk(dataDir)) {
             return stream.filter(p -> p.toString().endsWith(".seq")
                     && !p.toString().contains("/_tmp/")).count();
+        } catch (java.io.UncheckedIOException e) {
+            return 0;
         }
     }
 

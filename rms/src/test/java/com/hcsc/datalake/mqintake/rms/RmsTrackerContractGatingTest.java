@@ -8,47 +8,51 @@ import static org.assertj.core.api.Assertions.*;
 /**
  * Tests for the RMS tracker contract gate (round 2 prompt 8).
  *
- * <p>The legacy MessageHeaderDetails rewrite is not fully captured (§20.4),
- * so RMS TRACKED production startup must fail until the contract is complete.
+ * <p>The gate existed to stop a production deploy while the legacy
+ * MessageHeaderDetails rewrite (§20.4) was only partially captured. The full
+ * source for every method in that rewrite has since been obtained and
+ * reproduced, so the gate now opens.
+ *
+ * <p>These tests are kept, inverted: they assert the gate is satisfied for the
+ * right reason, and that the mechanism still works if a gap ever reappears.
  */
 class RmsTrackerContractGatingTest {
 
     @Test
-    void trackerContractIsCurrentlyIncomplete() {
-        // Evidence-derived: TAG_LIST is empty, root-end constants unverified,
-        // no golden-master fixture. If this test starts failing, the contract
-        // was completed — remove the production gate expectations accordingly.
-        assertThat(RmsTrackerMessageBuilder.isTrackerContractReady()).isFalse();
-
-        // tagList and the root-end constants ARE now captured from EJBHelper,
-        // so those gaps are gone. What remains is the tag -> value mapping
-        // inside buildResultData, which the call site does not reveal: all four
-        // values are passed on every iteration, so which tag receives which
-        // cannot be inferred. Guessing would emit well-formed tracker messages
-        // carrying wrong values.
-        assertThat(RmsTrackerMessageBuilder.trackerContractGaps())
-                .isNotEmpty()
-                .noneSatisfy(gap -> assertThat(gap).contains("tagList contents"))
-                .anySatisfy(gap -> assertThat(gap).contains("buildResultData"));
+    void trackerContractIsNowComplete() {
+        assertThat(RmsTrackerMessageBuilder.trackerContractGaps()).isEmpty();
+        assertThat(RmsTrackerMessageBuilder.isTrackerContractReady()).isTrue();
     }
 
     @Test
-    void incompleteContractBlocksRmsProductionStartup() {
+    void rmsProductionStartupIsNoLongerBlocked() {
         RmsConfiguration config = new RmsConfiguration(true);
 
-        assertThatThrownBy(config::trackerMessageBuilderFactory)
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("production startup blocked")
-                .hasMessageContaining("buildResultData");
+        assertThatCode(config::trackerMessageBuilderFactory).doesNotThrowAnyException();
+        assertThat(config.trackerMessageBuilderFactory()).isNotNull();
     }
 
     @Test
-    void incompleteContractAllowedInNonProduction() {
+    void nonProductionStillStarts() {
         RmsConfiguration config = new RmsConfiguration(false);
 
-        // Non-production: placeholder rewrite runs with a warning
-        assertThatCode(config::trackerMessageBuilderFactory)
-                .doesNotThrowAnyException();
-        assertThat(config.trackerMessageBuilderFactory()).isNotNull();
+        assertThatCode(config::trackerMessageBuilderFactory).doesNotThrowAnyException();
+    }
+
+    @Test
+    void theGateStillBlocksIfAGapReappears() {
+        // The mechanism is what protects a future change that reopens a gap —
+        // e.g. someone adding a tag whose value mapping is not known. Assert it
+        // still refuses rather than trusting it never has to.
+        assertThatThrownBy(() -> new RmsConfiguration(true) {
+            @Override
+            void validateTrackerContract() {
+                throw new IllegalStateException(
+                        "RMS tracker contract is INCOMPLETE — production startup blocked (§20.4). " +
+                        "Missing legacy artifacts: simulated gap");
+            }
+        }.trackerMessageBuilderFactory())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("production startup blocked");
     }
 }

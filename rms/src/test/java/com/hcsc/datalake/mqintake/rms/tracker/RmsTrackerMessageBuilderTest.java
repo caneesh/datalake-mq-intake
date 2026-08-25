@@ -159,7 +159,7 @@ class RmsTrackerMessageBuilderTest {
         // Header should contain injected fields in raw format
         assertThat(rewrittenHeader).contains("<ReportingSystem>DMIH/DL</ReportingSystem>");
         assertThat(rewrittenHeader).contains("<SourceSystem>IIB</SourceSystem>");
-        assertThat(rewrittenHeader).contains("<MessageStatus>RCVD</MessageStatus>");
+        assertThat(rewrittenHeader).contains("<MesgStatus>RCVD</MesgStatus>");
     }
 
     @Test
@@ -180,7 +180,7 @@ class RmsTrackerMessageBuilderTest {
         // Header should contain injected fields in escaped format
         assertThat(rewrittenHeader).contains("&lt;ReportingSystem&gt;DMIH/DL&lt;/ReportingSystem&gt;");
         assertThat(rewrittenHeader).contains("&lt;SourceSystem&gt;IIB&lt;/SourceSystem&gt;");
-        assertThat(rewrittenHeader).contains("&lt;MessageStatus&gt;RCVD&lt;/MessageStatus&gt;");
+        assertThat(rewrittenHeader).contains("&lt;MesgStatus&gt;RCVD&lt;/MesgStatus&gt;");
     }
 
     @Test
@@ -239,8 +239,9 @@ class RmsTrackerMessageBuilderTest {
 
         assertThat(rewrittenHeader).contains("<ReportingSystem>CustomReporter</ReportingSystem>");
         assertThat(rewrittenHeader).contains("<SourceSystem>CustomSource</SourceSystem>");
-        assertThat(rewrittenHeader).contains("<MessageStatus>PROC</MessageStatus>");
-        assertThat(rewrittenHeader).contains("<DestinationStatus>DONE</DestinationStatus>");
+        assertThat(rewrittenHeader).contains("<MesgStatus>PROC</MesgStatus>");
+        // DestSystem takes destinationStatus — reads odd, but matches the legacy
+        assertThat(rewrittenHeader).contains("<DestSystem>DONE</DestSystem>");
     }
 
     // --- Property preservation ---
@@ -320,5 +321,87 @@ class RmsTrackerMessageBuilderTest {
                 .isEqualTo("&lt;MesgStatus&gt;");
         assertThat(RmsTrackerMessageBuilder.HeaderRewriter.completeEndTag("MesgStatus", 1))
                 .isEqualTo("&lt;/MesgStatus&gt;");
+    }
+
+    // --- Faithful reproduction of EJBHelper.getStringMessageHeader ---
+
+    private String rewrite(String header) throws Exception {
+        RmsTrackerMessageBuilder builder = new RmsTrackerMessageBuilder(
+                new RmsTrackerMessageBuilder.TrackerFields("DMIH/DL", "IIB", "RCVD", ""));
+        TextMessage m = session.createTextMessage("<p/>");
+        m.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS, header);
+        return ((TextMessage) builder.build(session, m).get())
+                .getStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS);
+    }
+
+    @Test
+    void allFiveTagsAreInjectedWithTheLegacyValueMapping() throws Exception {
+        String out = rewrite("<MessageHeaderDetailsType><Keep>x</Keep></MessageHeaderDetailsType>");
+
+        assertThat(out).contains("<ReportingSystem>DMIH/DL</ReportingSystem>");
+        assertThat(out).contains("<SourceSystem>IIB</SourceSystem>");
+        assertThat(out).contains("<MesgStatus>RCVD</MesgStatus>");
+        // DestSystem takes destinationStatus (empty here) — the legacy mapping
+        assertThat(out).contains("<DestSystem></DestSystem>");
+        assertThat(out).containsPattern("<CreatedTimeStamp>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}</CreatedTimeStamp>");
+
+        // Unrelated content is preserved
+        assertThat(out).contains("<Keep>x</Keep>");
+    }
+
+    @Test
+    void injectionLandsImmediatelyBeforeTheRootEndTag() throws Exception {
+        String out = rewrite("<MessageHeaderDetailsType><Keep>x</Keep></MessageHeaderDetailsType>");
+
+        // Everything injected sits inside the root element, not appended after it
+        assertThat(out).endsWith("</MessageHeaderDetailsType>");
+        assertThat(out.indexOf("<ReportingSystem>"))
+                .isLessThan(out.indexOf("</MessageHeaderDetailsType>"));
+    }
+
+    @Test
+    void anExistingTagIsRemovedBeforeItIsReAdded() throws Exception {
+        String out = rewrite("<MessageHeaderDetailsType>"
+                + "<MesgStatus>STALE</MesgStatus></MessageHeaderDetailsType>");
+
+        // The stale value is gone and appears exactly once with the new value
+        assertThat(out).doesNotContain("STALE");
+        assertThat(out.split("<MesgStatus>", -1).length - 1)
+                .as("MesgStatus must appear exactly once, not duplicated")
+                .isEqualTo(1);
+        assertThat(out).contains("<MesgStatus>RCVD</MesgStatus>");
+    }
+
+    @Test
+    void escapedHeadersAreRewrittenInEscapedForm() throws Exception {
+        String out = rewrite("&lt;MessageHeaderDetailsType&gt;&lt;Keep&gt;x&lt;/Keep&gt;"
+                + "&lt;/MessageHeaderDetailsType&gt;");
+
+        assertThat(out).contains("&lt;ReportingSystem&gt;DMIH/DL&lt;/ReportingSystem&gt;");
+        assertThat(out).contains("&lt;MesgStatus&gt;RCVD&lt;/MesgStatus&gt;");
+        // and not the raw form
+        assertThat(out).doesNotContain("<ReportingSystem>");
+    }
+
+    @Test
+    void headerWithoutRootEndTagIsLeftAlone() throws Exception {
+        // buildResultData only runs when a root end tag is present, so nothing
+        // accumulates and the header passes through unchanged.
+        String input = "<SomethingElse>x</SomethingElse>";
+        assertThat(rewrite(input)).isEqualTo(input);
+    }
+
+    @Test
+    void regexMetacharactersInTagContentAreALegacyHazard() throws Exception {
+        // setReplacedTagData uses replaceAll, which treats the extracted span as
+        // a REGEX. Content with metacharacters therefore misbehaves or throws.
+        // Reproduced deliberately: using literal replace would emit a tracker
+        // message where the legacy loses one. Documented here so nobody
+        // "fixes" it without realising it changes observable output.
+        String header = "<MessageHeaderDetailsType><MesgStatus>a(b</MesgStatus>"
+                + "</MessageHeaderDetailsType>";
+
+        assertThatThrownBy(() -> rewrite(header))
+                .isInstanceOf(java.util.regex.PatternSyntaxException.class);
     }
 }
