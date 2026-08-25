@@ -143,7 +143,7 @@ class PoisonMessageHandlerTest {
         List<Message> batch = Arrays.asList(clean1, poison, clean2);
 
         PoisonMessageHandler.BatchPoisonCheckResult result =
-                handler.checkAndRoutePoisonMessages(session, batch);
+                handler.screen(session, batch);
 
         assertThat(result.getCleanMessages()).hasSize(2);
         assertThat(result.getPoisonCount()).isEqualTo(1);
@@ -223,7 +223,7 @@ class PoisonMessageHandlerTest {
         List<Message> batch = Arrays.asList(poison);
 
         // Routing to backout on closed session should throw BackoutFailureException
-        assertThatThrownBy(() -> handler.checkAndRoutePoisonMessages(closedSession, batch))
+        assertThatThrownBy(() -> handler.screen(closedSession, batch))
                 .isInstanceOf(PoisonMessageHandler.BackoutFailureException.class)
                 .hasMessageContaining("Failed to route poison message");
     }

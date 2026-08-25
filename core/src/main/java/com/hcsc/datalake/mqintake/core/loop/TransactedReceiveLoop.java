@@ -4,7 +4,7 @@ import com.hcsc.datalake.mqintake.core.audit.AuditRecordEmitter;
 import com.hcsc.datalake.mqintake.core.batch.BatchWriter;
 import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.BindingMode;
-import com.hcsc.datalake.mqintake.core.failure.DegradedModeManager;
+import com.hcsc.datalake.mqintake.core.failure.DegradationPolicy;
 import com.hcsc.datalake.mqintake.core.failure.FailureClass;
 import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
@@ -12,6 +12,7 @@ import com.hcsc.datalake.mqintake.core.loop.recovery.BackoffPolicy;
 import com.hcsc.datalake.mqintake.core.loop.session.ListenerSession;
 import com.hcsc.datalake.mqintake.core.loop.recovery.SessionFaultPolicy;
 import com.hcsc.datalake.mqintake.core.poison.PoisonMessageHandler;
+import com.hcsc.datalake.mqintake.core.poison.PoisonScreen;
 import com.hcsc.datalake.mqintake.core.tracker.TrackerMessageBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,8 +50,8 @@ public class TransactedReceiveLoop implements Runnable {
     private final Connection connection;
     private final BatchWriter batchWriter;
     private final TrackerMessageBuilder trackerMessageBuilder;
-    private final PoisonMessageHandler poisonMessageHandler;
-    private final DegradedModeManager degradedModeManager;
+    private final PoisonScreen poisonMessageHandler;
+    private final DegradationPolicy degradedModeManager;
     private final BindingHealthManager healthManager;
     private final AuditRecordEmitter auditRecordEmitter;
     private final BindingMetrics metrics;
@@ -91,8 +92,8 @@ public class TransactedReceiveLoop implements Runnable {
                                   Connection connection,
                                   BatchWriter batchWriter,
                                   TrackerMessageBuilder trackerMessageBuilder,
-                                  PoisonMessageHandler poisonMessageHandler,
-                                  DegradedModeManager degradedModeManager,
+                                  PoisonScreen poisonMessageHandler,
+                                  DegradationPolicy degradedModeManager,
                                   BindingHealthManager healthManager,
                                   AuditRecordEmitter auditRecordEmitter,
                                   BindingMetrics metrics,
@@ -253,7 +254,7 @@ public class TransactedReceiveLoop implements Runnable {
             if (poisonMessageHandler != null) {
                 PoisonMessageHandler.BatchPoisonCheckResult poisonResult;
                 try {
-                    poisonResult = poisonMessageHandler.checkAndRoutePoisonMessages(listenerSession.session(), batch);
+                    poisonResult = poisonMessageHandler.screen(listenerSession.session(), batch);
                 } catch (PoisonMessageHandler.BackoutFailureException e) {
                     // CRITICAL: BOQ routing failed - we MUST rollback to avoid losing messages
                     log.error("Backout queue routing failed for binding '{}', rolling back: {}",

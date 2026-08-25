@@ -15,7 +15,7 @@ import javax.jms.*;
  * <p>Do not rely on provider or queue-manager behavior — this loop
  * is not container-managed.
  */
-public class PoisonMessageHandler {
+public class PoisonMessageHandler implements PoisonScreen {
 
     private static final Logger log = LoggerFactory.getLogger(PoisonMessageHandler.class);
 
@@ -155,7 +155,8 @@ public class PoisonMessageHandler {
      * @return result containing any poison messages found
      * @throws BackoutFailureException if routing to backout queue fails
      */
-    public BatchPoisonCheckResult checkAndRoutePoisonMessages(Session session, java.util.List<Message> messages)
+    @Override
+    public BatchPoisonCheckResult screen(Session session, java.util.List<Message> messages)
             throws BackoutFailureException {
         java.util.List<BackoutResult> routed = new java.util.ArrayList<>();
         java.util.List<Message> clean = new java.util.ArrayList<>();

@@ -41,7 +41,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * O(log N) failing transactions, with clean subsets committing at the current
  * bisected size rather than one-by-one.
  */
-public class DegradedModeManager {
+public class DegradedModeManager implements DegradationPolicy {
 
     private static final Logger log = LoggerFactory.getLogger(DegradedModeManager.class);
 
@@ -89,6 +89,7 @@ public class DegradedModeManager {
      * May restore normal batch size after enough consecutive successes,
      * but never while suspect messages remain unresolved.
      */
+    @Override
     public void recordSuccess() {
         if (!inDegradedMode.get()) {
             return;
@@ -124,6 +125,7 @@ public class DegradedModeManager {
      * committed batch (or routed to the BOQ). Called by whichever listener
      * thread the broker redelivered them to.
      */
+    @Override
     public void clearSuspects(java.util.Collection<String> messageIds) {
         boolean removed = false;
         for (String id : messageIds) {
@@ -176,6 +178,7 @@ public class DegradedModeManager {
      * @param batchMessageIds   IDs of the failed batch, or null if unknown
      * @return the classified failure
      */
+    @Override
     public FailureClass recordFailure(Throwable throwable,
                                       java.util.Collection<String> batchMessageIds) {
         FailureClass failureClass = classifier.classify(throwable);
@@ -248,6 +251,7 @@ public class DegradedModeManager {
     /**
      * Returns the current effective batch size.
      */
+    @Override
     public int getCurrentBatchSize() {
         return currentBatchSize.get();
     }
@@ -255,6 +259,7 @@ public class DegradedModeManager {
     /**
      * Returns true if currently in degraded mode.
      */
+    @Override
     public boolean isInDegradedMode() {
         return inDegradedMode.get();
     }
