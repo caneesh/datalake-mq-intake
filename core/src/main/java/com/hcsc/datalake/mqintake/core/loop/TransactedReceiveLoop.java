@@ -8,6 +8,8 @@ import com.hcsc.datalake.mqintake.core.failure.DegradedModeManager;
 import com.hcsc.datalake.mqintake.core.failure.FailureClass;
 import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
+import com.hcsc.datalake.mqintake.core.loop.recovery.BackoffPolicy;
+import com.hcsc.datalake.mqintake.core.loop.recovery.SessionFaultPolicy;
 import com.hcsc.datalake.mqintake.core.poison.PoisonMessageHandler;
 import com.hcsc.datalake.mqintake.core.tracker.TrackerMessageBuilder;
 import org.slf4j.Logger;
@@ -17,7 +19,6 @@ import javax.jms.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -41,12 +42,7 @@ public class TransactedReceiveLoop implements Runnable {
 
     private static final Logger log = LoggerFactory.getLogger(TransactedReceiveLoop.class);
 
-    // Session recovery backoff constants
-    private static final long INITIAL_BACKOFF_MS = 1000;
-    private static final long MAX_BACKOFF_MS = 60000;
     private static final int MAX_RECONNECT_ATTEMPTS = 10;
-    private static final double BACKOFF_MULTIPLIER = 2.0;
-    private static final double JITTER_FACTOR = 0.2;
 
     private final BindingConfig config;
     private final Connection connection;
@@ -59,6 +55,10 @@ public class TransactedReceiveLoop implements Runnable {
     private final BindingMetrics metrics;
     private final String instanceId;
     private final long receiveTimeoutMs;
+
+    /** How to react to a JMS fault, and how long to wait before retrying. */
+    private final SessionFaultPolicy faultPolicy;
+    private final BackoffPolicy backoffPolicy;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicLong commitCount = new AtomicLong(0);
@@ -109,6 +109,8 @@ public class TransactedReceiveLoop implements Runnable {
         this.metrics = metrics;
         this.instanceId = instanceId;
         this.receiveTimeoutMs = receiveTimeoutMs;
+        this.faultPolicy = SessionFaultPolicy.defaultPolicy();
+        this.backoffPolicy = BackoffPolicy.exponentialWithJitter();
 
         if (config.getMode() == BindingMode.TRACKED && trackerMessageBuilder == null) {
             throw new IllegalArgumentException(
@@ -211,7 +213,7 @@ public class TransactedReceiveLoop implements Runnable {
                     flushTrigger.reset();
 
                     // Check if session needs recovery
-                    if (isSessionBroken(e)) {
+                    if (faultPolicy.requiresRecovery(e)) {
                         if (!recoverSession()) {
                             log.error("Session recovery failed for binding '{}', stopping loop",
                                     config.getId());
@@ -548,51 +550,6 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     /**
-     * Determines if a JMSException indicates a broken session/connection.
-     */
-    private boolean isSessionBroken(JMSException e) {
-        // Check if the linked exception indicates connection loss
-        Exception linked = e.getLinkedException();
-
-        // Common indicators of broken session/connection
-        String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
-        String linkedMsg = linked != null && linked.getMessage() != null
-                ? linked.getMessage().toLowerCase() : "";
-
-        return msg.contains("connection") || msg.contains("session")
-                || msg.contains("closed") || msg.contains("disconnect")
-                || msg.contains("broken") || msg.contains("reset")
-                || linkedMsg.contains("connection") || linkedMsg.contains("socket")
-                || e.getErrorCode() != null && e.getErrorCode().startsWith("MQRC");
-    }
-
-    /**
-     * Determines if an exception indicates a non-recoverable error.
-     */
-    private boolean isNonRecoverableError(JMSException e) {
-        String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
-        String errorCode = e.getErrorCode();
-
-        // Auth/security failures
-        if (msg.contains("authentication") || msg.contains("authorization")
-                || msg.contains("security") || msg.contains("not authorized")
-                || msg.contains("password") || msg.contains("credential")) {
-            return true;
-        }
-
-        // IBM MQ specific non-recoverable codes
-        if (errorCode != null) {
-            // 2035 = not authorized, 2063 = security error
-            if (errorCode.equals("MQRC_NOT_AUTHORIZED") || errorCode.equals("2035")
-                    || errorCode.equals("MQRC_SECURITY_ERROR") || errorCode.equals("2063")) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
      * Attempts to recover the session with bounded exponential backoff.
      *
      * @return true if recovery succeeded, false if recovery failed after max attempts
@@ -627,7 +584,7 @@ public class TransactedReceiveLoop implements Runnable {
         closeSessionResources();
 
         // Calculate backoff with jitter
-        long backoffMs = calculateBackoff(attempts);
+        long backoffMs = backoffPolicy.backoffFor(attempts).toMillis();
 
         log.debug("Waiting {}ms before reconnect attempt {} for binding '{}'",
                 backoffMs, attempts, config.getId());
@@ -667,7 +624,7 @@ public class TransactedReceiveLoop implements Runnable {
             log.error("Session recovery attempt {} failed for binding '{}': {}",
                     attempts, config.getId(), e.getMessage());
 
-            if (isNonRecoverableError(e)) {
+            if (faultPolicy.isFatal(e)) {
                 log.error("Non-recoverable error detected for binding '{}', stopping recovery",
                         config.getId());
                 return false;
@@ -676,19 +633,6 @@ public class TransactedReceiveLoop implements Runnable {
             // Recursive retry (will increment attempt counter)
             return recoverSession();
         }
-    }
-
-    /**
-     * Calculates exponential backoff with jitter.
-     */
-    private long calculateBackoff(int attempt) {
-        double exponential = INITIAL_BACKOFF_MS * Math.pow(BACKOFF_MULTIPLIER, attempt - 1);
-        long baseBackoff = Math.min((long) exponential, MAX_BACKOFF_MS);
-
-        // Add jitter: +/- JITTER_FACTOR * baseBackoff
-        double jitter = (ThreadLocalRandom.current().nextDouble() * 2 - 1) * JITTER_FACTOR * baseBackoff;
-
-        return Math.max(INITIAL_BACKOFF_MS, (long) (baseBackoff + jitter));
     }
 
     public boolean isRunning() {
