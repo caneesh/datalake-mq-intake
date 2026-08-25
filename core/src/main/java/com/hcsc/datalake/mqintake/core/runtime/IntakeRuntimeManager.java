@@ -62,6 +62,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
     private final TrackerMessageBuilderFactory trackerBuilderFactory;
     private final BindingConfigValidator bindingConfigValidator;
     private final com.hcsc.datalake.mqintake.core.config.ProductionMode productionMode;
+    private final com.hcsc.datalake.mqintake.core.config.InstanceId instanceId;
 
     private final MetricsRegistry metricsRegistry;
     private final BindingHealthManager healthManager;
@@ -80,8 +81,10 @@ public class IntakeRuntimeManager implements SmartLifecycle {
                                  BindingConfigValidator bindingConfigValidator,
                                  BindingHealthManager healthManager,
                                  com.hcsc.datalake.mqintake.core.config.ProductionMode productionMode,
+                                 com.hcsc.datalake.mqintake.core.config.InstanceId instanceId,
                                  @Autowired(required = false) TrackerMessageBuilderFactory trackerBuilderFactory) {
         this.productionMode = productionMode;
+        this.instanceId = instanceId;
         this.properties = properties;
         this.fileSystem = fileSystem;
         this.hadoopConf = hadoopConf;
@@ -152,19 +155,19 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         // acknowledge messages before discovering it cannot record what it did.
         StartupValidator validator = new StartupValidator(
                 fileSystem,
-                properties.getInstanceId(),
+                instanceId.value(),
                 properties.getHdfs().getAuditBasePath());
         validator.validateOrFail(properties.getBindings());
         log.info("All binding configurations validated successfully");
     }
 
     private void cleanupTempFiles() {
-        String instanceId = properties.getInstanceId();
+        String resolvedInstanceId = this.instanceId.value();
         long maxAge = properties.getHdfs().getTempFileMaxAgeMs();
 
         for (BindingConfig binding : properties.getBindings()) {
             try {
-                StartupValidator validator = new StartupValidator(fileSystem, instanceId);
+                StartupValidator validator = new StartupValidator(fileSystem, resolvedInstanceId);
                 int deleted = validator.cleanupInstanceTempFiles(binding.getHdfsBasePath(), maxAge);
                 if (deleted > 0) {
                     log.info("Cleaned up {} stale temp files for binding '{}'", deleted, binding.getId());
@@ -193,7 +196,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         AuditRecordEmitter auditEmitter = new HdfsAuditRecordEmitter(
                 fileSystem,
                 properties.getHdfs().getAuditBasePath(),
-                properties.getInstanceId(),
+                instanceId.value(),
                 Clock.systemUTC());
 
         this.runtimeFactory = new BindingRuntimeFactory(
@@ -205,7 +208,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
                 metricsRegistry,
                 healthManager,
                 auditEmitter,
-                properties.getInstanceId());
+                instanceId.value());
     }
 
     /**

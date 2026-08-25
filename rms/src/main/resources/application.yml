@@ -3,7 +3,12 @@ spring:
     name: datalake-mq-intake-rms
 
 intake:
-  instance-id: ${HOSTNAME:rms-instance-1}
+  # Left empty so the service derives hostname-pid. HOSTNAME alone is unique
+  # per host, not per process: two intake JVMs on one host would share a
+  # _tmp directory (where startup sweeps the "own" subtree) and could emit
+  # identical output filenames. Set explicitly only if you can guarantee
+  # uniqueness yourself.
+  instance-id: ${INTAKE_INSTANCE_ID:}
   maxumsgs: 10000
   # Unset: derived from 50% of the JVM's max heap. A fixed value has no
   # relationship to the -Xmx the container actually gets, so it can approve a

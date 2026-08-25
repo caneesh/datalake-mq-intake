@@ -232,7 +232,8 @@ class PartialStartupRollbackTest {
                         path -> com.hcsc.datalake.mqintake.core.config.HdfsPathValidator
                                 .PathValidationResult.success()),
                 new BindingHealthManager(),
-                ProductionMode.disabled(), null) {
+                ProductionMode.disabled(),
+                com.hcsc.datalake.mqintake.core.config.InstanceId.of("rollback-test"), null) {
             @Override
             void initializeRuntimeFactory() {
                 setRuntimeFactoryForTest(new BindingRuntimeFactory(
