@@ -30,10 +30,43 @@ public class StartupValidator {
 
     private final FileSystem fileSystem;
     private final String instanceId;
+    private final String auditBasePath;
+    private final boolean auditValidationEnabled;
 
-    public StartupValidator(FileSystem fileSystem, String instanceId) {
+    /**
+     * Creates a validator that also checks each binding's audit destination.
+     *
+     * <p>Audit is not optional at runtime — {@code IntakeRuntimeManager} always
+     * builds an emitter — and it is written <em>after</em> the MQ commit. So an
+     * unwritable audit path does not stop the service starting, landing data
+     * and acknowledging messages; it surfaces only once the first batch tries
+     * to record what it already did. Validating it at startup turns that into
+     * a refusal to start.
+     *
+     * @param auditBasePath the configured audit base path; validated per
+     *                      binding as {@code {auditBasePath}/{bindingId}}
+     */
+    public StartupValidator(FileSystem fileSystem, String instanceId, String auditBasePath) {
+        this(fileSystem, instanceId, auditBasePath, true);
+    }
+
+    private StartupValidator(FileSystem fileSystem, String instanceId,
+                             String auditBasePath, boolean auditValidationEnabled) {
         this.fileSystem = Objects.requireNonNull(fileSystem, "fileSystem required");
         this.instanceId = Objects.requireNonNull(instanceId, "instanceId required");
+        this.auditBasePath = auditBasePath;
+        this.auditValidationEnabled = auditValidationEnabled;
+    }
+
+    /**
+     * Creates a validator that checks only the landing and temp paths.
+     *
+     * <p>For callers that have no audit destination to check — notably
+     * {@link #cleanupInstanceTempFiles}, which needs a validator but performs
+     * no validation.
+     */
+    public StartupValidator(FileSystem fileSystem, String instanceId) {
+        this(fileSystem, instanceId, null, false);
     }
 
     /**
@@ -81,7 +114,64 @@ public class StartupValidator {
             }
         }
 
+        // The audit destination is the third mandatory location. It is written
+        // after the MQ commit, so a problem here is invisible until the first
+        // batch has already landed and been acknowledged.
+        if (auditValidationEnabled) {
+            try {
+                validateAuditPath(bindingId);
+            } catch (ValidationException e) {
+                errors.add(e.getMessage());
+            }
+        }
+
         return errors;
+    }
+
+    /**
+     * Validates the binding's audit directory, mirroring the emitter's own
+     * semantics: {@code HdfsAuditRecordEmitter} calls {@code mkdirs} on the
+     * parent before writing, so a missing-but-creatable directory is fine and
+     * only a genuinely unusable one is an error.
+     */
+    private void validateAuditPath(String bindingId) throws ValidationException {
+        if (auditBasePath == null || auditBasePath.isBlank()) {
+            throw new ValidationException(String.format(
+                    "Binding '%s' audit path cannot be validated: intake.hdfs.audit-base-path "
+                            + "is not configured, but every committed batch writes an audit record",
+                    bindingId));
+        }
+
+        // Matches HdfsAuditRecordEmitter.buildAuditPath, minus the date
+        // component, which changes daily and is created on demand.
+        String bindingAuditPath = auditBasePath + "/" + bindingId;
+        Path path = new Path(bindingAuditPath);
+
+        try {
+            if (!fileSystem.exists(path)) {
+                boolean created = fileSystem.mkdirs(path);
+                if (!created) {
+                    throw new ValidationException(String.format(
+                            "Binding '%s' audit path does not exist and could not be created: %s",
+                            bindingId, bindingAuditPath));
+                }
+                log.info("Created audit directory for binding '{}': {}", bindingId, bindingAuditPath);
+            }
+
+            fileSystem.access(path, FsAction.WRITE);
+
+            log.debug("Validated write access to audit path for binding '{}': {}",
+                    bindingId, bindingAuditPath);
+
+        } catch (org.apache.hadoop.security.AccessControlException e) {
+            throw new ValidationException(String.format(
+                    "Binding '%s' audit path is not writable: %s — %s",
+                    bindingId, bindingAuditPath, e.getMessage()));
+        } catch (IOException e) {
+            throw new ValidationException(String.format(
+                    "Binding '%s' audit path validation failed: %s — %s",
+                    bindingId, bindingAuditPath, e.getMessage()));
+        }
     }
 
     /**

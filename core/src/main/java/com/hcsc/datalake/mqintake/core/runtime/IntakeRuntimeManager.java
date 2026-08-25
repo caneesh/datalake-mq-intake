@@ -146,7 +146,13 @@ public class IntakeRuntimeManager implements SmartLifecycle {
     }
 
     private void validateAllBindings() throws StartupValidator.StartupValidationException {
-        StartupValidator validator = new StartupValidator(fileSystem, properties.getInstanceId());
+        // Includes the audit destination: it is written after the MQ commit,
+        // so without this check the service can start, land data and
+        // acknowledge messages before discovering it cannot record what it did.
+        StartupValidator validator = new StartupValidator(
+                fileSystem,
+                properties.getInstanceId(),
+                properties.getHdfs().getAuditBasePath());
         validator.validateOrFail(properties.getBindings());
         log.info("All binding configurations validated successfully");
     }
