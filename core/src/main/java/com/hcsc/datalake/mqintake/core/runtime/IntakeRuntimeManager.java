@@ -175,7 +175,20 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         }
     }
 
-    private void initializeRuntimeFactory() {
+    /**
+     * Builds the factory used to create binding runtimes.
+     *
+     * <p>Package-private and overridable so startup-rollback behaviour can be
+     * tested with a factory that fails for a chosen binding. Constructing the
+     * real factory requires a live MQ connection manager, which would put the
+     * rollback path out of reach of any test.
+     */
+    /** Installs the factory an overridden {@link #initializeRuntimeFactory()} wants to use. */
+    void setRuntimeFactoryForTest(BindingRuntimeFactory factory) {
+        this.runtimeFactory = factory;
+    }
+
+    void initializeRuntimeFactory() {
         AuditRecordEmitter auditEmitter = new HdfsAuditRecordEmitter(
                 fileSystem,
                 properties.getHdfs().getAuditBasePath(),
@@ -194,12 +207,34 @@ public class IntakeRuntimeManager implements SmartLifecycle {
                 properties.getInstanceId());
     }
 
+    /**
+     * Creates and starts every binding, or leaves none of them running.
+     *
+     * <p>Application startup is transactional. Previously, if binding C failed
+     * after A and B had started, the exception propagated but A and B were left
+     * consuming: threads polling MQ, landing data and committing, inside an
+     * application whose startup had failed. Spring does not clean that up
+     * either — {@code running} is still false at that point, so
+     * {@code DefaultLifecycleProcessor} does not consider this bean started and
+     * never calls {@link #stop()}. The result was a half-live service with no
+     * owner.
+     *
+     * <p>Stopping the started bindings drains them through the normal path, so
+     * in-flight batches are still resolved rather than abandoned. Shared
+     * resources — the MQ connection manager and the HDFS {@code FileSystem} —
+     * are deliberately left alone: they are context-scoped beans that Spring
+     * disposes when the failed context closes, and they may be shared with
+     * anything else in that context.
+     */
     private void createAndStartRuntimes() {
+        List<BindingRuntime> startedThisAttempt = new ArrayList<>();
+
         for (BindingConfig binding : properties.getBindings()) {
             try {
                 BindingRuntime runtime = runtimeFactory.create(binding);
                 runtimes.put(binding.getId(), runtime);
                 runtime.start();
+                startedThisAttempt.add(runtime);
                 healthManager.recordHealthy(binding.getId());
 
             } catch (BindingRuntimeFactory.BindingRuntimeCreationException e) {
@@ -217,9 +252,47 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         }
 
         if (!startupErrors.isEmpty()) {
-            throw new RuntimeException(
+            RuntimeException failure = new RuntimeException(
                     "Failed to start " + startupErrors.size() + " binding(s): " + startupErrors);
+            rollbackStartedBindings(startedThisAttempt, failure);
+            throw failure;
         }
+    }
+
+    /**
+     * Stops bindings that started before the failure, without losing the
+     * original cause.
+     *
+     * <p>Cleanup failures are logged and attached as suppressed exceptions
+     * rather than thrown: the reason startup failed is more useful to whoever
+     * is reading the log than the reason cleanup was untidy, and throwing here
+     * would replace the former with the latter.
+     */
+    private void rollbackStartedBindings(List<BindingRuntime> started, RuntimeException failure) {
+        if (started.isEmpty()) {
+            return;
+        }
+
+        log.error("Startup failed — stopping {} binding(s) that had already started, so the "
+                + "application does not leave listeners consuming after a failed startup",
+                started.size());
+
+        long drainTimeout = properties.getShutdown().getDrainTimeoutMs();
+
+        for (BindingRuntime runtime : started) {
+            try {
+                runtime.stop(drainTimeout);
+                healthManager.recordStopped(runtime.getBindingId());
+            } catch (Exception e) {
+                log.error("Failed to stop binding '{}' while rolling back startup: {}",
+                        runtime.getBindingId(), e.getMessage(), e);
+                failure.addSuppressed(e);
+            }
+        }
+
+        // Safe to call twice: BindingRuntime.stop() is a no-op once the state
+        // is not RUNNING, so a later stop() during context shutdown is inert.
+        runtimes.clear();
     }
 
     @Override
