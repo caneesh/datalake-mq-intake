@@ -81,7 +81,7 @@ public class DegradedModeManager {
         this.strategy = strategy;
         this.successesRequiredToRestore = successesRequiredToRestore;
         this.currentBatchSize = new AtomicInteger(normalBatchSize);
-        this.classifier = new FailureClassifier();
+        this.classifier = FailureClassifier.defaultClassifier();
     }
 
     /**

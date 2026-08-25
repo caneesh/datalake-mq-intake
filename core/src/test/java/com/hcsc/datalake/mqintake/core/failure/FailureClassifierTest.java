@@ -28,7 +28,7 @@ class FailureClassifierTest {
 
     @BeforeEach
     void setUp() {
-        classifier = new FailureClassifier();
+        classifier = FailureClassifier.defaultClassifier();
     }
 
     // --- MESSAGE_DATA tests ---
