@@ -25,15 +25,20 @@ import java.util.Set;
  * what the SequenceFile format requires, keeping reconciliation cheap (§12).
  *
  * <p><strong>Not applicable to the production layout.</strong> Production
- * SequenceFiles use a {@code LongWritable} positional key, which carries no
+ * SequenceFiles use a {@code LongWritable} byte-offset key, which carries no
  * identity, and the binding serializers now match that. Against such a file
  * this reader returns no identities, which propagates as
  * {@code INCONCLUSIVE} through {@link com.hcsc.datalake.mqintake.core.audit.OrphanFileClassifier}
- * — the safe direction, since INCONCLUSIVE means KEEP, never delete. It does
- * mean reconciliation cannot classify duplicates until metadata placement
- * (open item #2) gives identity a home; a sidecar file (Option C) would
- * restore it without altering the data files. The condition is logged once per
- * reader rather than failing silently.
+ * — the safe direction, since INCONCLUSIVE means KEEP, never delete. The
+ * condition is logged once per reader rather than failing silently.
+ *
+ * <p><strong>Superseded for identity by the sidecar index.</strong> Identity
+ * now lives beside the file rather than inside it; see
+ * {@link com.hcsc.datalake.mqintake.core.index.RecordIndexIdentityExtractor},
+ * which reads the index and delegates here only for files that have none —
+ * anything landed before indexing was enabled, or from a binding with it off.
+ * This class remains the record-counting path and the fallback, so it is not
+ * dead code.
  */
 public class SequenceFileIdentityReader implements IdentityExtractor {
 
