@@ -12,13 +12,9 @@ import java.util.List;
 import java.util.Objects;
 import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -62,8 +58,7 @@ public class BindingRuntime {
      */
     private final List<Future<?>> loopFutures = new ArrayList<>();
     private volatile BindingHealthManager healthManager;
-    private volatile ScheduledExecutorService supervisor;
-    private final AtomicInteger unexpectedTerminations = new AtomicInteger(0);
+    private volatile ListenerSupervisor supervisor;
     private long supervisionIntervalMs = DEFAULT_SUPERVISION_INTERVAL_MS;
 
     static final long DEFAULT_SUPERVISION_INTERVAL_MS = 5_000;
@@ -119,7 +114,9 @@ public class BindingRuntime {
                 backoutDepthMonitor.start();
             }
             state.set(State.RUNNING);
-            startSupervisor();
+            supervisor = new ListenerSupervisor(config.getId(), loopFutures, healthManager,
+                    supervisionIntervalMs, () -> state.get() == State.RUNNING);
+            supervisor.start();
             log.info("Binding '{}' started with {} listener threads", config.getId(), loops.size());
         } catch (Exception e) {
             state.set(State.FAILED);
@@ -145,7 +142,9 @@ public class BindingRuntime {
         // Supervision stops before the loops do. State is already STOPPING, but
         // stopping the supervisor first removes any chance of a shutting-down
         // loop being reported as an unexpected termination.
-        stopSupervisor();
+        if (supervisor != null) {
+            supervisor.close();
+        }
 
         // Stopped next: its browse sessions are created from the same
         // Connection the loops use, and there is no reason to keep sampling
@@ -186,126 +185,6 @@ public class BindingRuntime {
         return new ArrayList<>(loops);
     }
 
-    /**
-     * Injects the health manager and supervision cadence.
-     *
-     * <p>Set by {@link BindingRuntimeFactory} after construction rather than
-     * through the constructor, to leave the existing constructors — used
-     * directly by several tests — unchanged.
-     */
-    void configureSupervision(BindingHealthManager healthManager, long supervisionIntervalMs) {
-        this.healthManager = healthManager;
-        this.supervisionIntervalMs = supervisionIntervalMs;
-    }
-
-    private void startSupervisor() {
-        if (supervisionIntervalMs <= 0) {
-            log.info("Listener supervision disabled for binding '{}'", config.getId());
-            return;
-        }
-
-        supervisor = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "supervise-" + config.getId());
-            t.setDaemon(true);
-            return t;
-        });
-        supervisor.scheduleWithFixedDelay(this::superviseQuietly,
-                supervisionIntervalMs, supervisionIntervalMs, TimeUnit.MILLISECONDS);
-    }
-
-    private void stopSupervisor() {
-        ScheduledExecutorService s = supervisor;
-        if (s != null) {
-            s.shutdownNow();
-        }
-    }
-
-    /**
-     * A supervision pass that cannot escape into the scheduler — a task that
-     * throws out of scheduleWithFixedDelay is cancelled silently, which would
-     * leave the binding unsupervised with no indication.
-     */
-    private void superviseQuietly() {
-        try {
-            superviseOnce();
-        } catch (Throwable t) {
-            log.error("Listener supervision failed for binding '{}': {}",
-                    config.getId(), t.getMessage(), t);
-        }
-    }
-
-    /**
-     * Checks for receive loops that have terminated without being asked to.
-     *
-     * <p>Deliberately does <em>not</em> restart them. Recoverable MQ failures
-     * are already {@code TransactedReceiveLoop}'s responsibility — it has
-     * bounded reconnect with backoff — and a competing restart loop here would
-     * fight that logic. A loop that has exited despite it has hit something
-     * that reconnection does not fix, so the right move is to make the binding
-     * visibly unhealthy and let the deployment platform decide.
-     *
-     * <p>Package-private so tests can drive a pass deterministically instead of
-     * waiting on the scheduler.
-     */
-    void superviseOnce() {
-        if (state.get() != State.RUNNING) {
-            return;   // stopping or stopped: termination is expected
-        }
-
-        int terminated = 0;
-        for (int i = 0; i < loopFutures.size(); i++) {
-            Future<?> future = loopFutures.get(i);
-            if (!future.isDone()) {
-                continue;
-            }
-            terminated++;
-
-            if (unexpectedTerminations.get() < loopFutures.size()) {
-                Throwable cause = terminationCause(future);
-                log.error("Receive loop {} of {} for binding '{}' terminated unexpectedly "
-                                + "while the binding is RUNNING: {}",
-                        i + 1, loopFutures.size(), config.getId(),
-                        cause == null ? "no exception reported" : cause.toString(), cause);
-            }
-        }
-
-        if (terminated == 0) {
-            return;
-        }
-
-        unexpectedTerminations.set(terminated);
-        int alive = loopFutures.size() - terminated;
-
-        String reason = String.format(
-                "%d of %d listener threads for binding '%s' have terminated unexpectedly; "
-                        + "%d still consuming",
-                terminated, loopFutures.size(), config.getId(), alive);
-
-        if (healthManager == null) {
-            return;
-        }
-
-        if (alive == 0) {
-            // Nothing is consuming. The binding is not degraded, it is down,
-            // and reporting anything softer would let it sit silently idle.
-            healthManager.recordUnhealthy(config.getId(), new ListenerTerminatedException(reason));
-        } else {
-            healthManager.recordDegraded(config.getId(), reason);
-        }
-    }
-
-    private Throwable terminationCause(Future<?> future) {
-        try {
-            future.get(0, TimeUnit.MILLISECONDS);
-            return null;   // returned normally
-        } catch (ExecutionException e) {
-            return e.getCause() != null ? e.getCause() : e;
-        } catch (Exception e) {
-            Thread.currentThread().interrupt();
-            return e;
-        }
-    }
-
     /** Number of submitted loops whose task has ended. */
     public int getTerminatedLoopCount() {
         int done = 0;
@@ -322,12 +201,25 @@ public class BindingRuntime {
         return loopFutures.size() - getTerminatedLoopCount();
     }
 
-    /** Raised only to carry the reason into the health manager. */
-    public static class ListenerTerminatedException extends RuntimeException {
-        public ListenerTerminatedException(String message) {
-            super(message);
+    /** Runs one supervision pass. Package-private so tests need not wait on the scheduler. */
+    void superviseOnce() {
+        if (supervisor != null) {
+            supervisor.checkOnce();
         }
     }
+
+    /**
+     * Injects the health manager and supervision cadence.
+     *
+     * <p>Set by {@link BindingRuntimeFactory} after construction rather than
+     * through the constructor, to leave the existing constructors — used
+     * directly by several tests — unchanged.
+     */
+    void configureSupervision(BindingHealthManager healthManager, long supervisionIntervalMs) {
+        this.healthManager = healthManager;
+        this.supervisionIntervalMs = supervisionIntervalMs;
+    }
+
 
     public String getBindingId() {
         return config.getId();

@@ -103,7 +103,7 @@ class ListenerSupervisionTest {
         assertThat(runtime.getActiveLoopCount()).isZero();
         assertThat(healthManager.getStatus("test")).isEqualTo(BindingHealthManager.HealthStatus.UNHEALTHY);
         assertThat(healthManager.getHealthSnapshot("test").getLastError())
-                .isInstanceOf(BindingRuntime.ListenerTerminatedException.class);
+                .isInstanceOf(ListenerSupervisor.ListenerTerminatedException.class);
     }
 
     @Test
