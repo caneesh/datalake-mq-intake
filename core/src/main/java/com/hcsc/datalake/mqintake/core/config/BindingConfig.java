@@ -25,6 +25,24 @@ public class BindingConfig {
     private String backoutQueue;
     private int backoutThreshold = 5;
 
+    /**
+     * Whether a tracker build/send failure should fail the whole batch.
+     *
+     * <p>Default false, matching the legacy MDB: it catches and logs tracker
+     * exceptions in both {@code HDFSIngest.forwardToMessageTracker} and
+     * {@code EJBHelper}, so a tracker failure never rolls back the message.
+     * The landed data is kept and that one tracker notification is lost.
+     *
+     * <p>Set true for the stricter reading of §2.2 — tracker and get in one
+     * unit of work, so losing the tracker means replaying the message. That is
+     * safer for the tracker consumer but turns a tracker-side outage into
+     * repeated batch rollbacks on the landing path.
+     *
+     * <p>Note this only governs per-message failures. A broken session or
+     * connection still surfaces at commit and rolls the batch back either way.
+     */
+    private boolean failBatchOnTrackerError = false;
+
     // Degraded mode (§6.1)
     private DegradationStrategy degradationStrategy = DegradationStrategy.BATCH_OF_ONE;
     private int successesRequiredToRestore = 10;
@@ -139,6 +157,14 @@ public class BindingConfig {
 
     public void setBackoutThreshold(int backoutThreshold) {
         this.backoutThreshold = backoutThreshold;
+    }
+
+    public boolean isFailBatchOnTrackerError() {
+        return failBatchOnTrackerError;
+    }
+
+    public void setFailBatchOnTrackerError(boolean failBatchOnTrackerError) {
+        this.failBatchOnTrackerError = failBatchOnTrackerError;
     }
 
     public DegradationStrategy getDegradationStrategy() {

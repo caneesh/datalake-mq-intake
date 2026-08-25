@@ -395,11 +395,40 @@ public class TransactedReceiveLoop implements Runnable {
         }
     }
 
+    /**
+     * Sends one tracker message per source message.
+     *
+     * <p>By default a per-message failure is logged and skipped rather than
+     * failing the batch, matching the legacy MDB, which catches and logs
+     * tracker exceptions and lets the message commit regardless. The landed
+     * data is kept; that one tracker notification is lost. Set
+     * {@code fail_batch_on_tracker_error} to restore the stricter §2.2 reading.
+     *
+     * <p>This only covers per-message failures. A broken session or connection
+     * still surfaces at {@code session.commit()} and rolls the batch back,
+     * because at that point nothing in the unit of work is safe.
+     *
+     * <p>Unlike the MDB, failures are counted and logged rather than silently
+     * swallowed — matching its delivery behaviour is deliberate, inheriting its
+     * blindness is not.
+     */
     private void sendTrackerMessages(List<Message> batch) throws JMSException {
         for (Message sourceMessage : batch) {
-            Optional<Message> trackerMessage = trackerMessageBuilder.build(session, sourceMessage);
-            if (trackerMessage.isPresent()) {
-                trackerProducer.send(trackerMessage.get());
+            try {
+                Optional<Message> trackerMessage = trackerMessageBuilder.build(session, sourceMessage);
+                if (trackerMessage.isPresent()) {
+                    trackerProducer.send(trackerMessage.get());
+                }
+            } catch (JMSException | RuntimeException e) {
+                if (config.isFailBatchOnTrackerError()) {
+                    throw e;
+                }
+                if (metrics != null) {
+                    metrics.recordTrackerFailure();
+                }
+                log.warn("Tracker send failed for binding '{}' — message still commits, " +
+                        "this tracker notification is lost: {}",
+                        config.getId(), e.getMessage());
             }
         }
     }

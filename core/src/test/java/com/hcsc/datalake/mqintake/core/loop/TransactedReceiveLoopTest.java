@@ -164,8 +164,10 @@ class TransactedReceiveLoopTest {
     }
 
     @Test
-    void trackerFailureRollsBackEntireBatch() throws Exception {
-        // Given: TRACKED config, tracker builder will fail on message 2
+    void trackerFailureDoesNotRollBackByDefault() throws Exception {
+        // MDB parity: the legacy code catches and logs tracker exceptions in
+        // both HDFSIngest and EJBHelper, so a tracker failure never rolls back
+        // the message. The landed data is kept; that one notification is lost.
         BindingConfig config = createTrackedConfig(3);
         sendMessages(3);
 
@@ -178,23 +180,57 @@ class TransactedReceiveLoopTest {
             return Optional.of(session.createTextMessage("TRACKER"));
         };
 
-        // When: run the loop
+        BindingMetrics metrics = new BindingMetrics("test-binding");
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, failingBuilder, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, failingBuilder, null, null, null, null,
+                metrics, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForCommits(loop, 1, 2000);
+        loop.stop();
+        future.get(1, TimeUnit.SECONDS);
+
+        // The batch commits: all three messages land, source queue drains
+        assertThat(loop.getCommitCount()).isEqualTo(1);
+        assertThat(loop.getMessageCount()).isEqualTo(3);
+        assertThat(countMessagesOnQueue(SOURCE_QUEUE)).isZero();
+
+        // Two trackers sent, the failed one simply lost — and counted, not
+        // silently swallowed the way the MDB does
+        assertThat(countMessagesOnQueue(TRACKER_QUEUE)).isEqualTo(2);
+        assertThat(metrics.getTrackerFailureCount()).isEqualTo(1);
+    }
+
+    @Test
+    void trackerFailureRollsBackWhenConfiguredToFailTheBatch() throws Exception {
+        // The stricter §2.2 reading remains available: tracker and get in one
+        // unit of work, so losing a tracker means replaying the message.
+        BindingConfig config = createTrackedConfig(3);
+        config.setFailBatchOnTrackerError(true);
+        sendMessages(3);
+
+        final int[] callCount = {0};
+        TrackerMessageBuilder failingBuilder = (session, source) -> {
+            callCount[0]++;
+            if (callCount[0] == 2) {
+                throw new JMSException("Simulated tracker failure");
+            }
+            return Optional.of(session.createTextMessage("TRACKER"));
+        };
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, failingBuilder, null, null, null, null, null,
+                "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForRollbacks(loop, 1, 2000);
         loop.stop();
         future.get(1, TimeUnit.SECONDS);
 
-        // Then: entire batch rolled back
         assertThat(loop.getRollbackCount()).isGreaterThanOrEqualTo(1);
         assertThat(loop.getCommitCount()).isEqualTo(0);
-
-        // All messages still on source queue
         assertThat(countMessagesOnQueue(SOURCE_QUEUE)).isEqualTo(3);
-        // No tracker messages (transaction rolled back)
-        assertThat(countMessagesOnQueue(TRACKER_QUEUE)).isEqualTo(0);
+        assertThat(countMessagesOnQueue(TRACKER_QUEUE)).isZero();
     }
 
     @Test

@@ -162,11 +162,12 @@ class ProductionPathIntegrationTest {
         assertThat(listFiles(config.getHdfsBasePath() + "/_tmp/it-instance")).isEmpty();
     }
 
-    // §15.3 failure after rename before MQ commit (tracker send fails):
-    // the landed file survives, MQ redelivers, and the design-permitted
-    // duplicate appears — zero loss
+    // §15.6 tracker queue failure. Default policy matches the legacy MDB:
+    // the failure is logged and the batch still commits, so the data lands
+    // once and only that tracker notification is lost. No rollback, therefore
+    // no redelivery and no duplicate.
     @Test
-    void trackerFailureAfterRenameYieldsPermittedDuplicateNotLoss() throws Exception {
+    void trackerFailureLosesOnlyTheNotificationNotTheData() throws Exception {
         BindingConfig config = bindingConfig("trk", "IT.TRK.SOURCE", BindingMode.TRACKED, 1);
         config.setTrackerQueue("IT.TRK.TRACKER");
         sendMessages("IT.TRK.SOURCE", "trk", 4);
@@ -181,17 +182,56 @@ class ProductionPathIntegrationTest {
 
         BindingRuntime runtime = createAndStart(config, serializerFactory(0), failingOnceTracker);
 
-        awaitTrue(15_000, () -> countOnQueue("IT.TRK.TRACKER") == 4
+        awaitTrue(20_000, () -> landedIdentities("trk", config).size() == 4
                 && countOnQueue("IT.TRK.SOURCE") == 0);
         runtime.stop(3000);
 
-        // The first batch's file was renamed into the partition BEFORE the
-        // tracker failure rolled back MQ → redelivery landed a second copy.
-        // §12.1: at-least-once permits the duplicate; nothing is lost.
-        List<String> files = listFilesRecursive(config.getHdfsBasePath());
+        // Zero data loss: every message landed
+        assertThat(landedIdentities("trk", config))
+                .containsExactlyInAnyOrderElementsOf(expectedIdentities("trk", 4));
+        assertThat(countOnQueue("IT.TRK.SOURCE")).isZero();
+
+        // Exactly the failed notification is missing — 3 of 4, not 4
+        assertThat(countOnQueue("IT.TRK.TRACKER")).isEqualTo(3);
+
+        // And no duplicate, because nothing rolled back
+        assertThat(metricsRegistry.forBinding("trk").getTrackerFailureCount()).isEqualTo(1);
+        assertThat(metricsRegistry.forBinding("trk").getRollbackCount()).isZero();
+    }
+
+    // §15.3 failure after rename, before MQ commit. With
+    // fail_batch_on_tracker_error the tracker failure aborts the batch AFTER
+    // the file was renamed into the partition, which is the crash window the
+    // design permits a duplicate in. Kept as a test because the strict policy
+    // remains a supported configuration, and because the scenario is otherwise
+    // hard to trigger deterministically.
+    @Test
+    void failureAfterRenameBeforeCommitYieldsPermittedDuplicateNotLoss() throws Exception {
+        BindingConfig config = bindingConfig("trk2", "IT.TRK2.SOURCE", BindingMode.TRACKED, 1);
+        config.setTrackerQueue("IT.TRK2.TRACKER");
+        config.setFailBatchOnTrackerError(true);
+        sendMessages("IT.TRK2.SOURCE", "trk2", 4);
+
+        AtomicInteger trackerCalls = new AtomicInteger();
+        TrackerMessageBuilderFactory failingOnceTracker = cfg -> (session, source) -> {
+            if (trackerCalls.getAndIncrement() == 0) {
+                throw new JMSException("tracker queue unavailable");
+            }
+            return Optional.of(session.createTextMessage("TRACKER"));
+        };
+
+        BindingRuntime runtime = createAndStart(config, serializerFactory(0), failingOnceTracker);
+
+        awaitTrue(20_000, () -> countOnQueue("IT.TRK2.TRACKER") == 4
+                && countOnQueue("IT.TRK2.SOURCE") == 0);
+        runtime.stop(3000);
+
+        // The first batch's file was renamed in before the rollback, so
+        // redelivery landed a second copy. §12.1: the duplicate is permitted,
+        // nothing is lost.
         List<String> seqFiles = new ArrayList<>();
-        for (String f : files) {
-            if (f.endsWith(".seq")) seqFiles.add(f);
+        for (String f : listFilesRecursive(config.getHdfsBasePath())) {
+            if (f.endsWith(".seq") && !f.contains("/_tmp/")) seqFiles.add(f);
         }
         assertThat(seqFiles.size()).isGreaterThanOrEqualTo(2);
 
@@ -200,10 +240,8 @@ class ProductionPathIntegrationTest {
             allIdentities.addAll(identityReader.extractIdentities(f));
         }
         assertThat(allIdentities)
-                .containsExactlyInAnyOrderElementsOf(expectedIdentities("trk", 4));
-
-        // Tracker messages sent exactly once per committed message
-        assertThat(countOnQueue("IT.TRK.TRACKER")).isEqualTo(4);
+                .containsExactlyInAnyOrderElementsOf(expectedIdentities("trk2", 4));
+        assertThat(countOnQueue("IT.TRK2.TRACKER")).isEqualTo(4);
     }
 
     // §15.10 / §15.1 graceful shutdown (and kill) with the batch only in

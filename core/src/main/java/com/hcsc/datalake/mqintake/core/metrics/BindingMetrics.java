@@ -39,6 +39,7 @@ public class BindingMetrics {
     private final LongAdder reconnectSuccessCount = new LongAdder();
     private final LongAdder reconnectFailureCount = new LongAdder();
     private final LongAdder auditFailureCount = new LongAdder();
+    private final LongAdder trackerFailureCount = new LongAdder();
     private final LongAdder reconciliationDiscrepancyCount = new LongAdder();
 
     // Gauges
@@ -110,6 +111,11 @@ public class BindingMetrics {
 
     public void recordReconnectFailure() {
         reconnectFailureCount.increment();
+    }
+
+    /** A tracker message that could not be built or sent, per message. */
+    public void recordTrackerFailure() {
+        trackerFailureCount.increment();
     }
 
     public void recordAuditFailure() {
@@ -186,6 +192,10 @@ public class BindingMetrics {
 
     public long getReconnectFailureCount() {
         return reconnectFailureCount.sum();
+    }
+
+    public long getTrackerFailureCount() {
+        return trackerFailureCount.sum();
     }
 
     public long getAuditFailureCount() {

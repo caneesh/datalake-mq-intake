@@ -376,7 +376,7 @@ Still required before production cutover:
 | HDFS failover | rollback + redelivery; rename atomicity | classification tested; real-cluster proof pending (G1) |
 | Kerberos renewal | KerberosManager relogin | code + unit tests; real proof pending (G2) |
 | Poison message | BOTHRESH + BOQ on same transaction; bisection | **proven on real MQ** (real delivery counting + real BOQ) |
-| Tracker outage | full rollback; permitted duplicate after rename | proven (embedded) |
+| Tracker outage | **MDB parity: logged and counted, batch still commits** — data lands once, that notification is lost | proven (embedded); strict rollback retained behind `fail_batch_on_tracker_error` |
 | Crash after rename, before commit | redelivery duplicate; reconciliation flags it | proven (embedded + reconciliation tests) |
 | Crash after commit, before audit | file kept; retrospective audit | proven (embedded + reconciliation tests) |
 | Production message volume | batching bounds file count; partition-aligned flush | **not proven** — 12 messages max in test vs batch 8000 (R-2). The comparable prior attempt failed here (R-1) |
