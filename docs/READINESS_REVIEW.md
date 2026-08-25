@@ -79,7 +79,7 @@ failure shape. Corrected in `154de2c`/`dfe402b` — see risk R-1 below.
 ```
 RmsApplication (@SpringBootTest boots real context)
 → BindingConfigValidator.validate (incl. BISECT/BOTHRESH rule)
-→ SerializerValidator (placeholder gate, MQ_INTAKE_PRODUCTION)
+→ SerializerValidator (placeholder gate, via ProductionMode: prod/production profile OR MQ_INTAKE_PRODUCTION)
 → RmsConfiguration.validateTrackerContract (§20.4 gate)
 → HdfsConfiguration: hadoopConfiguration → KerberosManager (disabled) → FileSystem → HdfsPathValidator bean
 → MqConfiguration → MqConnectionManager (named connections, bounded reconnect)
@@ -139,9 +139,30 @@ G are executed there. Docker IBM MQ profile exists for connectivity checks.
 
 ## C. READY FOR PRODUCTION
 
-**RMS: no remaining code gate.** The tracker contract is complete, so
-`MQ_INTAKE_PRODUCTION=true` no longer blocks startup for RMS. What stands
-between it and production is environment validation, not code:
+**RMS: no remaining code gate — but this section previously said so while it
+was false.** RMS has two production gates, not one. The tracker contract gate
+(§20.4) was completed earlier and this section was updated on that basis, but
+the *serializer* gate (§9.1) was missed: `RmsRecordSerializer` still carried
+the `PlaceholderSerializer` marker, which `SerializerValidator` rejects in
+production mode. `MQ_INTAKE_PRODUCTION=true` would have failed startup outright
+with "Binding 'rms' uses placeholder serializer".
+
+Nothing caught it because every boot test ran without a production profile,
+where the same condition only logs a warning. The marker has now been removed —
+legitimately, since the contract it was gating (byte-offset `LongWritable` key,
+normalised `Text` value) is confirmed against the MDB — and
+`RmsProductionProfileSpringBootTest` boots the real application with the `prod`
+profile so the gates are exercised by the suite rather than first met in
+production.
+
+A second defect sat behind it: the gates read only `MQ_INTAKE_PRODUCTION`,
+though a `prod`/`production` Spring profile was equally documented. An
+application started with `--spring.profiles.active=prod` and no environment
+variable ran with **every production check silently disabled** — the likeliest
+combination on a container platform. `ProductionMode` is now the single source
+of truth and honours both signals.
+
+What stands between RMS and production is environment validation, not code:
 
 - HDFS, Kerberos and volume are still unproven — see D′ and G. This is the
   dominant risk and UAT is where it gets addressed.

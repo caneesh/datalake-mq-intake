@@ -17,9 +17,8 @@ import static org.assertj.core.api.Assertions.*;
  *
  * <p>The layout under test is {@code LongWritable} key / {@code Text} value,
  * matching the production SequenceFile types established from the legacy MDB.
- * This remains a PLACEHOLDER serializer: the key's exact expression is
- * unconfirmed, and record metadata has no home in this layout pending open
- * item #2. The payload IS whitespace-normalised as the MDB does.
+ * The key is the record's byte offset and the payload is whitespace-normalised
+ * as the MDB does, so this is the production contract, not a placeholder.
  */
 class RmsRecordSerializerTest {
 

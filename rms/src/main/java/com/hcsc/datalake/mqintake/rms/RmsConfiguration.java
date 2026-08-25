@@ -1,6 +1,6 @@
 package com.hcsc.datalake.mqintake.rms;
 
-import com.hcsc.datalake.mqintake.core.config.SerializerValidator;
+import com.hcsc.datalake.mqintake.core.config.ProductionMode;
 import com.hcsc.datalake.mqintake.core.config.TrackerBodyMode;
 import com.hcsc.datalake.mqintake.core.orchestration.RecordSerializerFactory;
 import com.hcsc.datalake.mqintake.core.orchestration.TrackerMessageBuilderFactory;
@@ -14,12 +14,14 @@ import org.springframework.context.annotation.Configuration;
 /**
  * RMS-specific configuration for record serialization and tracker messages.
  *
- * <p><strong>Tracker contract gate (§20.4):</strong> The legacy
- * MessageHeaderDetails rewrite is not fully captured (tagList, root-end
- * constants, before/after fixture). Because RMS is TRACKED, production
- * startup FAILS while {@link RmsTrackerMessageBuilder#isTrackerContractReady()}
- * is false. Non-production environments run the placeholder rewrite with a
- * loud warning.
+ * <p><strong>Tracker contract gate (§20.4):</strong> because RMS is TRACKED,
+ * production startup FAILS while
+ * {@link RmsTrackerMessageBuilder#isTrackerContractReady()} is false, and
+ * non-production environments run the placeholder rewrite with a loud warning.
+ * The legacy MessageHeaderDetails rewrite has since been captured in full
+ * (tag list, root-end constants, and a before/after fixture), so the gate
+ * currently passes. It is retained because it is what would catch a
+ * regression that reopened one of those gaps.
  */
 @Configuration
 public class RmsConfiguration {
@@ -28,8 +30,9 @@ public class RmsConfiguration {
 
     private final boolean productionMode;
 
-    public RmsConfiguration() {
-        this(SerializerValidator.isProductionModeFromEnvironment());
+    @org.springframework.beans.factory.annotation.Autowired
+    public RmsConfiguration(ProductionMode productionMode) {
+        this(productionMode.isEnabled());
     }
 
     /**
@@ -37,6 +40,11 @@ public class RmsConfiguration {
      */
     public RmsConfiguration(boolean productionMode) {
         this.productionMode = productionMode;
+    }
+
+    /** Non-production default, for tests that build the config directly. */
+    public RmsConfiguration() {
+        this(false);
     }
 
     @Bean

@@ -1,7 +1,6 @@
 package com.hcsc.datalake.mqintake.rms.serializer;
 
 import com.hcsc.datalake.mqintake.core.serializer.PayloadNormalizer;
-import com.hcsc.datalake.mqintake.core.serializer.PlaceholderSerializer;
 import com.hcsc.datalake.mqintake.core.serializer.RecordMetadata;
 import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
 import org.apache.hadoop.io.LongWritable;
@@ -15,48 +14,38 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * PLACEHOLDER RecordSerializer for the RMS/HPS membership feed.
+ * Production RecordSerializer for the RMS/HPS membership feed.
  *
- * <p><strong>WARNING: NON-CONTRACTUAL OUTPUT.</strong> This is a placeholder
- * implementation per DESIGN.md §9.1. Files produced by this serializer must
- * NOT be used as reference data for downstream consumers. The metadata
- * placement decision (open item #2) is not yet finalized.
- *
- * <p>Metadata captured per record (§9.2 key hierarchy):
+ * <p><strong>Output matches the legacy MDB's SequenceFile contract exactly:</strong>
  * <ul>
- *   <li>binding_id — provenance, which queue the record arrived on</li>
- *   <li>payload_guid — extracted from &lt;MessageID&gt; in the payload</li>
- *   <li>mq_message_id — transport-level identity from MQMD.MsgId</li>
- *   <li>mq_put_datetime — from MQMD.PutDate + PutTime</li>
- *   <li>consume_ts_utc — service clock at get</li>
- *   <li>source_file / record_offset — traceability back to landing file</li>
+ *   <li>key — {@code LongWritable} holding the record's byte offset in the
+ *       file, reproducing the legacy writer's
+ *       {@code long offset = sequenceFileWriter.getLength()} read immediately
+ *       before each append (MDB_QUESTIONS A3, since confirmed against the
+ *       MDB source)</li>
+ *   <li>value — {@code Text} holding the payload after the MDB's whitespace
+ *       normalisation ({@code \n}, {@code \r}, {@code \t} each to one space,
+ *       no collapsing, no trim)</li>
  * </ul>
+ *
+ * <p>Both halves are now confirmed rather than assumed, which is why this is no
+ * longer marked as a placeholder: a file written here is byte-comparable with
+ * one the legacy MDB would have written for the same input.
  *
  * <p>This serializer does NOT parse business fields (grouping/sequence keys
  * like SubscriberIdNumber, SourceLastUpdateTS). Those already exist in the
  * payload and core must stay schema-agnostic.
  *
- * <p><strong>Layout:</strong> {@code LongWritable} key, {@code Text} value —
- * matching the production SequenceFile types established from the legacy MDB.
- * The key is a positional ordinal; the exact expression the live writer uses is
- * still unconfirmed (MDB_QUESTIONS A3), so the type matches production while the
- * value does not yet.
- *
- * <p><strong>The metadata above is therefore NOT written to the file.</strong>
- * It previously rode in a composite Text key (Option A, §9.1), which the
- * production types rule out — a {@code LongWritable} key has no room for it.
- * Until metadata placement (open item #2) is resolved, records carry no
- * payload_guid, so reconciliation and §10 orphan classification cannot identify
- * records from file contents. Option C (sidecar file) would restore it without
- * altering these data files. {@link #extractPayloadGuid} remains available for
- * whichever placement is chosen.
+ * <p><strong>Known limitation — record identity is not in the file.</strong>
+ * A {@code LongWritable} key has no room for {@code payload_guid}, and adding
+ * it to the value would break parity, so reconciliation and §10 orphan
+ * classification cannot identify a record from the file's contents alone. That
+ * is a gap in reconciliation, not a defect in the output: the legacy MDB never
+ * carried identity either, and it is addressed by sidecar metadata alongside
+ * the data files. {@link #extractPayloadGuid} is what supplies the identity to
+ * that sidecar.
  */
-public class RmsRecordSerializer implements RecordSerializer, PlaceholderSerializer {
-
-    @Override
-    public String getPlaceholderReason() {
-        return "RMS serializer: metadata placement (Option A/B) per DESIGN.md §9.1 not finalized";
-    }
+public class RmsRecordSerializer implements RecordSerializer {
 
     /**
      * Pattern to extract MessageID (payload GUID) from the XML payload.
@@ -91,9 +80,6 @@ public class RmsRecordSerializer implements RecordSerializer, PlaceholderSeriali
             // legacy writer's `long offset = sequenceFileWriter.getLength()`
             // read before each append (MDB_QUESTIONS A3).
             LongWritable key = new LongWritable(metadata.getFileByteOffset());
-
-            // Value is the normalised payload as Text, matching the
-            // production value type.
             Text value = new Text(payload);
 
             return new SerializedRecord(key, value);

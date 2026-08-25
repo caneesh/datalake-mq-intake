@@ -60,6 +60,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
     private final RecordSerializerFactory serializerFactory;
     private final TrackerMessageBuilderFactory trackerBuilderFactory;
     private final BindingConfigValidator bindingConfigValidator;
+    private final com.hcsc.datalake.mqintake.core.config.ProductionMode productionMode;
 
     private final MetricsRegistry metricsRegistry;
     private final BindingHealthManager healthManager;
@@ -77,7 +78,9 @@ public class IntakeRuntimeManager implements SmartLifecycle {
                                  RecordSerializerFactory serializerFactory,
                                  BindingConfigValidator bindingConfigValidator,
                                  BindingHealthManager healthManager,
+                                 com.hcsc.datalake.mqintake.core.config.ProductionMode productionMode,
                                  @Autowired(required = false) TrackerMessageBuilderFactory trackerBuilderFactory) {
+        this.productionMode = productionMode;
         this.properties = properties;
         this.fileSystem = fileSystem;
         this.hadoopConf = hadoopConf;
@@ -132,12 +135,13 @@ public class IntakeRuntimeManager implements SmartLifecycle {
 
     /**
      * Enforces the production serializer gate (§9.1): placeholder serializers
-     * fail startup when MQ_INTAKE_PRODUCTION=true; otherwise they run with a
-     * loud warning. Never a silent fallback.
+     * fail startup in production mode; otherwise they run with a loud warning.
+     * Never a silent fallback.
      */
     private void validateSerializers() throws com.hcsc.datalake.mqintake.core.config.SerializerValidator.SerializerValidationException {
         com.hcsc.datalake.mqintake.core.config.SerializerValidator validator =
-                new com.hcsc.datalake.mqintake.core.config.SerializerValidator(serializerFactory);
+                new com.hcsc.datalake.mqintake.core.config.SerializerValidator(
+                        serializerFactory, productionMode);
         validator.validateOrFail(properties.getBindings());
     }
 

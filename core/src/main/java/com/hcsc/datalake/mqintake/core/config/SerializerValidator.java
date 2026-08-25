@@ -17,11 +17,9 @@ import java.util.Objects;
  * They produce files with non-contractual output that downstream consumers
  * cannot rely on.
  *
- * <p>Production mode is determined by:
- * <ul>
- *   <li>Spring profile "production" or "prod" is active, OR</li>
- *   <li>Environment variable MQ_INTAKE_PRODUCTION=true</li>
- * </ul>
+ * <p>Production mode is decided by {@link ProductionMode} — an active
+ * {@code prod}/{@code production} Spring profile, or
+ * {@code MQ_INTAKE_PRODUCTION=true}.
  *
  * <p>When production mode is enabled, any binding using a placeholder serializer
  * causes startup to fail with a clear error message.
@@ -29,7 +27,6 @@ import java.util.Objects;
 public class SerializerValidator {
 
     private static final Logger log = LoggerFactory.getLogger(SerializerValidator.class);
-    private static final String ENV_PRODUCTION_MODE = "MQ_INTAKE_PRODUCTION";
 
     private final RecordSerializerFactory serializerFactory;
     private final boolean productionMode;
@@ -40,18 +37,14 @@ public class SerializerValidator {
     }
 
     /**
-     * Creates a validator with production mode determined from environment.
+     * Creates a validator from the application's {@link ProductionMode}, which
+     * is the only thing that decides this — see that class for why the answer
+     * is not read from the environment here.
      */
-    public SerializerValidator(RecordSerializerFactory serializerFactory) {
-        this(serializerFactory, isProductionModeFromEnvironment());
-    }
-
-    /**
-     * Checks if production mode is enabled via environment variable.
-     */
-    public static boolean isProductionModeFromEnvironment() {
-        String envValue = System.getenv(ENV_PRODUCTION_MODE);
-        return "true".equalsIgnoreCase(envValue) || "1".equals(envValue);
+    public SerializerValidator(RecordSerializerFactory serializerFactory,
+                               ProductionMode productionMode) {
+        this(serializerFactory,
+                Objects.requireNonNull(productionMode, "productionMode required").isEnabled());
     }
 
     /**

@@ -2,7 +2,7 @@ package com.hcsc.datalake.mqintake.claims;
 
 import com.hcsc.datalake.mqintake.claims.serializer.ClaimsIdentityExtractor;
 import com.hcsc.datalake.mqintake.claims.serializer.ClaimsRecordSerializer;
-import com.hcsc.datalake.mqintake.core.config.SerializerValidator;
+import com.hcsc.datalake.mqintake.core.config.ProductionMode;
 import com.hcsc.datalake.mqintake.core.orchestration.RecordSerializerFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,8 +36,9 @@ public class ClaimsConfiguration {
 
     @Autowired
     public ClaimsConfiguration(
-            @Value("${claims.identity-field:}") String identityField) {
-        this(identityField, SerializerValidator.isProductionModeFromEnvironment());
+            @Value("${claims.identity-field:}") String identityField,
+            ProductionMode productionMode) {
+        this(identityField, productionMode.isEnabled());
     }
 
     /**
