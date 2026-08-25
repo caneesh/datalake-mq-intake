@@ -116,8 +116,12 @@ public class BindingRuntimeFactory {
             BackoutQueueDepthMonitor depthMonitor =
                     createBackoutDepthMonitor(config, jmsConnection, metrics);
 
-            return new BindingRuntime(
+            BindingRuntime runtime = new BindingRuntime(
                     config, loops, executor, trackerBuilder != null, depthMonitor);
+            // Supervision needs the health manager, which the factory owns.
+            runtime.configureSupervision(
+                    healthManager, BindingRuntime.DEFAULT_SUPERVISION_INTERVAL_MS);
+            return runtime;
 
         } catch (BindingRuntimeCreationException e) {
             throw e;
