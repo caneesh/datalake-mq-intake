@@ -173,11 +173,19 @@ public class TransactedReceiveLoop implements Runnable {
                 if (message != null) {
                     batch.add(message);
                     flushTrigger.trackMessage(message);
+                    if (metrics != null) {
+                        // In-flight batch depth. One atomic store per message,
+                        // negligible beside the JMS receive that produced it.
+                        metrics.setCurrentBatchSize(batch.size());
+                    }
 
                     if (batch.size() >= effectiveBatchSize || flushTrigger.shouldFlush()) {
                         processBatch(batch);
                         batch.clear();
                         flushTrigger.reset();
+                        if (metrics != null) {
+                            metrics.setCurrentBatchSize(0);
+                        }
                     }
                 } else {
                     // Idle poll. shouldFlush() rather than isTimeoutExpired()
@@ -188,6 +196,9 @@ public class TransactedReceiveLoop implements Runnable {
                         processBatch(batch);
                         batch.clear();
                         flushTrigger.reset();
+                        if (metrics != null) {
+                            metrics.setCurrentBatchSize(0);
+                        }
                     }
                 }
             } catch (JMSException e) {
@@ -287,7 +298,15 @@ public class TransactedReceiveLoop implements Runnable {
                 }
             }
 
+            // Flush latency covers the whole durable write — serialize, _tmp
+            // write, hflush, close, rename — which is the part that dominates
+            // batch time and the first thing to look at when throughput drops.
+            long flushStartNanos = System.nanoTime();
             BatchWriter.BatchWriteResult writeResult = batchWriter.write(config.getId(), cleanMessages);
+            if (metrics != null) {
+                metrics.recordFlushLatency(
+                        java.time.Duration.ofNanos(System.nanoTime() - flushStartNanos));
+            }
 
             if (config.getMode() == BindingMode.TRACKED) {
                 sendTrackerMessages(cleanMessages);
@@ -297,6 +316,15 @@ public class TransactedReceiveLoop implements Runnable {
             committed = true;
             commitCount.incrementAndGet();
             messageCount.addAndGet(cleanMessages.size());
+
+            // Counted at commit, not at receive. A rolled-back batch is
+            // redelivered, so counting on receive would tally the same message
+            // repeatedly and overstate throughput during poison isolation.
+            // batchSize rather than cleanMessages.size(): messages routed to
+            // the BOQ in this unit of work were also consumed.
+            if (metrics != null) {
+                metrics.recordMessagesConsumed(batchSize);
+            }
 
             // Committed messages (including any routed to BOQ in this unit of
             // work) are no longer suspects
@@ -345,6 +373,9 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     private void handleFailure(Throwable e, List<String> failedBatchMessageIds) {
+        if (metrics != null) {
+            metrics.setHealthy(false);
+        }
         if (degradedModeManager != null) {
             boolean wasDegraded = degradedModeManager.isInDegradedMode();
 
@@ -386,6 +417,9 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     private void handleSuccess() {
+        if (metrics != null) {
+            metrics.setHealthy(true);
+        }
         if (degradedModeManager != null) {
             boolean wasDegraded = degradedModeManager.isInDegradedMode();
             degradedModeManager.recordSuccess();

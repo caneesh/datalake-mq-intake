@@ -104,6 +104,9 @@ class RmsApplicationSpringBootTest {
     @Autowired
     private BindingsHealthIndicator healthIndicator;
 
+    @Autowired
+    private io.micrometer.core.instrument.MeterRegistry meterRegistry;
+
     @Test
     void rmsProductionPathLandsMessagesAndSendsTrackers() throws Exception {
         assertThat(runtimeManager.isRunning()).isTrue();
@@ -212,4 +215,55 @@ class RmsApplicationSpringBootTest {
     private interface Check {
         boolean ok() throws Exception;
     }
+
+    /**
+     * BindingMetrics was fully populated but read by nothing — no monitoring
+     * system could see a single counter. This asserts the meters are actually
+     * published through Actuator's registry, tagged per binding, and that they
+     * carry the values the run produced rather than registering as zeros.
+     */
+    @Test
+    void intakeMetricsArePublishedThroughActuator() throws Exception {
+        // Drive real traffic first so the counters have something to report
+        try (Session session = sharedConnection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+             MessageProducer producer = session.createProducer(session.createQueue(SOURCE_QUEUE))) {
+            for (int i = 0; i < 3; i++) {
+                TextMessage message = session.createTextMessage(
+                        "<Member><MessageID>" + UUID.randomUUID() + "</MessageID></Member>");
+                message.setStringProperty("MessageHeaderDetails",
+                        "<MessageHeaderDetailsType><Origin>metrics</Origin>"
+                                + "</MessageHeaderDetailsType>");
+                producer.send(message);
+            }
+        }
+
+        awaitTrue(15_000, () -> countSeqFiles() > 0);
+
+        var consumed = meterRegistry.find("mq_intake_messages_consumed_total")
+                .tag("binding", "rms").functionCounter();
+        assertThat(consumed).as("counter must be registered, tagged by binding").isNotNull();
+
+        awaitTrue(10_000, () -> consumed.count() > 0);
+        assertThat(consumed.count()).isGreaterThan(0);
+
+        // The rest of the operational surface is registered too
+        assertThat(meterRegistry.find("mq_intake_batches_committed_total")
+                .tag("binding", "rms").functionCounter()).isNotNull();
+        assertThat(meterRegistry.find("mq_intake_poison_routed_total")
+                .tag("binding", "rms").functionCounter()).isNotNull();
+        assertThat(meterRegistry.find("mq_intake_backout_queue_depth")
+                .tag("binding", "rms").gauge()).isNotNull();
+        assertThat(meterRegistry.find("mq_intake_flush_latency_seconds")
+                .tag("binding", "rms").gauge()).isNotNull();
+
+        // Flush latency is a real measurement, not a placeholder zero
+        assertThat(meterRegistry.find("mq_intake_flush_latency_seconds")
+                .tag("binding", "rms").gauge().value()).isGreaterThan(0.0);
+
+        // Untagged publication would let one stalled binding hide behind the
+        // aggregate, which DESIGN §14 calls out explicitly
+        assertThat(meterRegistry.find("mq_intake_messages_consumed_total").meters())
+                .allSatisfy(m -> assertThat(m.getId().getTag("binding")).isNotNull());
+    }
+
 }

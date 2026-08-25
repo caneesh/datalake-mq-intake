@@ -705,4 +705,86 @@ class TransactedReceiveLoopTest {
         assertThat(degradedModeManager.getSuspectCount()).isZero();
     }
 
+
+    @Test
+    void operationalMetricsArePopulatedOnTheProductionPath() throws Exception {
+        // These five were defined but never called from production code, so a
+        // dashboard built on them would have shown flat zeros forever.
+        BindingConfig config = createLandOnlyConfig(3);
+        sendMessages(3);
+        BindingMetrics metrics = new BindingMetrics("test");
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, null, null, null,
+                metrics, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForQueueEmpty(SOURCE_QUEUE, 3000);
+        loop.stop();
+        future.get(2, TimeUnit.SECONDS);
+
+        assertThat(metrics.getMessagesConsumed())
+                .as("counted at commit, so it matches what actually left the queue")
+                .isEqualTo(3);
+        assertThat(metrics.getFlushCount()).isEqualTo(1);
+        assertThat(metrics.getLastFlushLatency()).isPositive();
+        assertThat(metrics.getAverageFlushLatency()).isPositive();
+        assertThat(metrics.isHealthy()).isTrue();
+
+        // Reset to zero once the batch is flushed, so the gauge reads as
+        // in-flight depth rather than sticking at the last batch's size
+        assertThat(metrics.getCurrentBatchSize()).isZero();
+    }
+
+    @Test
+    void consumedCountIsNotInflatedByRedelivery() throws Exception {
+        // Counting on receive would tally the same message on every redelivery
+        // and overstate throughput exactly when a poison message is churning.
+        BindingConfig config = createLandOnlyConfig(3);
+        sendMessages(3);
+        BindingMetrics metrics = new BindingMetrics("test");
+
+        batchWriter.setFailOnNextWrite(true, new java.io.IOException("HDFS unavailable"));
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, null, null, null,
+                metrics, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForRollbacks(loop, 1, 3000);
+        // Let the redelivery succeed (the stub's failure flag is sticky)
+        batchWriter.setFailOnNextWrite(false);
+        waitForCommits(loop, 1, 5000);
+        loop.stop();
+        future.get(2, TimeUnit.SECONDS);
+
+        // One rollback then a successful redelivery: 3 messages, counted once
+        assertThat(loop.getRollbackCount()).isGreaterThanOrEqualTo(1);
+        assertThat(metrics.getMessagesConsumed()).isEqualTo(3);
+    }
+
+    @Test
+    void failureMarksMetricsUnhealthy() throws Exception {
+        BindingConfig config = createLandOnlyConfig(3);
+        sendMessages(3);
+        BindingMetrics metrics = new BindingMetrics("test");
+
+        // Always fails, so healthy=false is the final state rather than a
+        // value a later successful redelivery would overwrite.
+        BatchWriter alwaysFails = (bindingId, messages) -> {
+            throw new BatchWriter.BatchWriteException("HDFS down");
+        };
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, alwaysFails, null, null, null, null, null,
+                metrics, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForRollbacks(loop, 1, 3000);
+        loop.stop();
+        future.get(2, TimeUnit.SECONDS);
+
+        assertThat(metrics.isHealthy()).isFalse();
+    }
+
 }
