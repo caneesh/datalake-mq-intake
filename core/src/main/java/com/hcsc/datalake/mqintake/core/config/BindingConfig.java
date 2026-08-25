@@ -36,6 +36,17 @@ public class BindingConfig {
     private long backoutDepthPollIntervalMs = 30_000;
 
     /**
+     * Whether to write a sidecar record index beside each landed file.
+     *
+     * <p>Off by default. The index is what lets reconciliation identify the
+     * records in a file, but it is only meaningful when the binding's
+     * serializer supplies a per-message identity. Enabling it for a binding
+     * without one produces an index of nulls, which reconciliation would read
+     * as missing records.
+     */
+    private boolean recordIndexEnabled = false;
+
+    /**
      * Whether a tracker build/send failure should fail the whole batch.
      *
      * <p>Default false, matching the legacy MDB: it catches and logs tracker
@@ -155,6 +166,14 @@ public class BindingConfig {
 
     public String getBackoutQueue() {
         return backoutQueue;
+    }
+
+    public boolean isRecordIndexEnabled() {
+        return recordIndexEnabled;
+    }
+
+    public void setRecordIndexEnabled(boolean recordIndexEnabled) {
+        this.recordIndexEnabled = recordIndexEnabled;
     }
 
     public long getBackoutDepthPollIntervalMs() {

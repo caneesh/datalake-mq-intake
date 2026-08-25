@@ -69,5 +69,10 @@ intake:
       # pager condition. Sampled by browsing (read-only, does not consume).
       # 0 disables the monitor and with it the alert.
       backout-depth-poll-interval-ms: 30000
+      # Sidecar index: RMS payloads carry <MessageID>, a per-message UUID, so
+      # an index of identities is meaningful here. Claims deliberately leaves
+      # this off — its per-message key is still an open question, and an index
+      # of nulls would read as missing records.
+      record-index-enabled: true
       degradation-strategy: BATCH_OF_ONE
       successes-required-to-restore: 10

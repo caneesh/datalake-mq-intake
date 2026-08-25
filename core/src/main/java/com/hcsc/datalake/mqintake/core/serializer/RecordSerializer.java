@@ -41,10 +41,36 @@ public interface RecordSerializer {
     class SerializedRecord {
         private final Writable key;
         private final Writable value;
+        private final String identity;
 
         public SerializedRecord(Writable key, Writable value) {
+            this(key, value, null);
+        }
+
+        /**
+         * @param identity a value that uniquely identifies this record's
+         *        payload, or null when the binding has none.
+         *        <p><strong>This is never written to the SequenceFile.</strong>
+         *        The file contract is a LongWritable byte offset and a Text
+         *        payload, byte-comparable with the legacy MDB's output, and
+         *        adding identity to either half would break that. It is carried
+         *        alongside so the writer can record it in a sidecar index,
+         *        which is what lets reconciliation identify a record without
+         *        altering the data files.
+         */
+        public SerializedRecord(Writable key, Writable value, String identity) {
             this.key = key;
             this.value = value;
+            this.identity = identity;
+        }
+
+        /** The payload identity, or null if the binding does not supply one. */
+        public String getIdentity() {
+            return identity;
+        }
+
+        public boolean hasIdentity() {
+            return identity != null && !identity.isEmpty();
         }
 
         public Writable getKey() {

@@ -7,6 +7,8 @@ import com.hcsc.datalake.mqintake.core.config.BindingMode;
 import com.hcsc.datalake.mqintake.core.config.MqConnectionConfig;
 import com.hcsc.datalake.mqintake.core.failure.DegradedModeManager;
 import com.hcsc.datalake.mqintake.core.hdfs.SequenceFileBatchWriter;
+import com.hcsc.datalake.mqintake.core.index.HdfsRecordIndexWriter;
+import com.hcsc.datalake.mqintake.core.index.RecordIndexWriter;
 import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.loop.TransactedReceiveLoop;
 import com.hcsc.datalake.mqintake.core.metrics.BackoutQueueDepthMonitor;
@@ -178,7 +180,26 @@ public class BindingRuntimeFactory {
     private BatchWriter createBatchWriter(BindingConfig config, RecordSerializer serializer) {
         return new SequenceFileBatchWriter(
                 fileSystem, hadoopConf, serializer, instanceId,
-                config.getId(), config.getHdfsBasePath());
+                java.time.Clock.systemUTC(),
+                org.apache.hadoop.io.SequenceFile.CompressionType.RECORD,
+                java.util.Map.of(config.getId(), config.getHdfsBasePath()),
+                createRecordIndexWriter(config));
+    }
+
+    /**
+     * Sidecar indexing, per binding.
+     *
+     * <p>Off unless the binding opts in. A binding whose payload has no
+     * per-message identity would produce an index of null identities, and an
+     * index reconciliation cannot trust is worse than none: the unidentified
+     * records look like losses.
+     */
+    private RecordIndexWriter createRecordIndexWriter(BindingConfig config) {
+        if (!config.isRecordIndexEnabled()) {
+            return RecordIndexWriter.disabled();
+        }
+        log.info("Record index enabled for binding '{}'", config.getId());
+        return new HdfsRecordIndexWriter(fileSystem, instanceId);
     }
 
     private TrackerMessageBuilder createTrackerBuilder(BindingConfig config) {

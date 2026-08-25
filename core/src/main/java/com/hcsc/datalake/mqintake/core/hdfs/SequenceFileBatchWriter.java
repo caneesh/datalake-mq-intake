@@ -1,6 +1,10 @@
 package com.hcsc.datalake.mqintake.core.hdfs;
 
 import com.hcsc.datalake.mqintake.core.batch.BatchWriter;
+import java.util.ArrayList;
+import com.hcsc.datalake.mqintake.core.index.RecordIndex;
+import com.hcsc.datalake.mqintake.core.index.RecordIndexEntry;
+import com.hcsc.datalake.mqintake.core.index.RecordIndexWriter;
 import com.hcsc.datalake.mqintake.core.serializer.RecordMetadata;
 import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
 import org.apache.hadoop.conf.Configuration;
@@ -44,6 +48,7 @@ public class SequenceFileBatchWriter implements BatchWriter {
     private final Clock clock;
     private final CompressionType compressionType;
     private final Map<String, String> bindingBasePaths;
+    private final RecordIndexWriter recordIndexWriter;
 
     private final AtomicLong batchSequence = new AtomicLong(0);
 
@@ -82,6 +87,27 @@ public class SequenceFileBatchWriter implements BatchWriter {
                                     Clock clock,
                                     CompressionType compressionType,
                                     Map<String, String> bindingBasePaths) {
+        this(fileSystem, conf, serializer, instanceId, clock, compressionType,
+                bindingBasePaths, RecordIndexWriter.disabled());
+    }
+
+    /**
+     * Creates a writer that also emits a sidecar index.
+     *
+     * <p>Index writing is off unless a writer is supplied: a binding with no
+     * trustworthy per-message identity should not produce an index that
+     * reconciliation might believe.
+     */
+    public SequenceFileBatchWriter(FileSystem fileSystem,
+                                    Configuration conf,
+                                    RecordSerializer serializer,
+                                    String instanceId,
+                                    Clock clock,
+                                    CompressionType compressionType,
+                                    Map<String, String> bindingBasePaths,
+                                    RecordIndexWriter recordIndexWriter) {
+        this.recordIndexWriter = recordIndexWriter == null
+                ? RecordIndexWriter.disabled() : recordIndexWriter;
         this.fileSystem = fileSystem;
         this.conf = conf;
         this.serializer = serializer;
@@ -137,7 +163,8 @@ public class SequenceFileBatchWriter implements BatchWriter {
         try {
             fileSystem.mkdirs(tempPath.getParent());
 
-            byteCount = writeSequenceFile(tempPath, bindingId, messages, filename);
+            List<RecordIndexEntry> indexEntries = new ArrayList<>(messages.size());
+            byteCount = writeSequenceFile(tempPath, bindingId, messages, filename, indexEntries);
 
             fileSystem.mkdirs(finalPath.getParent());
 
@@ -148,6 +175,9 @@ public class SequenceFileBatchWriter implements BatchWriter {
             }
 
             landed = true;
+
+            writeIndexQuietly(new RecordIndex(bindingId, filename, partitionPath,
+                    instanceId, indexEntries));
 
             log.debug("Batch written successfully: {} records, {} bytes to {}",
                     messages.size(), byteCount, finalPath);
@@ -165,7 +195,8 @@ public class SequenceFileBatchWriter implements BatchWriter {
         }
     }
 
-    private long writeSequenceFile(Path path, String bindingId, List<Message> messages, String filename)
+    private long writeSequenceFile(Path path, String bindingId, List<Message> messages,
+                                   String filename, List<RecordIndexEntry> indexEntries)
             throws IOException, RecordSerializer.SerializationException {
 
         long startPos = 0;
@@ -192,6 +223,10 @@ public class SequenceFileBatchWriter implements BatchWriter {
                         buildMetadata(bindingId, message, filename, i, fileByteOffset);
                 RecordSerializer.SerializedRecord record = serializer.serialize(message, metadata);
                 writer.append(record.getKey(), record.getValue());
+
+                // Identity travels beside the record, never inside it — the
+                // file contract stays byte-comparable with the legacy MDB.
+                indexEntries.add(new RecordIndexEntry(fileByteOffset, record.getIdentity()));
             }
 
             writer.hflush();
@@ -199,6 +234,27 @@ public class SequenceFileBatchWriter implements BatchWriter {
         }
 
         return endPos - startPos;
+    }
+
+    /**
+     * Writes the sidecar index, never failing the batch.
+     *
+     * <p>The data file is already durable and visible at this point. Refusing
+     * to commit because a reconciliation aid could not be written would roll
+     * back a landed file and manufacture a duplicate — a worse outcome than a
+     * file with no index, which simply leaves reconciliation where it is today.
+     */
+    private void writeIndexQuietly(RecordIndex index) {
+        if (!recordIndexWriter.isEnabled()) {
+            return;
+        }
+        try {
+            recordIndexWriter.write(index);
+        } catch (Exception e) {
+            log.warn("Could not write record index for {} — the data is landed and committed, "
+                            + "only reconciliation metadata is missing: {}",
+                    index.getFilename(), e.getMessage());
+        }
     }
 
     private RecordMetadata buildMetadata(String bindingId, Message message, String filename,

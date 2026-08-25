@@ -64,6 +64,7 @@ class RmsApplicationSpringBootTest {
         registry.add("intake.bindings[0].listener-threads", () -> 2);
         registry.add("intake.bindings[0].backout-queue", () -> "MQ.HPS.MEMBERSHIP.BACKOUT");
         registry.add("intake.bindings[0].backout-threshold", () -> 5);
+        registry.add("intake.bindings[0].record-index-enabled", () -> true);
         registry.add("intake.bindings[0].degradation-strategy", () -> "BATCH_OF_ONE");
         registry.add("intake.hdfs.audit-base-path", () -> auditDir.toString());
         registry.add("intake.instance-id", () -> "rms-sbt");
@@ -264,6 +265,88 @@ class RmsApplicationSpringBootTest {
         // aggregate, which DESIGN §14 calls out explicitly
         assertThat(meterRegistry.find("mq_intake_messages_consumed_total").meters())
                 .allSatisfy(m -> assertThat(m.getId().getTag("binding")).isNotNull());
+    }
+
+
+    /**
+     * The sidecar index is produced by the real pipeline, and identifies the
+     * records that were landed.
+     *
+     * <p>Identity cannot live in the file: the contract is a LongWritable byte
+     * offset and a Text payload, byte-comparable with the legacy MDB. So the
+     * index is what makes a landed file's contents identifiable at all, and
+     * this asserts it survives the whole path rather than only the unit test.
+     */
+    @Test
+    void sidecarIndexIdentifiesTheLandedRecords() throws Exception {
+        java.util.Set<String> sent = new java.util.HashSet<>();
+
+        try (Session session = sharedConnection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+             MessageProducer producer = session.createProducer(session.createQueue(SOURCE_QUEUE))) {
+            for (int i = 0; i < 5; i++) {
+                String guid = UUID.randomUUID().toString();
+                sent.add(guid);
+                TextMessage message = session.createTextMessage(
+                        "<Member><MessageID>" + guid + "</MessageID></Member>");
+                message.setStringProperty("MessageHeaderDetails",
+                        "<MessageHeaderDetailsType><Origin>idx</Origin></MessageHeaderDetailsType>");
+                producer.send(message);
+            }
+        }
+
+        awaitTrue(15_000, () -> !indexFiles().isEmpty());
+
+        org.apache.hadoop.conf.Configuration conf = new org.apache.hadoop.conf.Configuration();
+        conf.set("fs.defaultFS", "file:///");
+        org.apache.hadoop.fs.FileSystem fs = org.apache.hadoop.fs.FileSystem.get(conf);
+        var reader = new com.hcsc.datalake.mqintake.core.index.RecordIndexReader(fs);
+
+        // Every identity we sent must be claimed by some index
+        awaitTrue(15_000, () -> collectedIdentities(reader).containsAll(sent));
+        java.util.Set<String> indexed = collectedIdentities(reader);
+
+        assertThat(indexed).containsAll(sent);
+
+        // And the index describes real files with real offsets
+        for (java.nio.file.Path indexFile : indexFiles()) {
+            java.nio.file.Path dataFile = java.nio.file.Paths.get(
+                    indexFile.toString().replace(".index.jsonl", ""));
+            assertThat(java.nio.file.Files.exists(dataFile))
+                    .as("an index must never describe a file that does not exist")
+                    .isTrue();
+
+            var index = reader.read(new org.apache.hadoop.fs.Path(dataFile.toString()))
+                    .orElseThrow();
+            assertThat(index.isFullyIdentified()).isTrue();
+            assertThat(index.getEntries()).allSatisfy(
+                    e -> assertThat(e.getByteOffset()).isGreaterThanOrEqualTo(0));
+        }
+    }
+
+    private java.util.Set<String> collectedIdentities(
+            com.hcsc.datalake.mqintake.core.index.RecordIndexReader reader) {
+        java.util.Set<String> all = new java.util.HashSet<>();
+        try {
+            for (java.nio.file.Path indexFile : indexFiles()) {
+                java.nio.file.Path dataFile = java.nio.file.Paths.get(
+                        indexFile.toString().replace(".index.jsonl", ""));
+                all.addAll(reader.readIdentities(
+                        new org.apache.hadoop.fs.Path(dataFile.toString())));
+            }
+        } catch (Exception e) {
+            return all;
+        }
+        return all;
+    }
+
+    private java.util.List<java.nio.file.Path> indexFiles() {
+        try (var stream = Files.walk(dataDir)) {
+            return stream.filter(p -> p.toString().endsWith(".index.jsonl")
+                            && !p.toString().contains("/_tmp/"))
+                    .collect(java.util.stream.Collectors.toList());
+        } catch (java.io.IOException | java.io.UncheckedIOException e) {
+            return java.util.List.of();
+        }
     }
 
 }

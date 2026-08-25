@@ -82,7 +82,10 @@ public class RmsRecordSerializer implements RecordSerializer {
             LongWritable key = new LongWritable(metadata.getFileByteOffset());
             Text value = new Text(payload);
 
-            return new SerializedRecord(key, value);
+            // Carried alongside the record, never inside it: the file stays
+            // byte-comparable with the legacy MDB's output while the sidecar
+            // index gains what reconciliation needs to identify a record.
+            return new SerializedRecord(key, value, extractPayloadGuid(payload));
 
         } catch (JMSException e) {
             throw new SerializationException("Failed to read message: " + e.getMessage(), e);
