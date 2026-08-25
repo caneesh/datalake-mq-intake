@@ -9,6 +9,7 @@ import com.hcsc.datalake.mqintake.core.failure.FailureClass;
 import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
 import com.hcsc.datalake.mqintake.core.loop.recovery.BackoffPolicy;
+import com.hcsc.datalake.mqintake.core.loop.session.ListenerSession;
 import com.hcsc.datalake.mqintake.core.loop.recovery.SessionFaultPolicy;
 import com.hcsc.datalake.mqintake.core.poison.PoisonMessageHandler;
 import com.hcsc.datalake.mqintake.core.tracker.TrackerMessageBuilder;
@@ -67,9 +68,8 @@ public class TransactedReceiveLoop implements Runnable {
     private final AtomicInteger reconnectAttempts = new AtomicInteger(0);
     private final AtomicLong reconnectCount = new AtomicLong(0);
 
-    private volatile Session session;
-    private volatile MessageConsumer consumer;
-    private volatile MessageProducer trackerProducer;
+    /** This thread's JMS resources; see ListenerSession for the invariant. */
+    private final ListenerSession listenerSession;
     private volatile Thread loopThread;
 
     /**
@@ -109,6 +109,7 @@ public class TransactedReceiveLoop implements Runnable {
         this.metrics = metrics;
         this.instanceId = instanceId;
         this.receiveTimeoutMs = receiveTimeoutMs;
+        this.listenerSession = new ListenerSession(connection, config);
         this.faultPolicy = SessionFaultPolicy.defaultPolicy();
         this.backoffPolicy = BackoffPolicy.exponentialWithJitter();
 
@@ -128,7 +129,7 @@ public class TransactedReceiveLoop implements Runnable {
                 config.getId(), threadName);
 
         try {
-            initializeSession();
+            listenerSession.open();
             running.set(true);
             runLoop();
         } catch (JMSException e) {
@@ -139,23 +140,6 @@ public class TransactedReceiveLoop implements Runnable {
             log.info("Receive loop stopped for binding '{}'. Commits: {}, Rollbacks: {}, Messages: {}",
                     config.getId(), commitCount.get(), rollbackCount.get(), messageCount.get());
         }
-    }
-
-    private void initializeSession() throws JMSException {
-        session = connection.createSession(true, Session.SESSION_TRANSACTED);
-
-        Queue sourceQueue = session.createQueue(config.getSourceQueue());
-        consumer = session.createConsumer(sourceQueue);
-
-        if (config.getMode() == BindingMode.TRACKED) {
-            Queue trackerQueue = session.createQueue(config.getTrackerQueue());
-            trackerProducer = session.createProducer(trackerQueue);
-            log.debug("Created tracker producer for binding '{}' on queue '{}'",
-                    config.getId(), config.getTrackerQueue());
-        }
-
-        log.info("Initialized session for binding '{}': source='{}', mode={}",
-                config.getId(), config.getSourceQueue(), config.getMode());
     }
 
     private void runLoop() {
@@ -170,7 +154,7 @@ public class TransactedReceiveLoop implements Runnable {
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 int effectiveBatchSize = getEffectiveBatchSize();
-                Message message = consumer.receive(receiveTimeoutMs);
+                Message message = listenerSession.consumer().receive(receiveTimeoutMs);
 
                 if (message != null) {
                     batch.add(message);
@@ -269,7 +253,7 @@ public class TransactedReceiveLoop implements Runnable {
             if (poisonMessageHandler != null) {
                 PoisonMessageHandler.BatchPoisonCheckResult poisonResult;
                 try {
-                    poisonResult = poisonMessageHandler.checkAndRoutePoisonMessages(session, batch);
+                    poisonResult = poisonMessageHandler.checkAndRoutePoisonMessages(listenerSession.session(), batch);
                 } catch (PoisonMessageHandler.BackoutFailureException e) {
                     // CRITICAL: BOQ routing failed - we MUST rollback to avoid losing messages
                     log.error("Backout queue routing failed for binding '{}', rolling back: {}",
@@ -289,7 +273,7 @@ public class TransactedReceiveLoop implements Runnable {
 
                 cleanMessages = poisonResult.getCleanMessages();
                 if (cleanMessages.isEmpty()) {
-                    session.commit();
+                    listenerSession.session().commit();
                     committed = true;
                     commitCount.incrementAndGet();
                     if (degradedModeManager != null) {
@@ -314,7 +298,7 @@ public class TransactedReceiveLoop implements Runnable {
                 sendTrackerMessages(cleanMessages);
             }
 
-            session.commit();
+            listenerSession.session().commit();
             committed = true;
             commitCount.incrementAndGet();
             messageCount.addAndGet(cleanMessages.size());
@@ -472,9 +456,9 @@ public class TransactedReceiveLoop implements Runnable {
     private void sendTrackerMessages(List<Message> batch) throws JMSException {
         for (Message sourceMessage : batch) {
             try {
-                Optional<Message> trackerMessage = trackerMessageBuilder.build(session, sourceMessage);
+                Optional<Message> trackerMessage = trackerMessageBuilder.build(listenerSession.session(), sourceMessage);
                 if (trackerMessage.isPresent()) {
-                    trackerProducer.send(trackerMessage.get());
+                    listenerSession.trackerProducer().send(trackerMessage.get());
                 }
             } catch (JMSException | RuntimeException e) {
                 if (config.isFailBatchOnTrackerError()) {
@@ -492,8 +476,8 @@ public class TransactedReceiveLoop implements Runnable {
 
     private void rollbackQuietly() {
         try {
-            if (session != null) {
-                session.rollback();
+            if (listenerSession.isOpen()) {
+                listenerSession.session().rollback();
                 rollbackCount.incrementAndGet();
             }
         } catch (JMSException e) {
@@ -512,41 +496,12 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     public Session getSession() {
-        return session;
+        return listenerSession.session();
     }
 
     private void cleanup() {
         running.set(false);
-        closeSessionResources();
-    }
-
-    private void closeSessionResources() {
-        try {
-            if (trackerProducer != null) {
-                trackerProducer.close();
-            }
-        } catch (JMSException e) {
-            log.debug("Error closing tracker producer: {}", e.getMessage());
-        }
-        trackerProducer = null;
-
-        try {
-            if (consumer != null) {
-                consumer.close();
-            }
-        } catch (JMSException e) {
-            log.debug("Error closing consumer: {}", e.getMessage());
-        }
-        consumer = null;
-
-        try {
-            if (session != null) {
-                session.close();
-            }
-        } catch (JMSException e) {
-            log.debug("Error closing session: {}", e.getMessage());
-        }
-        session = null;
+        listenerSession.close();
     }
 
     /**
@@ -581,7 +536,7 @@ public class TransactedReceiveLoop implements Runnable {
         }
 
         // Close existing resources
-        closeSessionResources();
+        listenerSession.close();
 
         // Calculate backoff with jitter
         long backoffMs = backoffPolicy.backoffFor(attempts).toMillis();
@@ -604,7 +559,7 @@ public class TransactedReceiveLoop implements Runnable {
         }
 
         try {
-            initializeSession();
+            listenerSession.open();
             reconnectAttempts.set(0); // Reset on success
             reconnectCount.incrementAndGet();
             log.info("Session recovered successfully for binding '{}' after {} attempt(s)",

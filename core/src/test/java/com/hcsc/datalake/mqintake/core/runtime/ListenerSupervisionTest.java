@@ -15,6 +15,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 /**
  * Supervision of receive-loop tasks.
@@ -239,7 +240,8 @@ class ListenerSupervisionTest {
             List<TransactedReceiveLoop> loops = new java.util.ArrayList<>();
             for (int i = 0; i < count; i++) {
                 loops.add(new TransactedReceiveLoop(
-                        config, null, null, null, null, null, null, null, null, "test", 100));
+                        config, mock(javax.jms.Connection.class), null, null, null, null,
+                        null, null, null, "test", 100));
             }
             return loops;
         }

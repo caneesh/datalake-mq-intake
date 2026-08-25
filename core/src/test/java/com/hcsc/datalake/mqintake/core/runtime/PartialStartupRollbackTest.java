@@ -264,7 +264,8 @@ class PartialStartupRollbackTest {
         latches.add(latch);
 
         List<TransactedReceiveLoop> loops = List.of(new TransactedReceiveLoop(
-                binding, null, null, null, null, null, null, null, null, "test", 100));
+                binding, mock(javax.jms.Connection.class), null, null, null, null,
+                null, null, null, "test", 100));
 
         return new BindingRuntime(binding, loops, executor, false, null) {
             @Override
