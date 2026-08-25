@@ -666,4 +666,43 @@ class TransactedReceiveLoopTest {
         assertThat(metrics.getReconnectSuccessCount()).isEqualTo(0);
         assertThat(metrics.getReconnectFailureCount()).isEqualTo(0);
     }
+
+    @Test
+    void postCommitBookkeepingFailureDoesNotRollBackOrMarkSuspect() throws Exception {
+        BindingConfig config = createLandOnlyConfig(3);
+        sendMessages(3);
+
+        // clearSuspects() runs AFTER session.commit(). It used to sit inside
+        // the try whose catch rolls back and marks the batch suspect, so a
+        // throw here reported a rollback that could not happen (the commit
+        // already succeeded) and marked message IDs that were already off the
+        // queue. Those IDs can never be redelivered, so clearSuspects() could
+        // never retire them and the binding would refuse to leave degraded
+        // mode for the life of the process.
+        DegradedModeManager degradedModeManager = new DegradedModeManager(
+                "test", 3, DegradationStrategy.BATCH_OF_ONE, 5) {
+            @Override
+            public void clearSuspects(java.util.Collection<String> messageIds) {
+                throw new java.lang.IllegalStateException("bookkeeping failed after commit");
+            }
+        };
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, degradedModeManager, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForQueueEmpty(SOURCE_QUEUE, 3000);
+        loop.stop();
+        future.get(2, TimeUnit.SECONDS);
+
+        // The unit of work stands: committed, drained, nothing rolled back
+        assertThat(loop.getCommitCount()).isEqualTo(1);
+        assertThat(loop.getRollbackCount()).isZero();
+        assertThat(countMessagesOnQueue(SOURCE_QUEUE)).isZero();
+
+        // And the binding is not wedged
+        assertThat(degradedModeManager.isInDegradedMode()).isFalse();
+        assertThat(degradedModeManager.getSuspectCount()).isZero();
+    }
+
 }

@@ -453,4 +453,34 @@ class FlushTriggerTest {
             currentTime.set(millis);
         }
     }
+
+    @Test
+    void byteTriggerCountsUtf8BytesNotUtf16CodeUnits() throws Exception {
+        // batch_bytes bounds what actually gets written, which is UTF-8.
+        // String.length() counts UTF-16 code units and undercounts by up to
+        // 3x on non-ASCII, letting batches grow well past the ceiling.
+        FlushTrigger trigger = new FlushTrigger(1000, 1000, 0);
+
+        javax.jms.TextMessage message = org.mockito.Mockito.mock(javax.jms.TextMessage.class);
+        org.mockito.Mockito.when(message.getText()).thenReturn("\u20ac\u20ac\u20ac\u20ac");
+
+        trigger.trackMessage(message);
+
+        // 4 characters, 3 UTF-8 bytes each
+        assertThat(trigger.getAccumulatedBytes()).isEqualTo(12);
+    }
+
+    @Test
+    void utf8ByteCountHandlesSurrogatePairs() throws Exception {
+        FlushTrigger trigger = new FlushTrigger(1000, 1000, 0);
+
+        javax.jms.TextMessage message = org.mockito.Mockito.mock(javax.jms.TextMessage.class);
+        // One emoji: 2 UTF-16 code units, 4 UTF-8 bytes
+        org.mockito.Mockito.when(message.getText()).thenReturn("\ud83d\ude00");
+
+        trigger.trackMessage(message);
+
+        assertThat(trigger.getAccumulatedBytes()).isEqualTo(4);
+    }
+
 }

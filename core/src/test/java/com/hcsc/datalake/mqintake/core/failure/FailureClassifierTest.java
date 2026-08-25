@@ -305,4 +305,29 @@ class FailureClassifierTest {
         assertThat(FailureClass.SHUTDOWN.getAlertLevel())
                 .isEqualTo(FailureClass.AlertLevel.INFO);
     }
+
+    @Test
+    void serializationFailureMentioningShutdownIsStillADataFailure() {
+        // isShutdownException() falls back to a free-text search for
+        // "shutdown"/"interrupted" in the message, and used to run first. A
+        // claim payload with a field like shutdownReason therefore classified
+        // as SHUTDOWN, which never enters degraded mode -- so the poison
+        // message was never isolated and kept rolling back every clean
+        // message batched with it until BOTHRESH alone caught it.
+        var exception = new RecordSerializer.SerializationException(
+                "cannot parse element <shutdownReason> in claim payload");
+
+        FailureClass result = classifier.classify(exception);
+
+        assertThat(result).isEqualTo(FailureClass.MESSAGE_DATA);
+    }
+
+    @Test
+    void genuineInterruptionIsStillClassifiedAsShutdown() {
+        assertThat(classifier.classify(new InterruptedException()))
+                .isEqualTo(FailureClass.SHUTDOWN);
+        assertThat(classifier.classify(new ClosedByInterruptException()))
+                .isEqualTo(FailureClass.SHUTDOWN);
+    }
+
 }

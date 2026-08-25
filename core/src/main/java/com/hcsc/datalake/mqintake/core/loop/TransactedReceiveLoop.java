@@ -212,6 +212,13 @@ public class TransactedReceiveLoop implements Runnable {
             }
         }
 
+        // stop() interrupts this thread to break the blocking receive(). The
+        // drain below has to commit, and the IBM MQ client can fail in-flight
+        // calls when the calling thread is still marked interrupted — which
+        // would roll the final batch back on every clean shutdown instead of
+        // landing it. Clear the flag before attempting the commit.
+        Thread.interrupted();
+
         if (!batch.isEmpty()) {
             log.info("Draining {} messages on shutdown for binding '{}'",
                     batch.size(), config.getId());
@@ -244,6 +251,7 @@ public class TransactedReceiveLoop implements Runnable {
                 degradedModeManager != null ? collectMessageIds(batch) : List.of();
 
         List<Message> cleanMessages = batch;
+        boolean committed = false;
         try {
             if (poisonMessageHandler != null) {
                 PoisonMessageHandler.BatchPoisonCheckResult poisonResult;
@@ -269,6 +277,7 @@ public class TransactedReceiveLoop implements Runnable {
                 cleanMessages = poisonResult.getCleanMessages();
                 if (cleanMessages.isEmpty()) {
                     session.commit();
+                    committed = true;
                     commitCount.incrementAndGet();
                     if (degradedModeManager != null) {
                         degradedModeManager.clearSuspects(batchMessageIds);
@@ -285,6 +294,7 @@ public class TransactedReceiveLoop implements Runnable {
             }
 
             session.commit();
+            committed = true;
             commitCount.incrementAndGet();
             messageCount.addAndGet(cleanMessages.size());
 
@@ -307,6 +317,18 @@ public class TransactedReceiveLoop implements Runnable {
                     cleanMessages.size(), config.getId());
 
         } catch (Exception e) {
+            if (committed) {
+                // The unit of work is already durable and acknowledged. Failing
+                // here must not roll back (there is nothing left to undo) and
+                // must not mark the batch suspect: those IDs are off the queue,
+                // so they can never be redelivered, clearSuspects() could never
+                // retire them, and DegradedModeManager would refuse to restore
+                // normal batch size for the life of the process.
+                log.error("Post-commit bookkeeping failed for binding '{}' after committing "
+                                + "{} messages — delivery is unaffected: {}",
+                        config.getId(), cleanMessages.size(), e.getMessage(), e);
+                return;
+            }
             log.error("Batch processing failed for binding '{}', rolling back {} messages: {}",
                     config.getId(), batchSize, e.getMessage(), e);
             handleFailure(e, batchMessageIds);
@@ -325,15 +347,14 @@ public class TransactedReceiveLoop implements Runnable {
     private void handleFailure(Throwable e, List<String> failedBatchMessageIds) {
         if (degradedModeManager != null) {
             boolean wasDegraded = degradedModeManager.isInDegradedMode();
-            FailureClass failureClass = degradedModeManager.recordFailure(e);
-            log.debug("Failure classified as {} for binding '{}'", failureClass, config.getId());
 
             // Data failures mark the failed batch's message IDs as suspects so
             // the bisection coordinator can track them across redelivery to
-            // any listener thread (§6.1)
-            if (failureClass.triggersDegradedMode() && failedBatchMessageIds != null) {
-                degradedModeManager.markBatchSuspect(failedBatchMessageIds);
-            }
+            // any listener thread (§6.1). Marking is done inside recordFailure
+            // so it cannot be separated from the degraded-mode transition.
+            FailureClass failureClass =
+                    degradedModeManager.recordFailure(e, failedBatchMessageIds);
+            log.debug("Failure classified as {} for binding '{}'", failureClass, config.getId());
 
             // Update health if we just entered degraded mode
             if (!wasDegraded && degradedModeManager.isInDegradedMode() && healthManager != null) {

@@ -64,14 +64,20 @@ public class FailureClassifier {
      * Classifies a single exception without checking cause chain.
      */
     private FailureClass classifyDirect(Throwable t) {
+        // Message / data failures are classified by TYPE, so they must be
+        // checked before the shutdown heuristic below, which falls back to a
+        // free-text search for "interrupted"/"shutdown" in the message. A
+        // SerializationException naming a payload field like shutdownReason
+        // would otherwise classify as SHUTDOWN, which never enters degraded
+        // mode — the poison message would never be isolated and would keep
+        // rolling back every clean message batched with it.
+        if (isMessageDataException(t)) {
+            return FailureClass.MESSAGE_DATA;
+        }
+
         // Shutdown / cancellation
         if (isShutdownException(t)) {
             return FailureClass.SHUTDOWN;
-        }
-
-        // Message / data failures
-        if (isMessageDataException(t)) {
-            return FailureClass.MESSAGE_DATA;
         }
 
         // Security / configuration

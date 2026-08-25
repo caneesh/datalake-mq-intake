@@ -218,8 +218,7 @@ public class FlushTrigger {
             if (message instanceof javax.jms.TextMessage) {
                 String text = ((javax.jms.TextMessage) message).getText();
                 if (text != null) {
-                    // UTF-16 internal representation, but typically serialized as UTF-8
-                    return text.length();
+                    return utf8Length(text);
                 }
                 return 0;
             } else if (message instanceof javax.jms.BytesMessage) {
@@ -231,5 +230,32 @@ public class FlushTrigger {
         } catch (JMSException e) {
             return 1024; // Default on error
         }
+    }
+
+    /**
+     * Exact UTF-8 encoded length, which is what actually gets written and so
+     * what batch_bytes must bound. String.length() counts UTF-16 code units and
+     * undercounts by up to 3x on non-ASCII payloads, letting batches grow past
+     * the configured ceiling. Computed arithmetically rather than via
+     * getBytes(), which would copy every payload on the hot path — claims runs
+     * batches of 8000.
+     */
+    private static long utf8Length(String s) {
+        long bytes = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 0x80) {
+                bytes += 1;
+            } else if (c < 0x800) {
+                bytes += 2;
+            } else if (Character.isHighSurrogate(c) && i + 1 < s.length()
+                    && Character.isLowSurrogate(s.charAt(i + 1))) {
+                bytes += 4;
+                i++;
+            } else {
+                bytes += 3;
+            }
+        }
+        return bytes;
     }
 }

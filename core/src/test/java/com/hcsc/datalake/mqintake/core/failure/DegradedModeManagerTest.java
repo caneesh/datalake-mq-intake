@@ -256,4 +256,55 @@ class DegradedModeManagerTest {
         manager.recordFailure(new RecordSerializer.SerializationException("Error 3"));
         assertThat(manager.getDegradationLevel()).isEqualTo(2); // Deepened again
     }
+
+    @Test
+    void suspectsAreRegisteredBeforeDegradedModeBecomesVisible() {
+        // recordFailure() and markBatchSuspect() used to be two calls from the
+        // loop. Between them another listener thread committing a clean batch
+        // could see "degraded, enough successes, no suspects outstanding" and
+        // restore the full batch size while the poison was still in flight.
+        DegradedModeManager manager = new DegradedModeManager(
+                "claims", 16, DegradationStrategy.BISECT, 1);
+
+        manager.recordFailure(new RecordSerializer.SerializationException("bad"),
+                java.util.List.of("ID:1", "ID:2"));
+
+        assertThat(manager.isInDegradedMode()).isTrue();
+        assertThat(manager.getSuspectCount()).isEqualTo(2);
+
+        // A success must not restore while those suspects are outstanding
+        manager.recordSuccess();
+        assertThat(manager.isInDegradedMode()).isTrue();
+        assertThat(manager.getCurrentBatchSize()).isEqualTo(8);
+
+        manager.clearSuspects(java.util.List.of("ID:1", "ID:2"));
+        manager.recordSuccess();
+        assertThat(manager.isInDegradedMode()).isFalse();
+        assertThat(manager.getCurrentBatchSize()).isEqualTo(16);
+    }
+
+    @Test
+    void infrastructureBlipDoesNotDiscardProgressTowardRestore() {
+        // While isolating a poison message, an unrelated HDFS wobble used to
+        // reset consecutiveSuccesses, so routine flakiness could pin the
+        // binding in reduced-throughput mode indefinitely.
+        DegradedModeManager manager = new DegradedModeManager(
+                "rms", 100, DegradationStrategy.BATCH_OF_ONE, 3);
+
+        manager.recordFailure(new RecordSerializer.SerializationException("bad"));
+        assertThat(manager.isInDegradedMode()).isTrue();
+
+        manager.recordSuccess();
+        manager.recordSuccess();
+
+        // Infrastructure failure: does not trigger degraded mode, and must not
+        // wipe the two successes already banked
+        manager.recordFailure(new IOException("HDFS wobble"));
+
+        manager.recordSuccess();
+
+        assertThat(manager.isInDegradedMode()).isFalse();
+        assertThat(manager.getCurrentBatchSize()).isEqualTo(100);
+    }
+
 }

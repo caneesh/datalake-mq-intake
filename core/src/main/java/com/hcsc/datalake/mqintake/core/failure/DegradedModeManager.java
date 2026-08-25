@@ -158,13 +158,42 @@ public class DegradedModeManager {
      * @return the classified failure
      */
     public FailureClass recordFailure(Throwable throwable) {
-        consecutiveSuccesses.set(0);
+        return recordFailure(throwable, null);
+    }
 
+    /**
+     * Records a failure and, when it is data-classified, marks the failed
+     * batch's message IDs suspect as part of the same state change.
+     *
+     * <p>The two must happen together. Marking suspects in a separate call
+     * after this one leaves a window in which another listener thread's
+     * {@link #recordSuccess()} sees degraded mode, enough consecutive
+     * successes, and an empty suspect set, and restores the normal batch size
+     * while this failure's messages are still in flight — putting the poison
+     * message straight back into a full-size batch.
+     *
+     * @param throwable         the failure
+     * @param batchMessageIds   IDs of the failed batch, or null if unknown
+     * @return the classified failure
+     */
+    public FailureClass recordFailure(Throwable throwable,
+                                      java.util.Collection<String> batchMessageIds) {
         FailureClass failureClass = classifier.classify(throwable);
 
         if (failureClass.triggersDegradedMode()) {
+            // Suspects first: once they are registered, no concurrent
+            // recordSuccess() can satisfy the "no suspects outstanding"
+            // half of the restore condition.
+            if (batchMessageIds != null) {
+                markBatchSuspect(batchMessageIds);
+            }
             enterOrDeepenDegradedMode();
         } else {
+            // Deliberately does NOT reset consecutiveSuccesses: an unrelated
+            // infrastructure blip while we are isolating a poison message
+            // should not discard progress toward restoring the normal batch
+            // size, or routine HDFS flakiness would pin the binding in
+            // reduced-throughput mode indefinitely.
             log.debug("Binding '{}': {} failure does not trigger degraded mode",
                     bindingId, failureClass);
         }
@@ -176,9 +205,23 @@ public class DegradedModeManager {
      * Enters degraded mode or deepens it (for BISECT strategy).
      */
     private void enterOrDeepenDegradedMode() {
-        int oldBatchSize = currentBatchSize.get();
-        int newBatchSize = strategy.degrade(oldBatchSize, normalBatchSize);
+        // CAS rather than get/compute/set: two threads failing concurrently —
+        // the normal case, since MQ redistributes a rolled-back batch across
+        // listener threads — would otherwise both read the same size, compute
+        // the same halved value, and both store it, losing one step of
+        // bisection while degradationLevel still counted two.
+        int oldBatchSize;
+        int newBatchSize;
+        do {
+            oldBatchSize = currentBatchSize.get();
+            newBatchSize = strategy.degrade(oldBatchSize, normalBatchSize);
+        } while (!currentBatchSize.compareAndSet(oldBatchSize, newBatchSize));
 
+        consecutiveSuccesses.set(0);
+
+        // Publish the smaller batch size before announcing degraded mode, so a
+        // concurrent getCurrentBatchSize() can never observe "degraded" while
+        // still returning the old, larger size.
         if (!inDegradedMode.getAndSet(true)) {
             log.warn("Binding '{}': ENTERING degraded mode. Strategy={}, batch size {} -> {}",
                     bindingId, strategy, normalBatchSize, newBatchSize);
@@ -187,9 +230,6 @@ public class DegradedModeManager {
             log.warn("Binding '{}': DEEPENING degraded mode. Level={}, batch size {} -> {}",
                     bindingId, degradationLevel.get(), oldBatchSize, newBatchSize);
         }
-
-        currentBatchSize.set(newBatchSize);
-        consecutiveSuccesses.set(0);
     }
 
     /**

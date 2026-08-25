@@ -129,6 +129,11 @@ public class SequenceFileBatchWriter implements BatchWriter {
                 messages.size(), tempPath, finalPath);
 
         long byteCount = 0;
+        // Cleared only once the file is renamed into its partition. Every exit
+        // that leaves the temp file behind — including rename() returning false
+        // and any RuntimeException out of a binding's serializer, neither of
+        // which the catch clauses below see — must delete it in the finally.
+        boolean landed = false;
         try {
             fileSystem.mkdirs(tempPath.getParent());
 
@@ -142,17 +147,21 @@ public class SequenceFileBatchWriter implements BatchWriter {
                         "Failed to rename temp file to partition: " + tempPath + " -> " + finalPath);
             }
 
+            landed = true;
+
             log.debug("Batch written successfully: {} records, {} bytes to {}",
                     messages.size(), byteCount, finalPath);
 
             return new BatchWriteResult(finalPath.toString(), messages.size(), byteCount);
 
         } catch (IOException e) {
-            deleteQuietly(tempPath);
             throw new BatchWriteException("Failed to write batch to HDFS: " + e.getMessage(), e);
         } catch (RecordSerializer.SerializationException e) {
-            deleteQuietly(tempPath);
             throw new BatchWriteException("Failed to serialize message: " + e.getMessage(), e);
+        } finally {
+            if (!landed) {
+                deleteQuietly(tempPath);
+            }
         }
     }
 
