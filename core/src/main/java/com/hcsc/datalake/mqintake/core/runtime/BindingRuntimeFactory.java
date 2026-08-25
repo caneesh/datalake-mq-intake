@@ -13,6 +13,7 @@ import com.hcsc.datalake.mqintake.core.metrics.BackoutQueueDepthMonitor;
 import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
 import com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry;
 import com.hcsc.datalake.mqintake.core.mq.MqConnectionManager;
+import com.hcsc.datalake.mqintake.core.mq.MqConnectionProvider;
 import com.hcsc.datalake.mqintake.core.orchestration.RecordSerializerFactory;
 import com.hcsc.datalake.mqintake.core.orchestration.TrackerMessageBuilderFactory;
 import com.hcsc.datalake.mqintake.core.poison.PoisonMessageHandler;
@@ -55,7 +56,7 @@ public class BindingRuntimeFactory {
 
     private final FileSystem fileSystem;
     private final Configuration hadoopConf;
-    private final MqConnectionManager mqConnectionManager;
+    private final MqConnectionProvider mqConnectionManager;
     private final RecordSerializerFactory serializerFactory;
     private final TrackerMessageBuilderFactory trackerBuilderFactory;
     private final MetricsRegistry metricsRegistry;
@@ -65,7 +66,7 @@ public class BindingRuntimeFactory {
 
     public BindingRuntimeFactory(FileSystem fileSystem,
                                   Configuration hadoopConf,
-                                  MqConnectionManager mqConnectionManager,
+                                  MqConnectionProvider mqConnectionManager,
                                   RecordSerializerFactory serializerFactory,
                                   TrackerMessageBuilderFactory trackerBuilderFactory,
                                   MetricsRegistry metricsRegistry,

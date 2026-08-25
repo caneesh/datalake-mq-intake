@@ -9,6 +9,7 @@ import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.lifecycle.StartupValidator;
 import com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry;
 import com.hcsc.datalake.mqintake.core.mq.MqConnectionManager;
+import com.hcsc.datalake.mqintake.core.mq.MqConnectionProvider;
 import com.hcsc.datalake.mqintake.core.orchestration.RecordSerializerFactory;
 import com.hcsc.datalake.mqintake.core.orchestration.TrackerMessageBuilderFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -56,7 +57,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
     private final IntakeProperties properties;
     private final FileSystem fileSystem;
     private final Configuration hadoopConf;
-    private final MqConnectionManager mqConnectionManager;
+    private final MqConnectionProvider mqConnectionManager;
     private final RecordSerializerFactory serializerFactory;
     private final TrackerMessageBuilderFactory trackerBuilderFactory;
     private final BindingConfigValidator bindingConfigValidator;
@@ -74,7 +75,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
     public IntakeRuntimeManager(IntakeProperties properties,
                                  FileSystem fileSystem,
                                  Configuration hadoopConf,
-                                 MqConnectionManager mqConnectionManager,
+                                 MqConnectionProvider mqConnectionManager,
                                  RecordSerializerFactory serializerFactory,
                                  BindingConfigValidator bindingConfigValidator,
                                  BindingHealthManager healthManager,

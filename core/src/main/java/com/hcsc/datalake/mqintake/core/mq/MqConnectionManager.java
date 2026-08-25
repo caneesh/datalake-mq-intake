@@ -2,7 +2,6 @@ package com.hcsc.datalake.mqintake.core.mq;
 
 import com.hcsc.datalake.mqintake.core.config.MqConnectionConfig;
 import com.ibm.mq.jms.MQConnectionFactory;
-import com.ibm.msg.client.wmq.WMQConstants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -28,7 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>Connection is shared across threads (JMS Connection is thread-safe).
  * Sessions must be created per-thread.
  */
-public class MqConnectionManager {
+public class MqConnectionManager implements MqConnectionProvider {
 
     private static final Logger log = LoggerFactory.getLogger(MqConnectionManager.class);
 
@@ -50,6 +49,7 @@ public class MqConnectionManager {
      * @return the JMS connection
      * @throws MqConnectionException if connection cannot be established
      */
+    @Override
     public Connection getConnection(String connectionId) throws MqConnectionException {
         if (closed.get()) {
             throw new MqConnectionException("Connection manager is closed");
@@ -65,6 +65,7 @@ public class MqConnectionManager {
      * @param connectionId the connection identifier
      * @return configuration if found
      */
+    @Override
     public Optional<MqConnectionConfig> getConfig(String connectionId) {
         return Optional.ofNullable(connectionConfigs.get(connectionId));
     }
@@ -72,6 +73,7 @@ public class MqConnectionManager {
     /**
      * Checks if a connection configuration exists.
      */
+    @Override
     public boolean hasConnection(String connectionId) {
         return connectionConfigs.containsKey(connectionId);
     }
@@ -174,8 +176,8 @@ public class MqConnectionManager {
             mqFactory.setQueueManager(config.getQueueManager());
             mqFactory.setChannel(config.getChannel());
 
-            int transportType = parseTransportType(config.getTransportType());
-            mqFactory.setTransportType(transportType);
+            mqFactory.setTransportType(
+                    MqTransportType.fromConfig(config.getTransportType()).wmqConstant());
 
             log.debug("Built MQConnectionFactory for {}: host={}, port={}, queueManager={}, channel={}",
                     config.getId(), config.getHost(), config.getPort(),
@@ -211,18 +213,6 @@ public class MqConnectionManager {
             log.debug("Creating authenticated connection for {} as user {}",
                     config.getId(), c.getUsername());
             return factory.createConnection(c.getUsername(), c.getPassword());
-        }
-
-        private int parseTransportType(String transportType) {
-            if (transportType == null || transportType.isBlank() ||
-                    transportType.equalsIgnoreCase("CLIENT")) {
-                return WMQConstants.WMQ_CM_CLIENT;
-            } else if (transportType.equalsIgnoreCase("BINDINGS")) {
-                return WMQConstants.WMQ_CM_BINDINGS;
-            } else {
-                log.warn("Unknown transport type '{}', defaulting to CLIENT", transportType);
-                return WMQConstants.WMQ_CM_CLIENT;
-            }
         }
 
         private boolean isConfigurationError(JMSException e) {
