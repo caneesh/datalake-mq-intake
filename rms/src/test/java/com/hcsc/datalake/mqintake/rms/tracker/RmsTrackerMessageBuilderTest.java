@@ -246,21 +246,6 @@ class RmsTrackerMessageBuilderTest {
 
     // --- Property preservation ---
 
-    @Test
-    void copiesCorrelationId() throws Exception {
-        RmsTrackerMessageBuilder builder = new RmsTrackerMessageBuilder(
-                RmsTrackerMessageBuilder.TrackerFields.defaultRms());
-
-        TextMessage sourceMessage = session.createTextMessage("<Test>payload</Test>");
-        sourceMessage.setJMSCorrelationID("correlation-12345");
-        sourceMessage.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS,
-                "<MessageHeaderDetailsType></MessageHeaderDetailsType>");
-
-        Optional<Message> result = builder.build(session, sourceMessage);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().getJMSCorrelationID()).isEqualTo("correlation-12345");
-    }
 
     // --- Edge cases ---
 
@@ -403,5 +388,33 @@ class RmsTrackerMessageBuilderTest {
 
         assertThatThrownBy(() -> rewrite(header))
                 .isInstanceOf(java.util.regex.PatternSyntaxException.class);
+    }
+
+    @Test
+    void trackerMessageCarriesOnlyBodyAndHeaderLikeTheLegacy() throws Exception {
+        // EJBHelper builds `session.createTextMessage(textMessage.getText())`
+        // and sets only MessageHeaderDetails. Every other source property is
+        // dropped — including JMSCorrelationID, which an earlier version of
+        // this builder copied. Anything extra is a property the tracker
+        // consumer has never received.
+        RmsTrackerMessageBuilder builder = new RmsTrackerMessageBuilder(
+                RmsTrackerMessageBuilder.TrackerFields.defaultRms());
+
+        TextMessage source = session.createTextMessage("<Test>payload</Test>");
+        source.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS,
+                "<MessageHeaderDetailsType/></MessageHeaderDetailsType>");
+        source.setJMSCorrelationID("CORR-123");
+        source.setStringProperty("SomeOtherProperty", "should-not-propagate");
+
+        TextMessage tracker = (TextMessage) builder.build(session, source).get();
+
+        assertThat(tracker.getJMSCorrelationID())
+                .as("legacy does not copy JMSCorrelationID")
+                .isNull();
+        assertThat(tracker.propertyExists("SomeOtherProperty")).isFalse();
+
+        // Body is a verbatim copy, and the header property is present
+        assertThat(tracker.getText()).isEqualTo("<Test>payload</Test>");
+        assertThat(tracker.propertyExists(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS)).isTrue();
     }
 }

@@ -122,13 +122,17 @@ public class RmsTrackerMessageBuilder implements TrackerMessageBuilder {
         // Build the tracker message body based on mode
         String body = buildBody(sourceMessage);
 
-        // Create the tracker message
+        // The legacy builds a fresh message carrying ONLY the body and the
+        // rewritten header — every other source property is dropped. Matching
+        // that exactly: anything extra we set is a property the tracker
+        // consumer has never received before.
         TextMessage trackerMessage = session.createTextMessage(body);
 
-        // Set the rewritten header property
-        trackerMessage.setStringProperty(MESSAGE_HEADER_DETAILS, rewrittenHeader);
+        // Legacy sets the property only when the rewrite returned non-null
+        if (rewrittenHeader != null) {
+            trackerMessage.setStringProperty(MESSAGE_HEADER_DETAILS, rewrittenHeader);
+        }
 
-        // Copy other relevant properties if needed
         copyMessageProperties(sourceMessage, trackerMessage);
 
         return Optional.of(trackerMessage);
@@ -175,11 +179,11 @@ public class RmsTrackerMessageBuilder implements TrackerMessageBuilder {
      * Override to customize property copying.
      */
     protected void copyMessageProperties(Message source, Message target) throws JMSException {
-        // Copy JMSCorrelationID if present
-        String correlationId = source.getJMSCorrelationID();
-        if (correlationId != null) {
-            target.setJMSCorrelationID(correlationId);
-        }
+        // Intentionally empty. The legacy EJBHelper copies NOTHING beyond the
+        // body and MessageHeaderDetails, so neither do we. An earlier version
+        // copied JMSCorrelationID, which would have put a property on the
+        // tracker queue that its consumers have never seen. Kept as an
+        // extension point for a future binding with a different contract.
     }
 
     public TrackerBodyMode getBodyMode() {
