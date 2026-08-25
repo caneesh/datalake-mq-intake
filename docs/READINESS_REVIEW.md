@@ -298,6 +298,22 @@ higher-risk to change than to leave two days before cutover.
 Item 5 needs a sign-off decision from the MQ team rather than a code change.
 Items 1 and 3 are the two most likely to matter in week one.
 
+**7. The queue-depth gauges are never populated.** `BindingMetrics` exposes
+`sourceQueueDepth`, `trackerQueueDepth`, and `backoutQueueDepth`, and DESIGN
+§14 specifies "backout queue depth (non-zero = page)" as an alert. Nothing in
+production code ever calls the setters, and nothing reads the getters — they
+are written only by their own unit tests. They ship as permanent zeros inside
+`MetricsSnapshot`.
+
+This is not a delivery defect, but it means the one alert the design nominates
+as a pager — a message reaching the backout queue — **cannot fire**. Poison
+routing is still visible: `poisonMessagesRouted` is incremented on the real
+path, and health goes DEGRADED. Before cutover either wire the depths (an MQ
+admin query per binding on a timer) or point the alert at
+`poisonMessagesRouted` and the binding health status instead, so the gap is
+covered by something that actually moves. Whichever is chosen, the always-zero
+gauges should not stay in the snapshot implying they are live.
+
 ## E. ENVIRONMENT/PLATFORM DEPENDENCIES
 - IBM MQ: BOTHRESH/BOQNAME configured per queue to match app thresholds
   (claims BISECT requires BOTHRESH ≥ 14 for batch 8000); MAXUMSGS ≥ 2×batch.
