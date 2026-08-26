@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Test logging.
+
+  Hadoop's MiniDFSCluster is extraordinarily chatty at DEBUG: a single run of
+  RealHdfsIntegrationTest produced a 29 MB log, most of it individual RPC
+  accounting. That volume buries the assertions it is supposed to help explain,
+  so Hadoop and its transitive noise are pinned at WARN while the service's own
+  logging stays readable.
+-->
+<configuration>
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <logger name="org.apache.hadoop"  level="WARN"/>
+  <logger name="org.apache.zookeeper" level="WARN"/>
+  <logger name="BlockStateChange"   level="WARN"/>
+  <logger name="org.apache.activemq" level="WARN"/>
+  <logger name="io.netty"           level="WARN"/>
+
+  <!-- The service under test stays visible -->
+  <logger name="com.hcsc.datalake.mqintake" level="INFO"/>
+
+  <root level="INFO">
+    <appender-ref ref="STDOUT"/>
+  </root>
+</configuration>

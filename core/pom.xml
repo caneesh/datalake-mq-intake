@@ -132,5 +132,13 @@
             <artifactId>activemq-broker</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Real in-JVM HDFS for sandbox testing: NameNode, DataNodes, block
+             protocol, genuine rename and hflush semantics. Test scope only. -->
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-minicluster</artifactId>
+            <scope>test</scope>
+        </dependency>
+
     </dependencies>
 </project>
