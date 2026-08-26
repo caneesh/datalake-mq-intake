@@ -231,14 +231,22 @@ public class RmsTrackerMessageBuilder implements TrackerMessageBuilder {
      * <p>Handles both raw ({@code <tag>}) and XML-escaped ({@code &lt;tag&gt;})
      * tag variants per §20.3.
      *
-     * <p>TODO (§20.4): The following details are not yet captured and need
-     * to be added before this builder can be used in production:
+     * <p>§20.4 is complete. Everything the rewrite depends on was captured from
+     * the EJBHelper source and is pinned by a test, so a regression shows up as
+     * a failure rather than as a divergence noticed downstream:
      * <ul>
-     *   <li>Contents of tagList — the actual tag names rewritten</li>
-     *   <li>ROOT_END_TAG and ROOT_END_TAG_CHAR values</li>
-     *   <li>Bodies of getCompleteStartTag, getCompleteEndTag, setReplacedTagData</li>
-     *   <li>Sample MessageHeaderDetails value before and after rewriting</li>
+     *   <li>tagList contents and order — {@code tagListMatchesTheLegacyOrderAndContents}</li>
+     *   <li>ROOT_END_TAG, raw and escaped — {@code rootEndTagMatchesTheLegacyConstant}</li>
+     *   <li>start/end tag construction and the span replaced —
+     *       {@code tagsAreBuiltInBothRawAndEscapedForms},
+     *       {@code injectionLandsImmediatelyBeforeTheRootEndTag},
+     *       {@code anExistingTagIsRemovedBeforeItIsReAdded}</li>
+     *   <li>before/after value mapping — {@code allFiveTagsAreInjectedWithTheLegacyValueMapping}</li>
      * </ul>
+     *
+     * <p>What remains is not a code gap: DESIGN item #24 asks that the rewritten
+     * header be validated against the live tracker consumers at cutover. That is
+     * an operational sign-off on the other side of the queue.
      */
     static class HeaderRewriter {
 
