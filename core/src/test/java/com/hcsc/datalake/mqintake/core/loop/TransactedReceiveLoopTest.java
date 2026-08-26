@@ -536,33 +536,78 @@ class TransactedReceiveLoopTest {
     }
 
     @Test
-    void auditFailureDoesNotUndoCommittedTransaction() throws Exception {
+    void auditFailureRollsBackSoNoUnauditedDataIsCommitted() throws Exception {
+        // ABC posture, and the default. The audit record is a control: data
+        // committed without one is data no balance can account for — consumed
+        // and gone from the queue, landed on HDFS, and recorded nowhere.
+        // Rolling back keeps the messages on the queue, so nothing is lost.
         BindingConfig config = createLandOnlyConfig(3);
+        assertThat(config.isFailBatchOnAuditError())
+                .as("audit must fail closed by default").isTrue();
         sendMessages(3);
 
-        AuditRecordEmitter failingEmitter = new TestAuditRecordEmitter() {
-            @Override
-            public void emit(String bindingId, BatchWriter.BatchWriteResult writeResult, List<Message> messages) {
-                throw new RuntimeException("Audit system down");
-            }
-        };
-
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, failingEmitter, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, null, null, null, null,
+                alwaysFailingEmitter(), null, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
-        waitForCommits(loop, 1, 2000);
+        waitForRollbacks(loop, 1, 3000);
         loop.stop();
-        future.get(1, TimeUnit.SECONDS);
+        future.get(2, TimeUnit.SECONDS);
+
+        assertThat(loop.getCommitCount()).isZero();
+        assertThat(loop.getRollbackCount()).isGreaterThanOrEqualTo(1);
+        assertThat(countMessagesOnQueue(SOURCE_QUEUE))
+                .as("messages stay on the queue — a stall, not a loss")
+                .isEqualTo(3);
+    }
+
+    @Test
+    void auditFailureCanBeConfiguredToCommitAnyway() throws Exception {
+        // The opt-out, for a feed where an unaudited landing beats a stall.
+        BindingConfig config = createLandOnlyConfig(3);
+        config.setFailBatchOnAuditError(false);
+        sendMessages(3);
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, null, null,
+                alwaysFailingEmitter(), null, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForCommits(loop, 1, 3000);
+        loop.stop();
+        future.get(2, TimeUnit.SECONDS);
 
         assertThat(loop.getCommitCount()).isEqualTo(1);
         assertThat(loop.getMessageCount()).isEqualTo(3);
-        assertThat(countMessagesOnQueue(SOURCE_QUEUE)).isEqualTo(0);
+        assertThat(countMessagesOnQueue(SOURCE_QUEUE)).isZero();
+    }
+
+    private AuditRecordEmitter alwaysFailingEmitter() {
+        return new TestAuditRecordEmitter() {
+            @Override
+            public void emit(String bindingId, BatchWriter.BatchWriteResult writeResult,
+                             List<Message> messages) {
+                throw new RuntimeException("Audit system down");
+            }
+
+            @Override
+            public void emit(String bindingId, BatchWriter.BatchWriteResult writeResult,
+                             List<Message> messages, int backoutCount) {
+                throw new RuntimeException("Audit system down");
+            }
+        };
     }
 
     private static abstract class TestAuditRecordEmitter implements AuditRecordEmitter {
         @Override
         public void emit(com.hcsc.datalake.mqintake.core.audit.AuditRecord record) {
+            // No-op for tests
+        }
+
+        @Override
+        public void emitBackoutOnly(String bindingId, java.util.List<Message> messages,
+                                    int backoutCount) {
             // No-op for tests
         }
     }

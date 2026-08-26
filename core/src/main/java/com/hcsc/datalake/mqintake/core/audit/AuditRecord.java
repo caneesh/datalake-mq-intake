@@ -21,6 +21,17 @@ public final class AuditRecord {
     private final long byteCount;
     private final String firstIdentity;
     private final String lastIdentity;
+
+    /**
+     * Messages consumed in this unit of work that were routed to the backout
+     * queue instead of being landed.
+     *
+     * <p>Without it the balance equation does not close: a batch that consumed
+     * 10 and landed 9 looks like a loss of 1, when the tenth was deliberately
+     * set aside. ABC balance is
+     * {@code consumed == recordCount + backoutCount}.
+     */
+    private final int backoutCount;
     private final String instanceId;
     private final Instant commitTimestamp;
 
@@ -32,11 +43,25 @@ public final class AuditRecord {
         this.byteCount = builder.byteCount;
         this.firstIdentity = builder.firstIdentity;
         this.lastIdentity = builder.lastIdentity;
+        this.backoutCount = builder.backoutCount;
         this.instanceId = Objects.requireNonNull(builder.instanceId, "instanceId required");
         this.commitTimestamp = Objects.requireNonNull(builder.commitTimestamp, "commitTimestamp required");
 
-        if (recordCount <= 0) {
-            throw new IllegalArgumentException("recordCount must be positive");
+        if (recordCount < 0) {
+            throw new IllegalArgumentException("recordCount must be non-negative");
+        }
+        if (backoutCount < 0) {
+            throw new IllegalArgumentException("backoutCount must be non-negative");
+        }
+        // A record must account for something. recordCount alone used to have
+        // to be positive, which was right while every record described a
+        // landed file — but a unit of work whose messages were all poison
+        // lands nothing and still consumed messages, and it needs a record or
+        // those messages appear in no audit at all.
+        if (recordCount + backoutCount <= 0) {
+            throw new IllegalArgumentException(
+                    "An audit record must account for at least one message: recordCount "
+                            + recordCount + " + backoutCount " + backoutCount + " is zero");
         }
         if (byteCount < 0) {
             throw new IllegalArgumentException("byteCount must be non-negative");
@@ -86,6 +111,22 @@ public final class AuditRecord {
         return lastIdentity;
     }
 
+    /** Messages routed to the backout queue in this unit of work. */
+    public int getBackoutCount() {
+        return backoutCount;
+    }
+
+    /**
+     * Messages consumed from the queue in this unit of work.
+     *
+     * <p>The left-hand side of the balance equation: everything taken off the
+     * source queue was either landed or set aside, and this is the total the
+     * control compares against.
+     */
+    public int getConsumedCount() {
+        return recordCount + backoutCount;
+    }
+
     public String getInstanceId() {
         return instanceId;
     }
@@ -106,6 +147,7 @@ public final class AuditRecord {
                 filename.equals(that.filename) &&
                 Objects.equals(firstIdentity, that.firstIdentity) &&
                 Objects.equals(lastIdentity, that.lastIdentity) &&
+                backoutCount == that.backoutCount &&
                 instanceId.equals(that.instanceId) &&
                 commitTimestamp.equals(that.commitTimestamp);
     }
@@ -113,7 +155,8 @@ public final class AuditRecord {
     @Override
     public int hashCode() {
         return Objects.hash(bindingId, partitionPath, filename, recordCount,
-                byteCount, firstIdentity, lastIdentity, instanceId, commitTimestamp);
+                byteCount, firstIdentity, lastIdentity, instanceId, commitTimestamp,
+                backoutCount);
     }
 
     @Override
@@ -126,6 +169,7 @@ public final class AuditRecord {
                 ", byteCount=" + byteCount +
                 ", firstIdentity='" + firstIdentity + '\'' +
                 ", lastIdentity='" + lastIdentity + '\'' +
+                ", backoutCount=" + backoutCount +
                 ", instanceId='" + instanceId + '\'' +
                 ", commitTimestamp=" + commitTimestamp +
                 '}';
@@ -143,6 +187,7 @@ public final class AuditRecord {
         private long byteCount;
         private String firstIdentity;
         private String lastIdentity;
+        private int backoutCount;
         private String instanceId;
         private Instant commitTimestamp;
 
@@ -173,6 +218,11 @@ public final class AuditRecord {
 
         public Builder firstIdentity(String firstIdentity) {
             this.firstIdentity = firstIdentity;
+            return this;
+        }
+
+        public Builder backoutCount(int backoutCount) {
+            this.backoutCount = backoutCount;
             return this;
         }
 

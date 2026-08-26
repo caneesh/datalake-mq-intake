@@ -64,6 +64,25 @@ public class BindingConfig {
      */
     private boolean failBatchOnTrackerError = false;
 
+    /**
+     * Whether a batch must roll back when its audit record cannot be written.
+     *
+     * <p>Default true, because the audit record is a <em>control</em> under
+     * ABC, not a diagnostic. Committing without one produces data that no
+     * balance can account for: the messages are consumed and gone from the
+     * queue, the file exists, and nothing records that it should. A control
+     * that can be skipped when the audit store is unavailable is not a control.
+     *
+     * <p>Rolling back instead means the messages stay on the queue and are
+     * redelivered, so nothing is lost — ingestion stalls until the audit path
+     * recovers. That is the correct trade for a feed where completeness
+     * matters more than latency.
+     *
+     * <p>Set false only for a feed where an unaudited landing is preferable to
+     * a stall.
+     */
+    private boolean failBatchOnAuditError = true;
+
     // Degraded mode (§6.1)
     private DegradationStrategy degradationStrategy = DegradationStrategy.BATCH_OF_ONE;
     private int successesRequiredToRestore = 10;
@@ -194,6 +213,14 @@ public class BindingConfig {
 
     public void setBackoutThreshold(int backoutThreshold) {
         this.backoutThreshold = backoutThreshold;
+    }
+
+    public boolean isFailBatchOnAuditError() {
+        return failBatchOnAuditError;
+    }
+
+    public void setFailBatchOnAuditError(boolean failBatchOnAuditError) {
+        this.failBatchOnAuditError = failBatchOnAuditError;
     }
 
     public boolean isFailBatchOnTrackerError() {

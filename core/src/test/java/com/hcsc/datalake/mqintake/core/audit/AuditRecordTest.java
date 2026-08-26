@@ -87,7 +87,11 @@ class AuditRecordTest {
     }
 
     @Test
-    void rejectsZeroRecordCount() {
+    void rejectsARecordThatAccountsForNothing() {
+        // Zero landed AND zero backed out means the record explains no
+        // messages at all, which is the only genuinely useless case. Zero
+        // landed with a positive backout count is legitimate — a unit of work
+        // whose messages were all poison.
         assertThatThrownBy(() -> AuditRecord.builder()
                 .bindingId("rms")
                 .partitionPath("/data")
@@ -98,7 +102,25 @@ class AuditRecordTest {
                 .commitTimestamp(Instant.now())
                 .build())
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("recordCount must be positive");
+                .hasMessageContaining("must account for at least one message");
+    }
+
+    @Test
+    void acceptsABackoutOnlyRecord() {
+        // Landed nothing, consumed five. Rejecting this would leave those five
+        // messages in no audit anywhere, and the balance would show them lost.
+        AuditRecord record = AuditRecord.builder()
+                .bindingId("rms")
+                .partitionPath("")
+                .filename("backout-only-1")
+                .recordCount(0)
+                .byteCount(0)
+                .backoutCount(5)
+                .instanceId("inst")
+                .commitTimestamp(Instant.now())
+                .build();
+
+        assertThat(record.getConsumedCount()).isEqualTo(5);
     }
 
     @Test

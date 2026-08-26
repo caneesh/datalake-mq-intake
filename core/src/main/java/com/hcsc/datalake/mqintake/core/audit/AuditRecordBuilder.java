@@ -58,6 +58,20 @@ public class AuditRecordBuilder {
     public AuditRecord build(String bindingId,
                               BatchWriter.BatchWriteResult writeResult,
                               List<Message> messages) {
+        return build(bindingId, writeResult, messages, 0);
+    }
+
+    /**
+     * Builds a record carrying the full balance for a unit of work.
+     *
+     * @param backoutCount messages consumed but routed to the backout queue,
+     *                     without which {@code consumed == landed} would be a
+     *                     false statement for any batch containing poison
+     */
+    public AuditRecord build(String bindingId,
+                              BatchWriter.BatchWriteResult writeResult,
+                              List<Message> messages,
+                              int backoutCount) {
         Objects.requireNonNull(bindingId, "bindingId required");
         Objects.requireNonNull(writeResult, "writeResult required");
         Objects.requireNonNull(messages, "messages required");
@@ -82,6 +96,7 @@ public class AuditRecordBuilder {
                 .filename(filename)
                 .recordCount(writeResult.getRecordCount())
                 .byteCount(writeResult.getByteCount())
+                .backoutCount(backoutCount)
                 .firstIdentity(firstIdentity)
                 .lastIdentity(lastIdentity)
                 .instanceId(instanceId)

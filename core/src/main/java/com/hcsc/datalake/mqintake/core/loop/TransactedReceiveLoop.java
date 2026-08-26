@@ -250,6 +250,7 @@ public class TransactedReceiveLoop implements Runnable {
 
         List<Message> cleanMessages = batch;
         boolean committed = false;
+        int poisonCount = 0;
         try {
             if (poisonMessageHandler != null) {
                 PoisonMessageHandler.BatchPoisonCheckResult poisonResult;
@@ -262,6 +263,7 @@ public class TransactedReceiveLoop implements Runnable {
                     throw e; // Re-throw to trigger rollback in outer catch
                 }
 
+                poisonCount = poisonResult.getPoisonCount();
                 if (poisonResult.hasPoisonMessages()) {
                     log.warn("Routed {} poison messages to backout queue for binding '{}'",
                             poisonResult.getPoisonCount(), config.getId());
@@ -274,6 +276,10 @@ public class TransactedReceiveLoop implements Runnable {
 
                 cleanMessages = poisonResult.getCleanMessages();
                 if (cleanMessages.isEmpty()) {
+                    // Nothing landed, but messages were consumed. Without a
+                    // record of its own this unit of work appears in no audit
+                    // anywhere and the balance shows those messages as lost.
+                    emitBackoutOnlyAudit(batch, poisonResult.getPoisonCount());
                     listenerSession.session().commit();
                     committed = true;
                     commitCount.incrementAndGet();
@@ -298,6 +304,16 @@ public class TransactedReceiveLoop implements Runnable {
             if (config.getMode() == BindingMode.TRACKED) {
                 sendTrackerMessages(cleanMessages);
             }
+
+            // Audit BEFORE commit. Written afterwards, a crash or an audit-store
+            // outage in between leaves committed data with no record, which a
+            // balancing control reads as loss — the wrong direction to fail in.
+            // Written first, the same crash yields an audited file whose
+            // messages are redelivered: a duplicate, which is detectable and
+            // true. Under ABC the audit is a control, so this is also the point
+            // at which an unwritable audit stops the batch rather than being
+            // logged and forgotten.
+            emitAuditRecord(cleanMessages, writeResult, poisonCount);
 
             listenerSession.session().commit();
             committed = true;
@@ -325,8 +341,6 @@ public class TransactedReceiveLoop implements Runnable {
                 metrics.recordCommit();
                 metrics.recordMessagesWritten(cleanMessages.size(), writeResult.getByteCount());
             }
-
-            emitAuditRecord(cleanMessages, writeResult);
 
             log.debug("Committed batch of {} messages for binding '{}'",
                     cleanMessages.size(), config.getId());
@@ -421,19 +435,58 @@ public class TransactedReceiveLoop implements Runnable {
         }
     }
 
-    private void emitAuditRecord(List<Message> messages, BatchWriter.BatchWriteResult writeResult) {
+    /**
+     * Writes the batch's audit record, before the commit.
+     *
+     * <p>Whether a failure here stops the batch is
+     * {@code fail_batch_on_audit_error}, default true: under ABC the audit is
+     * a control, and committing without one produces data no balance can
+     * account for. Rolling back leaves the messages on the queue, so nothing
+     * is lost — ingestion stalls until the audit path recovers.
+     */
+    private void emitAuditRecord(List<Message> messages, BatchWriter.BatchWriteResult writeResult,
+                                 int backoutCount) throws Exception {
         if (auditRecordEmitter == null) {
             return;
         }
 
         try {
-            auditRecordEmitter.emit(config.getId(), writeResult, messages);
+            auditRecordEmitter.emit(config.getId(), writeResult, messages, backoutCount);
         } catch (Exception e) {
-            log.warn("Failed to emit audit record for binding '{}': {}",
-                    config.getId(), e.getMessage());
             if (metrics != null) {
                 metrics.recordAuditFailure();
             }
+            if (config.isFailBatchOnAuditError()) {
+                log.error("Audit record could not be written for binding '{}' — rolling back so "
+                                + "no unaudited data is committed: {}",
+                        config.getId(), e.getMessage(), e);
+                throw e;
+            }
+            log.warn("Failed to emit audit record for binding '{}' — batch still commits, "
+                            + "this landing is unaudited: {}",
+                    config.getId(), e.getMessage());
+        }
+    }
+
+    /** Audit for a unit of work that landed nothing because every message was poison. */
+    private void emitBackoutOnlyAudit(List<Message> batch, int backoutCount) throws Exception {
+        if (auditRecordEmitter == null || backoutCount == 0) {
+            return;
+        }
+
+        try {
+            auditRecordEmitter.emitBackoutOnly(config.getId(), batch, backoutCount);
+        } catch (Exception e) {
+            if (metrics != null) {
+                metrics.recordAuditFailure();
+            }
+            if (config.isFailBatchOnAuditError()) {
+                log.error("Backout-only audit record could not be written for binding '{}' — "
+                        + "rolling back: {}", config.getId(), e.getMessage(), e);
+                throw e;
+            }
+            log.warn("Failed to emit backout-only audit record for binding '{}': {}",
+                    config.getId(), e.getMessage());
         }
     }
 

@@ -20,10 +20,12 @@ public interface AuditRecordEmitter {
     /**
      * Emits an audit record after a successful commit.
      *
-     * <p>This should be called AFTER the MQ commit succeeds. A crash between
-     * MQ commit and audit write yields a committed, valid data file with no
-     * audit record — this is acceptable and handled by the reconciliation
-     * process via message-ID set comparison (§10).
+     * <p>Called BEFORE the MQ commit, so that every committed batch has an
+     * audit record. Writing after the commit leaves a window in which
+     * committed data has no record, which a balancing control reads as loss —
+     * the wrong direction to fail in. Written first, the crash window instead
+     * yields an audited file whose messages are redelivered, which shows up as
+     * a duplicate: detectable, and true.
      *
      * @param record the audit record to emit
      * @throws IOException if the audit record could not be written
@@ -39,6 +41,30 @@ public interface AuditRecordEmitter {
      * @throws IOException if the audit record could not be written
      */
     void emit(String bindingId, BatchWriter.BatchWriteResult writeResult, List<Message> messages) throws IOException;
+
+    /**
+     * Emits an audit record carrying the full balance for a unit of work.
+     *
+     * @param backoutCount messages consumed in this unit of work that were
+     *                     routed to the backout queue rather than landed.
+     *                     Without it the balance cannot close: a batch that
+     *                     consumed 10 and landed 9 would look like a loss of 1.
+     */
+    default void emit(String bindingId, BatchWriter.BatchWriteResult writeResult,
+                      List<Message> messages, int backoutCount) throws IOException {
+        emit(bindingId, writeResult, messages);
+    }
+
+    /**
+     * Emits an audit record for a unit of work that landed nothing.
+     *
+     * <p>A batch consisting entirely of poison messages commits without
+     * writing a file. It still consumed messages, so without a record of its
+     * own those messages appear in no audit anywhere and the balance shows
+     * them as lost.
+     */
+    void emitBackoutOnly(String bindingId, List<Message> messages, int backoutCount)
+            throws IOException;
 
     /**
      * Flushes any buffered audit records. Some implementations may buffer
