@@ -71,6 +71,8 @@ public class IntakeRuntimeManager implements SmartLifecycle {
 
     private volatile boolean running = false;
     private volatile BindingRuntimeFactory runtimeFactory;
+    private volatile com.hcsc.datalake.mqintake.core.reconciliation.ReconciliationScheduler
+            reconciliationScheduler;
 
     @Autowired
     public IntakeRuntimeManager(IntakeProperties properties,
@@ -121,6 +123,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
             cleanupTempFiles();
             initializeRuntimeFactory();
             createAndStartRuntimes();
+            startReconciliation();
             running = true;
 
             log.info("IntakeRuntimeManager started: {} bindings, {} total listener threads",
@@ -230,6 +233,45 @@ public class IntakeRuntimeManager implements SmartLifecycle {
      * disposes when the failed context closes, and they may be shared with
      * anything else in that context.
      */
+    /**
+     * Starts periodic reconciliation — the check half of ABC.
+     *
+     * <p>Started after the bindings, and deliberately unable to affect them:
+     * it holds no JMS session, and every failure inside it is contained. A
+     * mechanism that checks ingestion must never be able to stop it.
+     */
+    private void startReconciliation() {
+        var reconciliationConfig = properties.getReconciliation();
+
+        var auditReader = new com.hcsc.datalake.mqintake.core.reconciliation.AuditRecordReader(
+                fileSystem, properties.getHdfs().getAuditBasePath());
+
+        // Identity comes from the sidecar index where a binding writes one,
+        // falling back to the file reader — which, under the production key,
+        // finds nothing and says so.
+        var identityReader = new com.hcsc.datalake.mqintake.core.index.RecordIndexIdentityExtractor(
+                new com.hcsc.datalake.mqintake.core.index.RecordIndexReader(fileSystem),
+                new com.hcsc.datalake.mqintake.core.reconciliation.SequenceFileIdentityReader(
+                        hadoopConf));
+
+        var service = new com.hcsc.datalake.mqintake.core.reconciliation.PartitionReconciliationService(
+                fileSystem,
+                identityReader,
+                auditReader,
+                new HdfsAuditRecordEmitter(fileSystem,
+                        properties.getHdfs().getAuditBasePath(),
+                        instanceId.value(), Clock.systemUTC()),
+                java.time.Duration.ofMillis(reconciliationConfig.getGracePeriodMs()),
+                Clock.systemUTC(),
+                instanceId.value());
+
+        reconciliationScheduler =
+                new com.hcsc.datalake.mqintake.core.reconciliation.ReconciliationScheduler(
+                        service, properties, metricsRegistry::getBindingMetrics,
+                        Clock.systemUTC());
+        reconciliationScheduler.start();
+    }
+
     private void createAndStartRuntimes() {
         List<BindingRuntime> startedThisAttempt = new ArrayList<>();
 
@@ -303,6 +345,12 @@ public class IntakeRuntimeManager implements SmartLifecycle {
     public void stop() {
         log.info("Stopping IntakeRuntimeManager");
         running = false;
+
+        // Stopped before the bindings: it only reads HDFS, and there is no
+        // reason to have it examining partitions while they drain.
+        if (reconciliationScheduler != null) {
+            reconciliationScheduler.close();
+        }
 
         long drainTimeout = properties.getShutdown().getDrainTimeoutMs();
 

@@ -37,6 +37,16 @@ intake:
     audit-base-path: /data/audit
     temp-file-max-age-ms: 3600000  # 1 hour
 
+  # RMS is ABC-controlled: reconciliation checks landed data against the
+  # audit trail. It reads HDFS only — it holds no JMS session and cannot
+  # affect ingestion.
+  reconciliation:
+    enabled: true
+    interval-ms: 900000        # one partition window
+    grace-period-ms: 300000    # let in-flight batches land first
+    lookback-windows: 4        # a skipped run must not leave a gap
+    quarantine-duplicates: false   # report, never move, without a human
+
   shutdown:
     drain-timeout-ms: 30000  # 30 seconds
 

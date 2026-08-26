@@ -31,6 +31,7 @@ public class IntakeProperties {
     private KerberosProperties kerberos = new KerberosProperties();
     private HdfsProperties hdfs = new HdfsProperties();
     private ShutdownProperties shutdown = new ShutdownProperties();
+    private ReconciliationProperties reconciliation = new ReconciliationProperties();
 
     public List<BindingConfig> getBindings() {
         return bindings;
@@ -96,12 +97,77 @@ public class IntakeProperties {
         this.hdfs = hdfs;
     }
 
+    public ReconciliationProperties getReconciliation() {
+        return reconciliation;
+    }
+
+    public void setReconciliation(ReconciliationProperties reconciliation) {
+        this.reconciliation = reconciliation;
+    }
+
     public ShutdownProperties getShutdown() {
         return shutdown;
     }
 
     public void setShutdown(ShutdownProperties shutdown) {
         this.shutdown = shutdown;
+    }
+
+    /**
+     * Periodic reconciliation — the check half of ABC.
+     *
+     * <p>The audit records say what should be on HDFS; reconciliation is what
+     * confirms it actually is. Without it the audit is evidence nobody reads.
+     */
+    public static class ReconciliationProperties {
+
+        /**
+         * Off by default so enabling it is a deliberate act, and stated
+         * explicitly in each application's configuration rather than inherited
+         * from a hidden default.
+         */
+        private boolean enabled = false;
+
+        /** How often to run. Defaults to one partition window. */
+        private long intervalMs = 900_000;
+
+        /**
+         * How long after a window closes before reconciling it.
+         *
+         * <p>A partition is still being written to right up to its boundary,
+         * and a batch that started before the boundary lands after it. Checking
+         * too early reports work in flight as a discrepancy.
+         */
+        private long gracePeriodMs = 300_000;
+
+        /**
+         * How many closed windows each run examines.
+         *
+         * <p>More than one so a run that is skipped — overlap, restart, a
+         * transient HDFS problem — does not leave a window permanently
+         * unchecked.
+         */
+        private int lookbackWindows = 4;
+
+        /**
+         * Whether duplicate-classified orphans are moved to _quarantine.
+         *
+         * <p>Off by default: a move is still a change to landed data, and for
+         * a feed that cannot lose messages the safe first posture is to report
+         * and let a human decide.
+         */
+        private boolean quarantineDuplicates = false;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public long getIntervalMs() { return intervalMs; }
+        public void setIntervalMs(long intervalMs) { this.intervalMs = intervalMs; }
+        public long getGracePeriodMs() { return gracePeriodMs; }
+        public void setGracePeriodMs(long gracePeriodMs) { this.gracePeriodMs = gracePeriodMs; }
+        public int getLookbackWindows() { return lookbackWindows; }
+        public void setLookbackWindows(int lookbackWindows) { this.lookbackWindows = lookbackWindows; }
+        public boolean isQuarantineDuplicates() { return quarantineDuplicates; }
+        public void setQuarantineDuplicates(boolean q) { this.quarantineDuplicates = q; }
     }
 
     /**

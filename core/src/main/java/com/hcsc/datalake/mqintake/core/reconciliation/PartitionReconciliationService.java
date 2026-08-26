@@ -56,7 +56,7 @@ import java.util.Set;
  * record reconstructed from the file itself, closing the commit→audit crash
  * window without touching data.
  */
-public class PartitionReconciliationService {
+public class PartitionReconciliationService implements PartitionReconciler {
 
     private static final Logger log = LoggerFactory.getLogger(PartitionReconciliationService.class);
     private static final Duration PARTITION_LENGTH = Duration.ofMinutes(15);
@@ -100,6 +100,7 @@ public class PartitionReconciliationService {
      *                           moved (never deleted) to {base}/_quarantine/
      * @param metrics            optional metrics sink for discrepancies
      */
+    @Override
     public ReconciliationReport reconcilePartition(String bindingId,
                                                    String basePath,
                                                    Instant partitionInstant,
