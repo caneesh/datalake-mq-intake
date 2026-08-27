@@ -668,38 +668,38 @@ public class TransactedReceiveLoop implements Runnable {
         listenerSession.close();
     }
 
-    /**
-     * Attempts to recover the session with bounded exponential backoff.
-     *
-     * @return true if recovery succeeded, false if recovery failed after max attempts
-     *         or was interrupted
-     */
-    /**
-     * Iterative on purpose. The previous version retried by recursing, which
-     * was safe only because the budget is a hardcoded 10 — each level's stack
-     * frame stays live for the entire remaining backoff. The moment the
-     * budget becomes configurable (a natural next step), recursion depth
-     * scales with it. Same behaviour, loop instead of stack.
-     */
-    private boolean recoverSession() {
-        while (true) {
-            if (!recoverOnce()) {
-                return false;
-            }
-            if (reconnectAttempts.get() == 0) {
-                return true;   // recoverOnce resets the counter on success
-            }
-        }
+    /** The outcome of one recovery attempt. */
+    private enum RecoveryOutcome {
+        /** The session is open again; the receive loop can resume. */
+        RECOVERED,
+        /** This attempt failed but the next one might not. */
+        RETRY,
+        /** Stop recovering: budget exhausted, fatal fault, or shutting down. */
+        GIVE_UP
     }
 
     /**
-     * One recovery attempt.
+     * Attempts to recover the session with bounded exponential backoff.
      *
-     * @return false to stop recovering (budget exhausted, fatal, interrupted);
-     *         true to continue — either success (counter reset to 0) or a
-     *         retryable failure (counter still advancing)
+     * <p>Iterative on purpose. The previous version retried by recursing,
+     * which was safe only because the budget is a hardcoded 10 — each level's
+     * stack frame stays live for the entire remaining backoff. The moment the
+     * budget becomes configurable (a natural next step), recursion depth
+     * scales with it. Same behaviour, loop instead of stack.
+     *
+     * @return true if recovery succeeded, false if recovery failed after max
+     *         attempts, hit a fatal fault, or was interrupted
      */
-    private boolean recoverOnce() {
+    private boolean recoverSession() {
+        RecoveryOutcome outcome;
+        do {
+            outcome = recoverOnce();
+        } while (outcome == RecoveryOutcome.RETRY);
+        return outcome == RecoveryOutcome.RECOVERED;
+    }
+
+    /** One recovery attempt: close, back off, reopen. */
+    private RecoveryOutcome recoverOnce() {
         int attempts = reconnectAttempts.incrementAndGet();
 
         if (attempts > MAX_RECONNECT_ATTEMPTS) {
@@ -710,7 +710,7 @@ public class TransactedReceiveLoop implements Runnable {
                         new RuntimeException("Max reconnect attempts exceeded"));
             }
             metrics.recordReconnectFailure();
-            return false;
+            return RecoveryOutcome.GIVE_UP;
         }
 
         log.warn("Attempting session recovery for binding '{}' (attempt {}/{})",
@@ -736,18 +736,21 @@ public class TransactedReceiveLoop implements Runnable {
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             log.info("Reconnect wait interrupted for binding '{}'", config.getId());
-            return false;
+            return RecoveryOutcome.GIVE_UP;
         }
 
         // Check if we should still be running
         if (!running.get() || Thread.currentThread().isInterrupted()) {
             log.info("Recovery aborted - loop stopping for binding '{}'", config.getId());
-            return false;
+            return RecoveryOutcome.GIVE_UP;
         }
 
         try {
             listenerSession.open();
-            reconnectAttempts.set(0); // Reset on success
+            // Fresh budget for the next incident. Plain state now — the
+            // accessor and the next recovery read it — not the success signal
+            // it once doubled as.
+            reconnectAttempts.set(0);
             reconnectCount.incrementAndGet();
             log.info("Session recovered successfully for binding '{}' after {} attempt(s)",
                     config.getId(), attempts);
@@ -759,7 +762,7 @@ public class TransactedReceiveLoop implements Runnable {
                 healthManager.recordHealthy(config.getId());
             }
 
-            return true;
+            return RecoveryOutcome.RECOVERED;
         } catch (JMSException e) {
             log.error("Session recovery attempt {} failed for binding '{}': {}",
                     attempts, config.getId(), e.getMessage());
@@ -767,10 +770,10 @@ public class TransactedReceiveLoop implements Runnable {
             if (faultPolicy.isFatal(e)) {
                 log.error("Non-recoverable error detected for binding '{}', stopping recovery",
                         config.getId());
-                return false;
+                return RecoveryOutcome.GIVE_UP;
             }
 
-            return true;   // retryable: the outer loop tries again
+            return RecoveryOutcome.RETRY;
         }
     }
 
