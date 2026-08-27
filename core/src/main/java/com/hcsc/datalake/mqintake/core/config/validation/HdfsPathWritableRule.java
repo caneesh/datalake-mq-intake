@@ -22,12 +22,12 @@ public class HdfsPathWritableRule implements BindingConfigRule {
         List<String> errors = new ArrayList<>();
 
         for (BindingConfig binding : properties.getBindings()) {
-            if (binding.getHdfsBasePath() == null || binding.getHdfsBasePath().isBlank()) {
+            if (binding.getHdfs().getBasePath() == null || binding.getHdfs().getBasePath().isBlank()) {
                 continue;   // RequiredFieldsRule reports the missing path
             }
 
             HdfsPathValidator.PathValidationResult result =
-                    pathValidator.validatePath(binding.getHdfsBasePath());
+                    pathValidator.validatePath(binding.getHdfs().getBasePath());
 
             if (!result.isValid()) {
                 errors.add("Binding '" + binding.getId() + "' HDFS path not writable: "

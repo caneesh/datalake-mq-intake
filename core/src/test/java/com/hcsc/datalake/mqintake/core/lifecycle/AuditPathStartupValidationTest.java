@@ -165,11 +165,11 @@ class AuditPathStartupValidationTest {
         BindingConfig config = new BindingConfig();
         config.setId(id);
         config.setSourceQueue("TEST.QUEUE");
-        config.setHdfsBasePath(root + "/data");
+        config.getHdfs().setBasePath(root + "/data");
         config.setMode(BindingMode.LAND_ONLY);
-        config.setBatchSize(100);
-        config.setBatchBytes(1024 * 1024);
-        config.setBatchIntervalMs(30000);
+        config.getBatch().setSize(100);
+        config.getBatch().setBytes(1024 * 1024);
+        config.getBatch().setIntervalMs(30000);
         return config;
     }
 

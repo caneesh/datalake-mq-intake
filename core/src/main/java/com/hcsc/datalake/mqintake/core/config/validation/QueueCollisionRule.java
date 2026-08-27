@@ -42,18 +42,18 @@ public class QueueCollisionRule implements BindingConfigRule {
         for (BindingConfig binding : properties.getBindings()) {
             String id = binding.getId();
 
-            String backout = binding.getBackoutQueue();
+            String backout = binding.getBackout().getQueue();
             if (backout != null && !backout.isBlank()
                     && sourceKeys.contains(key(binding, backout))) {
-                errors.add("Binding '" + id + "' backout-queue '" + backout + "' is also a "
+                errors.add("Binding '" + id + "' backout.queue '" + backout + "' is also a "
                         + "source queue on the same connection — poison messages would be "
                         + "routed straight back into consumption, a feedback loop");
             }
 
-            String tracker = binding.getTrackerQueue();
+            String tracker = binding.getTracker().getQueue();
             if (tracker != null && !tracker.isBlank()) {
                 if (sourceKeys.contains(key(binding, tracker))) {
-                    errors.add("Binding '" + id + "' tracker-queue '" + tracker
+                    errors.add("Binding '" + id + "' tracker.queue '" + tracker
                             + "' is also a source queue on the same connection — the service "
                             + "would consume its own tracker notifications");
                 }

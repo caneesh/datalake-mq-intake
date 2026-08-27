@@ -61,7 +61,7 @@ class RmsModuleTest {
     void rmsTrackerBuilderUsesDefaultFieldsWhenNotConfigured() {
         TrackerMessageBuilderFactory factory = rmsConfiguration.trackerMessageBuilderFactory();
         BindingConfig config = createRmsBindingConfig();
-        config.setTrackerFields(null);
+        config.getTracker().setFields(null);
 
         var builder = factory.create(config);
 
@@ -72,7 +72,7 @@ class RmsModuleTest {
     void rmsTrackerBuilderUsesConfiguredBodyMode() {
         TrackerMessageBuilderFactory factory = rmsConfiguration.trackerMessageBuilderFactory();
         BindingConfig config = createRmsBindingConfig();
-        config.setTrackerBodyMode(TrackerBodyMode.HEADER_ONLY);
+        config.getTracker().setBodyMode(TrackerBodyMode.HEADER_ONLY);
 
         var builder = factory.create(config);
 
@@ -83,7 +83,7 @@ class RmsModuleTest {
     void rmsTrackerBuilderDefaultsToFullCopy() {
         TrackerMessageBuilderFactory factory = rmsConfiguration.trackerMessageBuilderFactory();
         BindingConfig config = createRmsBindingConfig();
-        config.setTrackerBodyMode(null);
+        config.getTracker().setBodyMode(null);
 
         var builder = factory.create(config);
 
@@ -95,12 +95,12 @@ class RmsModuleTest {
         config.setId("rms");
         config.setSourceQueue("MQ.HPS.MEMBERSHIP.IN");
         config.setMode(BindingMode.TRACKED);
-        config.setTrackerQueue("MQ.HPS.MEMBERSHIP.TRACKER");
-        config.setTrackerBodyMode(TrackerBodyMode.FULL_COPY);
-        config.setHdfsBasePath("/data/raw/membership/hps");
-        config.setBatchSize(100);
-        config.setBatchBytes(1024 * 1024);
-        config.setBatchIntervalMs(30000);
+        config.getTracker().setQueue("MQ.HPS.MEMBERSHIP.TRACKER");
+        config.getTracker().setBodyMode(TrackerBodyMode.FULL_COPY);
+        config.getHdfs().setBasePath("/data/raw/membership/hps");
+        config.getBatch().setSize(100);
+        config.getBatch().setBytes(1024 * 1024);
+        config.getBatch().setIntervalMs(30000);
         config.setListenerThreads(4);
         return config;
     }

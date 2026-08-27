@@ -55,17 +55,17 @@ class RmsApplicationSpringBootTest {
         registry.add("intake.bindings[0].mq-connection", () -> "primary");
         registry.add("intake.bindings[0].source-queue", () -> SOURCE_QUEUE);
         registry.add("intake.bindings[0].mode", () -> "TRACKED");
-        registry.add("intake.bindings[0].tracker-queue", () -> TRACKER_QUEUE);
-        registry.add("intake.bindings[0].tracker-body-mode", () -> "FULL_COPY");
-        registry.add("intake.bindings[0].hdfs-base-path", () -> dataDir.toString());
-        registry.add("intake.bindings[0].batch-size", () -> 5);
-        registry.add("intake.bindings[0].batch-bytes", () -> 64 * 1024 * 1024);
-        registry.add("intake.bindings[0].batch-interval-ms", () -> 400);
+        registry.add("intake.bindings[0].tracker.queue", () -> TRACKER_QUEUE);
+        registry.add("intake.bindings[0].tracker.body-mode", () -> "FULL_COPY");
+        registry.add("intake.bindings[0].hdfs.base-path", () -> dataDir.toString());
+        registry.add("intake.bindings[0].batch.size", () -> 5);
+        registry.add("intake.bindings[0].batch.bytes", () -> 64 * 1024 * 1024);
+        registry.add("intake.bindings[0].batch.interval-ms", () -> 400);
         registry.add("intake.bindings[0].listener-threads", () -> 2);
-        registry.add("intake.bindings[0].backout-queue", () -> "MQ.HPS.MEMBERSHIP.BACKOUT");
-        registry.add("intake.bindings[0].backout-threshold", () -> 5);
-        registry.add("intake.bindings[0].record-index-enabled", () -> true);
-        registry.add("intake.bindings[0].degradation-strategy", () -> "BATCH_OF_ONE");
+        registry.add("intake.bindings[0].backout.queue", () -> "MQ.HPS.MEMBERSHIP.BACKOUT");
+        registry.add("intake.bindings[0].backout.threshold", () -> 5);
+        registry.add("intake.bindings[0].hdfs.record-index-enabled", () -> true);
+        registry.add("intake.bindings[0].degradation.strategy", () -> "BATCH_OF_ONE");
         registry.add("intake.hdfs.audit-base-path", () -> auditDir.toString());
         registry.add("intake.instance-id", () -> "rms-sbt");
     }

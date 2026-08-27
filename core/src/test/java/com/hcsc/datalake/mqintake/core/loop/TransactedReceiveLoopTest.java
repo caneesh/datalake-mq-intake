@@ -206,7 +206,7 @@ class TransactedReceiveLoopTest {
         // The stricter §2.2 reading remains available: tracker and get in one
         // unit of work, so losing a tracker means replaying the message.
         BindingConfig config = createTrackedConfig(3);
-        config.setFailBatchOnTrackerError(true);
+        config.getTracker().setFailBatchOnError(true);
         sendMessages(3);
 
         final int[] callCount = {0};
@@ -311,7 +311,7 @@ class TransactedReceiveLoopTest {
         // Given: 3 messages, batch size = 5 (partial batch never reaches size trigger)
         // Use very short timeout so time trigger fires quickly
         BindingConfig config = createLandOnlyConfig(5);
-        config.setBatchIntervalMs(200); // Short time trigger
+        config.getBatch().setIntervalMs(200); // Short time trigger
         sendMessages(3);
 
         // When: run briefly and stop
@@ -366,10 +366,10 @@ class TransactedReceiveLoopTest {
         config.setId("test-land-only");
         config.setSourceQueue(SOURCE_QUEUE);
         config.setMode(BindingMode.LAND_ONLY);
-        config.setHdfsBasePath("/data/raw/test");
-        config.setBatchSize(batchSize);
-        config.setBatchBytes(128 * 1024 * 1024);
-        config.setBatchIntervalMs(30000);
+        config.getHdfs().setBasePath("/data/raw/test");
+        config.getBatch().setSize(batchSize);
+        config.getBatch().setBytes(128 * 1024 * 1024);
+        config.getBatch().setIntervalMs(30000);
         config.setListenerThreads(1);
         return config;
     }
@@ -379,11 +379,11 @@ class TransactedReceiveLoopTest {
         config.setId("test-tracked");
         config.setSourceQueue(SOURCE_QUEUE);
         config.setMode(BindingMode.TRACKED);
-        config.setTrackerQueue(TRACKER_QUEUE);
-        config.setHdfsBasePath("/data/raw/test");
-        config.setBatchSize(batchSize);
-        config.setBatchBytes(128 * 1024 * 1024);
-        config.setBatchIntervalMs(30000);
+        config.getTracker().setQueue(TRACKER_QUEUE);
+        config.getHdfs().setBasePath("/data/raw/test");
+        config.getBatch().setSize(batchSize);
+        config.getBatch().setBytes(128 * 1024 * 1024);
+        config.getBatch().setIntervalMs(30000);
         config.setListenerThreads(1);
         return config;
     }
@@ -542,7 +542,7 @@ class TransactedReceiveLoopTest {
         // and gone from the queue, landed on HDFS, and recorded nowhere.
         // Rolling back keeps the messages on the queue, so nothing is lost.
         BindingConfig config = createLandOnlyConfig(3);
-        assertThat(config.isFailBatchOnAuditError())
+        assertThat(config.getAudit().isFailBatchOnError())
                 .as("audit must fail closed by default").isTrue();
         sendMessages(3);
 
@@ -566,7 +566,7 @@ class TransactedReceiveLoopTest {
     void auditFailureCanBeConfiguredToCommitAnyway() throws Exception {
         // The opt-out, for a feed where an unaudited landing beats a stall.
         BindingConfig config = createLandOnlyConfig(3);
-        config.setFailBatchOnAuditError(false);
+        config.getAudit().setFailBatchOnError(false);
         sendMessages(3);
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(

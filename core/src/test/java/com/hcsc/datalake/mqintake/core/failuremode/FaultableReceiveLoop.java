@@ -106,9 +106,9 @@ public class FaultableReceiveLoop implements Runnable {
         consumer = session.createConsumer(sourceQueue);
 
         if (config.getMode() == BindingMode.TRACKED) {
-            Queue trackerQueue = session.createQueue(config.getTrackerQueue());
+            Queue trackerQueue = session.createQueue(config.getTracker().getQueue());
             trackerProducer = session.createProducer(trackerQueue);
-            log.debug("Created tracker producer for queue '{}'", config.getTrackerQueue());
+            log.debug("Created tracker producer for queue '{}'", config.getTracker().getQueue());
         }
 
         log.info("Initialized session for binding '{}': source='{}', mode={}",
@@ -116,7 +116,7 @@ public class FaultableReceiveLoop implements Runnable {
     }
 
     private void runLoop() {
-        int batchSize = config.getBatchSize();
+        int batchSize = config.getBatch().getSize();
         List<Message> batch = new ArrayList<>(batchSize);
 
         while (running.get() && !Thread.currentThread().isInterrupted()) {

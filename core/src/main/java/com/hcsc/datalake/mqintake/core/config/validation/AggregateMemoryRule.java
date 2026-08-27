@@ -100,7 +100,7 @@ public class AggregateMemoryRule implements BindingConfigRule {
         detail.append(". Per binding (batch_bytes × listener_threads): ");
         for (BindingConfig binding : bindings) {
             detail.append(binding.getId()).append("=")
-                  .append(ByteFormat.format(binding.getBatchBytes())).append("×")
+                  .append(ByteFormat.format(binding.getBatch().getBytes())).append("×")
                   .append(binding.getListenerThreads()).append("=")
                   .append(ByteFormat.format(binding.getMemoryFootprint())).append(" ");
         }

@@ -151,12 +151,12 @@ public class TransactedReceiveLoop implements Runnable {
 
     private void runLoop() {
         FlushTrigger flushTrigger = new FlushTrigger(
-                config.getBatchSize(),
-                config.getBatchBytes(),
-                config.getBatchIntervalMs()
+                config.getBatch().getSize(),
+                config.getBatch().getBytes(),
+                config.getBatch().getIntervalMs()
         );
 
-        List<Message> batch = new ArrayList<>(config.getBatchSize());
+        List<Message> batch = new ArrayList<>(config.getBatch().getSize());
 
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
@@ -273,7 +273,7 @@ public class TransactedReceiveLoop implements Runnable {
         if (degradedModeManager != null) {
             return degradedModeManager.getCurrentBatchSize();
         }
-        return config.getBatchSize();
+        return config.getBatch().getSize();
     }
 
     private void processBatch(List<Message> batch) {
@@ -515,7 +515,7 @@ public class TransactedReceiveLoop implements Runnable {
             auditRecordEmitter.emit(config.getId(), writeResult, messages, backoutCount);
         } catch (Exception e) {
             metrics.recordAuditFailure();
-            if (config.isFailBatchOnAuditError()) {
+            if (config.getAudit().isFailBatchOnError()) {
                 log.error("Audit record could not be written for binding '{}' — rolling back so "
                                 + "no unaudited data is committed: {}",
                         config.getId(), e.getMessage(), e);
@@ -537,7 +537,7 @@ public class TransactedReceiveLoop implements Runnable {
             auditRecordEmitter.emitBackoutOnly(config.getId(), batch, backoutCount);
         } catch (Exception e) {
             metrics.recordAuditFailure();
-            if (config.isFailBatchOnAuditError()) {
+            if (config.getAudit().isFailBatchOnError()) {
                 log.error("Backout-only audit record could not be written for binding '{}' — "
                         + "rolling back: {}", config.getId(), e.getMessage(), e);
                 throw e;
@@ -572,7 +572,7 @@ public class TransactedReceiveLoop implements Runnable {
                     listenerSession.trackerProducer().send(trackerMessage.get());
                 }
             } catch (JMSException | RuntimeException e) {
-                if (config.isFailBatchOnTrackerError()) {
+                if (config.getTracker().isFailBatchOnError()) {
                     throw e;
                 }
                 metrics.recordTrackerFailure();

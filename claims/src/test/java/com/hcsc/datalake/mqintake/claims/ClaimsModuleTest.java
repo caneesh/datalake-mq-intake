@@ -72,10 +72,10 @@ class ClaimsModuleTest {
         config.setId("claims");
         config.setSourceQueue("MQ.DMIH.CLAIMS.IN");
         config.setMode(BindingMode.LAND_ONLY);
-        config.setHdfsBasePath("/data/raw/claims/dmih");
-        config.setBatchSize(100);
-        config.setBatchBytes(1024 * 1024);
-        config.setBatchIntervalMs(30000);
+        config.getHdfs().setBasePath("/data/raw/claims/dmih");
+        config.getBatch().setSize(100);
+        config.getBatch().setBytes(1024 * 1024);
+        config.getBatch().setIntervalMs(30000);
         config.setListenerThreads(4);
         return config;
     }

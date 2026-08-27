@@ -203,10 +203,10 @@ class CollaboratorSeamTest {
         config.setId("seam");
         config.setSourceQueue(SOURCE_QUEUE);
         config.setMode(BindingMode.LAND_ONLY);
-        config.setHdfsBasePath("/tmp/seam");
-        config.setBatchSize(batchSize);
-        config.setBatchBytes(1024 * 1024);
-        config.setBatchIntervalMs(200);
+        config.getHdfs().setBasePath("/tmp/seam");
+        config.getBatch().setSize(batchSize);
+        config.getBatch().setBytes(1024 * 1024);
+        config.getBatch().setIntervalMs(200);
         config.setListenerThreads(1);
         return config;
     }

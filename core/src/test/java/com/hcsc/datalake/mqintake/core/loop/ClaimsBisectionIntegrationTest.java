@@ -205,14 +205,14 @@ class ClaimsBisectionIntegrationTest {
         config.setId("claims");
         config.setSourceQueue(SOURCE_QUEUE);
         config.setMode(BindingMode.LAND_ONLY);
-        config.setHdfsBasePath("/data/raw/claims");
-        config.setBatchSize(batchSize);
-        config.setBatchBytes(128 * 1024 * 1024);
-        config.setBatchIntervalMs(400);
+        config.getHdfs().setBasePath("/data/raw/claims");
+        config.getBatch().setSize(batchSize);
+        config.getBatch().setBytes(128 * 1024 * 1024);
+        config.getBatch().setIntervalMs(400);
         config.setListenerThreads(1);
-        config.setBackoutQueue(BACKOUT_QUEUE);
-        config.setBackoutThreshold(5);
-        config.setDegradationStrategy(DegradationStrategy.BISECT);
+        config.getBackout().setQueue(BACKOUT_QUEUE);
+        config.getBackout().setThreshold(5);
+        config.getDegradation().setStrategy(DegradationStrategy.BISECT);
         return config;
     }
 

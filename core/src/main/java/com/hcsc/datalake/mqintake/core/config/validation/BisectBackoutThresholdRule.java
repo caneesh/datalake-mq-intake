@@ -24,20 +24,20 @@ public class BisectBackoutThresholdRule implements BindingConfigRule {
         List<String> errors = new ArrayList<>();
 
         for (BindingConfig binding : properties.getBindings()) {
-            if (binding.getDegradationStrategy() != DegradationStrategy.BISECT) {
+            if (binding.getDegradation().getStrategy() != DegradationStrategy.BISECT) {
                 continue;
             }
-            boolean hasBackoutQueue = binding.getBackoutQueue() != null
-                    && !binding.getBackoutQueue().isBlank();
-            if (!hasBackoutQueue || binding.getBatchSize() <= 1) {
+            boolean hasBackoutQueue = binding.getBackout().getQueue() != null
+                    && !binding.getBackout().getQueue().isBlank();
+            if (!hasBackoutQueue || binding.getBatch().getSize() <= 1) {
                 continue;
             }
 
-            int minThreshold = minimumThresholdFor(binding.getBatchSize());
-            if (binding.getBackoutThreshold() < minThreshold) {
+            int minThreshold = minimumThresholdFor(binding.getBatch().getSize());
+            if (binding.getBackout().getThreshold() < minThreshold) {
                 errors.add("Binding '" + binding.getId() + "' uses BISECT with batch_size "
-                        + binding.getBatchSize() + " but backout_threshold "
-                        + binding.getBackoutThreshold() + " < required minimum " + minThreshold
+                        + binding.getBatch().getSize() + " but backout_threshold "
+                        + binding.getBackout().getThreshold() + " < required minimum " + minThreshold
                         + " (ceil(log2(batch_size)) + 1) — clean messages sharing failing batches "
                         + "with a poison message would be misrouted to the backout queue");
             }

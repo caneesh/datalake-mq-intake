@@ -24,8 +24,8 @@ public class TrackerQueueConsistencyRule implements BindingConfigRule {
                 continue;   // RequiredFieldsRule reports the missing mode
             }
 
-            boolean hasTrackerQueue = binding.getTrackerQueue() != null
-                    && !binding.getTrackerQueue().isBlank();
+            boolean hasTrackerQueue = binding.getTracker().getQueue() != null
+                    && !binding.getTracker().getQueue().isBlank();
 
             if (binding.getMode() == BindingMode.TRACKED && !hasTrackerQueue) {
                 errors.add("TRACKED binding '" + binding.getId() + "' requires a tracker_queue");

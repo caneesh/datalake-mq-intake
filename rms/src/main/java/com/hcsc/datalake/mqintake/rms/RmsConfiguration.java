@@ -57,17 +57,17 @@ public class RmsConfiguration {
         validateTrackerContract();
 
         return config -> {
-            TrackerBodyMode bodyMode = config.getTrackerBodyMode() != null
-                    ? config.getTrackerBodyMode()
+            TrackerBodyMode bodyMode = config.getTracker().getBodyMode() != null
+                    ? config.getTracker().getBodyMode()
                     : TrackerBodyMode.FULL_COPY;
 
             RmsTrackerMessageBuilder.TrackerFields fields;
-            if (config.getTrackerFields() != null) {
+            if (config.getTracker().getFields() != null) {
                 fields = new RmsTrackerMessageBuilder.TrackerFields(
-                        config.getTrackerFields().getReportingSystem(),
-                        config.getTrackerFields().getSourceSystem(),
-                        config.getTrackerFields().getMessageStatus(),
-                        config.getTrackerFields().getDestinationStatus()
+                        config.getTracker().getFields().getReportingSystem(),
+                        config.getTracker().getFields().getSourceSystem(),
+                        config.getTracker().getFields().getMessageStatus(),
+                        config.getTracker().getFields().getDestinationStatus()
                 );
             } else {
                 fields = RmsTrackerMessageBuilder.TrackerFields.defaultRms();

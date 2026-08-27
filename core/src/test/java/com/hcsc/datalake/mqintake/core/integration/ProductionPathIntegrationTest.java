@@ -131,7 +131,7 @@ class ProductionPathIntegrationTest {
 
         // Source queue drained, no _tmp leftovers
         assertThat(countOnQueue("IT.E2E.SOURCE")).isZero();
-        assertThat(listFiles(config.getHdfsBasePath() + "/_tmp/it-instance")).isEmpty();
+        assertThat(listFiles(config.getHdfs().getBasePath() + "/_tmp/it-instance")).isEmpty();
 
         // Immutable audit record(s) exist for the binding
         assertThat(listFilesRecursive(tempDir.resolve("audit").resolve("e2e").toString()))
@@ -159,7 +159,7 @@ class ProductionPathIntegrationTest {
         assertThat(countOnQueue("IT.TMPFAIL.SOURCE")).isZero();
         assertThat(metricsRegistry.forBinding("tmpfail").getRollbackCount()).isGreaterThan(0);
         // No half-written file remains in _tmp
-        assertThat(listFiles(config.getHdfsBasePath() + "/_tmp/it-instance")).isEmpty();
+        assertThat(listFiles(config.getHdfs().getBasePath() + "/_tmp/it-instance")).isEmpty();
     }
 
     // §15.6 tracker queue failure. Default policy matches the legacy MDB:
@@ -169,7 +169,7 @@ class ProductionPathIntegrationTest {
     @Test
     void trackerFailureLosesOnlyTheNotificationNotTheData() throws Exception {
         BindingConfig config = bindingConfig("trk", "IT.TRK.SOURCE", BindingMode.TRACKED, 1);
-        config.setTrackerQueue("IT.TRK.TRACKER");
+        config.getTracker().setQueue("IT.TRK.TRACKER");
         sendMessages("IT.TRK.SOURCE", "trk", 4);
 
         AtomicInteger trackerCalls = new AtomicInteger();
@@ -208,8 +208,8 @@ class ProductionPathIntegrationTest {
     @Test
     void failureAfterRenameBeforeCommitYieldsPermittedDuplicateNotLoss() throws Exception {
         BindingConfig config = bindingConfig("trk2", "IT.TRK2.SOURCE", BindingMode.TRACKED, 1);
-        config.setTrackerQueue("IT.TRK2.TRACKER");
-        config.setFailBatchOnTrackerError(true);
+        config.getTracker().setQueue("IT.TRK2.TRACKER");
+        config.getTracker().setFailBatchOnError(true);
         sendMessages("IT.TRK2.SOURCE", "trk2", 4);
 
         AtomicInteger trackerCalls = new AtomicInteger();
@@ -230,7 +230,7 @@ class ProductionPathIntegrationTest {
         // redelivery landed a second copy. §12.1: the duplicate is permitted,
         // nothing is lost.
         List<String> seqFiles = new ArrayList<>();
-        for (String f : listFilesRecursive(config.getHdfsBasePath())) {
+        for (String f : listFilesRecursive(config.getHdfs().getBasePath())) {
             if (f.endsWith(".seq") && !f.contains("/_tmp/")) seqFiles.add(f);
         }
         assertThat(seqFiles.size()).isGreaterThanOrEqualTo(2);
@@ -251,8 +251,8 @@ class ProductionPathIntegrationTest {
     @Test
     void gracefulShutdownWithInFlightBatchLosesNothing() throws Exception {
         BindingConfig config = bindingConfig("drain", "IT.DRAIN.SOURCE", BindingMode.LAND_ONLY, 1);
-        config.setBatchSize(100);          // never reaches size trigger
-        config.setBatchIntervalMs(60_000); // never reaches time trigger
+        config.getBatch().setSize(100);          // never reaches size trigger
+        config.getBatch().setIntervalMs(60_000); // never reaches time trigger
         sendMessages("IT.DRAIN.SOURCE", "drain", 5);
 
         BindingRuntime runtime = createAndStart(config, serializerFactory(0), null);
@@ -274,7 +274,7 @@ class ProductionPathIntegrationTest {
             assertThat(landed).containsExactlyInAnyOrderElementsOf(expectedIdentities("drain", 5));
         }
         // No half-written file left behind either way
-        assertThat(listFiles(config.getHdfsBasePath() + "/_tmp/it-instance")).isEmpty();
+        assertThat(listFiles(config.getHdfs().getBasePath() + "/_tmp/it-instance")).isEmpty();
     }
 
     // §15.13 binding isolation: one binding's persistent data failure leaves
@@ -377,10 +377,10 @@ class ProductionPathIntegrationTest {
         config.setMqConnection("primary");
         config.setSourceQueue(sourceQueue);
         config.setMode(mode);
-        config.setHdfsBasePath(tempDir.resolve(id).toString());
-        config.setBatchSize(6);
-        config.setBatchBytes(64 * 1024 * 1024);
-        config.setBatchIntervalMs(300);
+        config.getHdfs().setBasePath(tempDir.resolve(id).toString());
+        config.getBatch().setSize(6);
+        config.getBatch().setBytes(64 * 1024 * 1024);
+        config.getBatch().setIntervalMs(300);
         config.setListenerThreads(threads);
         return config;
     }
@@ -417,7 +417,7 @@ class ProductionPathIntegrationTest {
 
     private Set<String> landedIdentities(String bindingId, BindingConfig config) throws Exception {
         Set<String> identities = new HashSet<>();
-        for (String file : listFilesRecursive(config.getHdfsBasePath())) {
+        for (String file : listFilesRecursive(config.getHdfs().getBasePath())) {
             // Only renamed (visible) files count as landed — never in-progress _tmp
             if (file.endsWith(".seq") && !file.contains("/_tmp/")) {
                 try {

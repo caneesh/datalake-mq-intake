@@ -252,10 +252,10 @@ class RealHdfsIntegrationTest {
         binding.setId("validated");
         binding.setSourceQueue("Q");
         binding.setMode(com.hcsc.datalake.mqintake.core.config.BindingMode.LAND_ONLY);
-        binding.setHdfsBasePath(BASE + "/validated");
-        binding.setBatchSize(10);
-        binding.setBatchBytes(1024);
-        binding.setBatchIntervalMs(0);
+        binding.getHdfs().setBasePath(BASE + "/validated");
+        binding.getBatch().setSize(10);
+        binding.getBatch().setBytes(1024);
+        binding.getBatch().setIntervalMs(0);
         binding.setListenerThreads(1);
 
         assertThat(validator.validateBindings(List.of(binding))).isEmpty();
@@ -274,10 +274,10 @@ class RealHdfsIntegrationTest {
         binding.setId("absent");
         binding.setSourceQueue("Q");
         binding.setMode(com.hcsc.datalake.mqintake.core.config.BindingMode.LAND_ONLY);
-        binding.setHdfsBasePath("/data/raw/does-not-exist");
-        binding.setBatchSize(10);
-        binding.setBatchBytes(1024);
-        binding.setBatchIntervalMs(0);
+        binding.getHdfs().setBasePath("/data/raw/does-not-exist");
+        binding.getBatch().setSize(10);
+        binding.getBatch().setBytes(1024);
+        binding.getBatch().setIntervalMs(0);
         binding.setListenerThreads(1);
 
         assertThat(validator.validateBindings(List.of(binding)))

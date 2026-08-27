@@ -5,6 +5,18 @@ import com.hcsc.datalake.mqintake.core.failure.DegradationStrategy;
 /**
  * Configuration for a single binding: a self-contained pipeline from
  * one source queue to one HDFS landing path.
+ *
+ * <p>Grouped by concern — {@code batch}, {@code hdfs}, {@code tracker},
+ * {@code backout}, {@code audit}, {@code degradation} — so the YAML reads as
+ * the pipeline's stages and each group can be handed to the collaborator it
+ * configures. Property paths follow the groups
+ * (e.g. {@code intake.bindings[0].batch.size}).
+ *
+ * <p><strong>Migration note (2026-08):</strong> these groups replaced a flat
+ * key set ({@code batch-size}, {@code backout-queue}, …). Legacy flat keys no
+ * longer bind; {@link LegacyBindingKeyDetector} fails startup naming any it
+ * finds, so a stale override surfaces as a refusal to start rather than as a
+ * silently ignored setting.
  */
 public class BindingConfig {
 
@@ -12,96 +24,261 @@ public class BindingConfig {
     private String mqConnection;
     private String sourceQueue;
     private BindingMode mode;
-    private String trackerQueue;
-    private TrackerBodyMode trackerBodyMode = TrackerBodyMode.FULL_COPY;
-    private TrackerFields trackerFields;
-    private String hdfsBasePath;
-    private int batchSize;
-    private long batchBytes;
-    private long batchIntervalMs;
     private int listenerThreads = 1;
 
-    // Poison message handling (§6.1)
-    private String backoutQueue;
-    private int backoutThreshold = 5;
+    private Batch batch = new Batch();
+    private Hdfs hdfs = new Hdfs();
+    private Tracker tracker = new Tracker();
+    private Backout backout = new Backout();
+    private Audit audit = new Audit();
+    private Degradation degradation = new Degradation();
 
-    /**
-     * How often to sample the backout queue's depth, in milliseconds.
-     *
-     * <p>Feeds the gauge DESIGN §14 nominates as the pager condition. Sampling
-     * browses the queue, which is cheap while it is empty — the state we
-     * expect — and capped when it is not. 0 or less disables the monitor, and
-     * with it the backout-depth alert for this binding.
-     */
-    private long backoutDepthPollIntervalMs = 30_000;
+    /** Batch accumulation: when a unit of work is considered full. */
+    public static class Batch {
 
-    /**
-     * Whether to write a sidecar record index beside each landed file.
-     *
-     * <p>Off by default. The index is what lets reconciliation identify the
-     * records in a file, but it is only meaningful when the binding's
-     * serializer supplies a per-message identity. Enabling it for a binding
-     * without one produces an index of nulls, which reconciliation would read
-     * as missing records.
-     */
-    private boolean recordIndexEnabled = false;
+        private int size;
+        private long bytes;
+        private long intervalMs;
 
-    /**
-     * Whether the batch is fsynced to DataNode disks (hsync) before close,
-     * rather than only flushed to the replica pipeline (hflush).
-     *
-     * <p>Default true. hflush makes bytes visible to readers; it does not
-     * force them out of the DataNodes' OS page cache, and neither does a
-     * default close(). Without hsync there is a window after the MQ commit in
-     * which correlated power loss across the replica set loses acknowledged
-     * data. The legacy MDB called hsync() per record and had no such window —
-     * one hsync per batch closes it at a fraction of that cost.
-     *
-     * <p>Set false only for a feed where that narrow window is an acceptable
-     * trade for one less DataNode disk round trip per batch.
-     */
-    private boolean hsyncOnFlush = true;
+        public int getSize() {
+            return size;
+        }
 
-    /**
-     * Whether a tracker build/send failure should fail the whole batch.
-     *
-     * <p>Default false, matching the legacy MDB: it catches and logs tracker
-     * exceptions in both {@code HDFSIngest.forwardToMessageTracker} and
-     * {@code EJBHelper}, so a tracker failure never rolls back the message.
-     * The landed data is kept and that one tracker notification is lost.
-     *
-     * <p>Set true for the stricter reading of §2.2 — tracker and get in one
-     * unit of work, so losing the tracker means replaying the message. That is
-     * safer for the tracker consumer but turns a tracker-side outage into
-     * repeated batch rollbacks on the landing path.
-     *
-     * <p>Note this only governs per-message failures. A broken session or
-     * connection still surfaces at commit and rolls the batch back either way.
-     */
-    private boolean failBatchOnTrackerError = false;
+        public void setSize(int size) {
+            this.size = size;
+        }
 
-    /**
-     * Whether a batch must roll back when its audit record cannot be written.
-     *
-     * <p>Default true, because the audit record is a <em>control</em> under
-     * ABC, not a diagnostic. Committing without one produces data that no
-     * balance can account for: the messages are consumed and gone from the
-     * queue, the file exists, and nothing records that it should. A control
-     * that can be skipped when the audit store is unavailable is not a control.
-     *
-     * <p>Rolling back instead means the messages stay on the queue and are
-     * redelivered, so nothing is lost — ingestion stalls until the audit path
-     * recovers. That is the correct trade for a feed where completeness
-     * matters more than latency.
-     *
-     * <p>Set false only for a feed where an unaudited landing is preferable to
-     * a stall.
-     */
-    private boolean failBatchOnAuditError = true;
+        public long getBytes() {
+            return bytes;
+        }
 
-    // Degraded mode (§6.1)
-    private DegradationStrategy degradationStrategy = DegradationStrategy.BATCH_OF_ONE;
-    private int successesRequiredToRestore = 10;
+        public void setBytes(long bytes) {
+            this.bytes = bytes;
+        }
+
+        public long getIntervalMs() {
+            return intervalMs;
+        }
+
+        public void setIntervalMs(long intervalMs) {
+            this.intervalMs = intervalMs;
+        }
+    }
+
+    /** The HDFS landing: where files go and how durably they are written. */
+    public static class Hdfs {
+
+        private String basePath;
+
+        /**
+         * Whether to write a sidecar record index beside each landed file.
+         *
+         * <p>Off by default. The index is what lets reconciliation identify the
+         * records in a file, but it is only meaningful when the binding's
+         * serializer supplies a per-message identity. Enabling it for a binding
+         * without one produces an index of nulls, which reconciliation would
+         * read as missing records.
+         */
+        private boolean recordIndexEnabled = false;
+
+        /**
+         * Whether the batch is fsynced to DataNode disks (hsync) before close,
+         * rather than only flushed to the replica pipeline (hflush).
+         *
+         * <p>Default true. hflush makes bytes visible to readers; it does not
+         * force them out of the DataNodes' OS page cache, and neither does a
+         * default close(). Without hsync there is a window after the MQ commit
+         * in which correlated power loss across the replica set loses
+         * acknowledged data. The legacy MDB called hsync() per record and had
+         * no such window — one hsync per batch closes it at a fraction of that
+         * cost.
+         *
+         * <p>Set false only for a feed where that narrow window is an
+         * acceptable trade for one less DataNode disk round trip per batch.
+         */
+        private boolean hsyncOnFlush = true;
+
+        public String getBasePath() {
+            return basePath;
+        }
+
+        public void setBasePath(String basePath) {
+            this.basePath = basePath;
+        }
+
+        public boolean isRecordIndexEnabled() {
+            return recordIndexEnabled;
+        }
+
+        public void setRecordIndexEnabled(boolean recordIndexEnabled) {
+            this.recordIndexEnabled = recordIndexEnabled;
+        }
+
+        public boolean isHsyncOnFlush() {
+            return hsyncOnFlush;
+        }
+
+        public void setHsyncOnFlush(boolean hsyncOnFlush) {
+            this.hsyncOnFlush = hsyncOnFlush;
+        }
+    }
+
+    /** Tracker notifications (TRACKED mode only). */
+    public static class Tracker {
+
+        private String queue;
+        private TrackerBodyMode bodyMode = TrackerBodyMode.FULL_COPY;
+        private TrackerFields fields;
+
+        /**
+         * Whether a tracker build/send failure should fail the whole batch.
+         *
+         * <p>Default false, matching the legacy MDB: it catches and logs
+         * tracker exceptions in both {@code HDFSIngest.forwardToMessageTracker}
+         * and {@code EJBHelper}, so a tracker failure never rolls back the
+         * message. The landed data is kept and that one tracker notification
+         * is lost.
+         *
+         * <p>Set true for the stricter reading of §2.2 — tracker and get in one
+         * unit of work, so losing the tracker means replaying the message.
+         * That is safer for the tracker consumer but turns a tracker-side
+         * outage into repeated batch rollbacks on the landing path.
+         *
+         * <p>Note this only governs per-message failures. A broken session or
+         * connection still surfaces at commit and rolls the batch back either
+         * way.
+         */
+        private boolean failBatchOnError = false;
+
+        public String getQueue() {
+            return queue;
+        }
+
+        public void setQueue(String queue) {
+            this.queue = queue;
+        }
+
+        public TrackerBodyMode getBodyMode() {
+            return bodyMode;
+        }
+
+        public void setBodyMode(TrackerBodyMode bodyMode) {
+            this.bodyMode = bodyMode;
+        }
+
+        public TrackerFields getFields() {
+            return fields;
+        }
+
+        public void setFields(TrackerFields fields) {
+            this.fields = fields;
+        }
+
+        public boolean isFailBatchOnError() {
+            return failBatchOnError;
+        }
+
+        public void setFailBatchOnError(boolean failBatchOnError) {
+            this.failBatchOnError = failBatchOnError;
+        }
+    }
+
+    /** Poison message handling (§6.1). */
+    public static class Backout {
+
+        private String queue;
+        private int threshold = 5;
+
+        /**
+         * How often to sample the backout queue's depth, in milliseconds.
+         *
+         * <p>Feeds the gauge DESIGN §14 nominates as the pager condition.
+         * Sampling browses the queue, which is cheap while it is empty — the
+         * state we expect — and capped when it is not. 0 or less disables the
+         * monitor, and with it the backout-depth alert for this binding.
+         */
+        private long depthPollIntervalMs = 30_000;
+
+        public String getQueue() {
+            return queue;
+        }
+
+        public void setQueue(String queue) {
+            this.queue = queue;
+        }
+
+        public int getThreshold() {
+            return threshold;
+        }
+
+        public void setThreshold(int threshold) {
+            this.threshold = threshold;
+        }
+
+        public long getDepthPollIntervalMs() {
+            return depthPollIntervalMs;
+        }
+
+        public void setDepthPollIntervalMs(long depthPollIntervalMs) {
+            this.depthPollIntervalMs = depthPollIntervalMs;
+        }
+    }
+
+    /** The ABC audit control. */
+    public static class Audit {
+
+        /**
+         * Whether a batch must roll back when its audit record cannot be
+         * written.
+         *
+         * <p>Default true, because the audit record is a <em>control</em>
+         * under ABC, not a diagnostic. Committing without one produces data
+         * that no balance can account for: the messages are consumed and gone
+         * from the queue, the file exists, and nothing records that it should.
+         * A control that can be skipped when the audit store is unavailable is
+         * not a control.
+         *
+         * <p>Rolling back instead means the messages stay on the queue and are
+         * redelivered, so nothing is lost — ingestion stalls until the audit
+         * path recovers. That is the correct trade for a feed where
+         * completeness matters more than latency.
+         *
+         * <p>Set false only for a feed where an unaudited landing is
+         * preferable to a stall.
+         */
+        private boolean failBatchOnError = true;
+
+        public boolean isFailBatchOnError() {
+            return failBatchOnError;
+        }
+
+        public void setFailBatchOnError(boolean failBatchOnError) {
+            this.failBatchOnError = failBatchOnError;
+        }
+    }
+
+    /** Degraded batch mode (§6.1). */
+    public static class Degradation {
+
+        private DegradationStrategy strategy = DegradationStrategy.BATCH_OF_ONE;
+        private int successesRequiredToRestore = 10;
+
+        public DegradationStrategy getStrategy() {
+            return strategy;
+        }
+
+        public void setStrategy(DegradationStrategy strategy) {
+            this.strategy = strategy;
+        }
+
+        public int getSuccessesRequiredToRestore() {
+            return successesRequiredToRestore;
+        }
+
+        public void setSuccessesRequiredToRestore(int successesRequiredToRestore) {
+            this.successesRequiredToRestore = successesRequiredToRestore;
+        }
+    }
 
     public String getId() {
         return id;
@@ -135,62 +312,6 @@ public class BindingConfig {
         this.mode = mode;
     }
 
-    public String getTrackerQueue() {
-        return trackerQueue;
-    }
-
-    public void setTrackerQueue(String trackerQueue) {
-        this.trackerQueue = trackerQueue;
-    }
-
-    public TrackerBodyMode getTrackerBodyMode() {
-        return trackerBodyMode;
-    }
-
-    public void setTrackerBodyMode(TrackerBodyMode trackerBodyMode) {
-        this.trackerBodyMode = trackerBodyMode;
-    }
-
-    public TrackerFields getTrackerFields() {
-        return trackerFields;
-    }
-
-    public void setTrackerFields(TrackerFields trackerFields) {
-        this.trackerFields = trackerFields;
-    }
-
-    public String getHdfsBasePath() {
-        return hdfsBasePath;
-    }
-
-    public void setHdfsBasePath(String hdfsBasePath) {
-        this.hdfsBasePath = hdfsBasePath;
-    }
-
-    public int getBatchSize() {
-        return batchSize;
-    }
-
-    public void setBatchSize(int batchSize) {
-        this.batchSize = batchSize;
-    }
-
-    public long getBatchBytes() {
-        return batchBytes;
-    }
-
-    public void setBatchBytes(long batchBytes) {
-        this.batchBytes = batchBytes;
-    }
-
-    public long getBatchIntervalMs() {
-        return batchIntervalMs;
-    }
-
-    public void setBatchIntervalMs(long batchIntervalMs) {
-        this.batchIntervalMs = batchIntervalMs;
-    }
-
     public int getListenerThreads() {
         return listenerThreads;
     }
@@ -199,76 +320,52 @@ public class BindingConfig {
         this.listenerThreads = listenerThreads;
     }
 
-    public String getBackoutQueue() {
-        return backoutQueue;
+    public Batch getBatch() {
+        return batch;
     }
 
-    public boolean isHsyncOnFlush() {
-        return hsyncOnFlush;
+    public void setBatch(Batch batch) {
+        this.batch = batch;
     }
 
-    public void setHsyncOnFlush(boolean hsyncOnFlush) {
-        this.hsyncOnFlush = hsyncOnFlush;
+    public Hdfs getHdfs() {
+        return hdfs;
     }
 
-    public boolean isRecordIndexEnabled() {
-        return recordIndexEnabled;
+    public void setHdfs(Hdfs hdfs) {
+        this.hdfs = hdfs;
     }
 
-    public void setRecordIndexEnabled(boolean recordIndexEnabled) {
-        this.recordIndexEnabled = recordIndexEnabled;
+    public Tracker getTracker() {
+        return tracker;
     }
 
-    public long getBackoutDepthPollIntervalMs() {
-        return backoutDepthPollIntervalMs;
+    public void setTracker(Tracker tracker) {
+        this.tracker = tracker;
     }
 
-    public void setBackoutDepthPollIntervalMs(long backoutDepthPollIntervalMs) {
-        this.backoutDepthPollIntervalMs = backoutDepthPollIntervalMs;
+    public Backout getBackout() {
+        return backout;
     }
 
-    public void setBackoutQueue(String backoutQueue) {
-        this.backoutQueue = backoutQueue;
+    public void setBackout(Backout backout) {
+        this.backout = backout;
     }
 
-    public int getBackoutThreshold() {
-        return backoutThreshold;
+    public Audit getAudit() {
+        return audit;
     }
 
-    public void setBackoutThreshold(int backoutThreshold) {
-        this.backoutThreshold = backoutThreshold;
+    public void setAudit(Audit audit) {
+        this.audit = audit;
     }
 
-    public boolean isFailBatchOnAuditError() {
-        return failBatchOnAuditError;
+    public Degradation getDegradation() {
+        return degradation;
     }
 
-    public void setFailBatchOnAuditError(boolean failBatchOnAuditError) {
-        this.failBatchOnAuditError = failBatchOnAuditError;
-    }
-
-    public boolean isFailBatchOnTrackerError() {
-        return failBatchOnTrackerError;
-    }
-
-    public void setFailBatchOnTrackerError(boolean failBatchOnTrackerError) {
-        this.failBatchOnTrackerError = failBatchOnTrackerError;
-    }
-
-    public DegradationStrategy getDegradationStrategy() {
-        return degradationStrategy;
-    }
-
-    public void setDegradationStrategy(DegradationStrategy degradationStrategy) {
-        this.degradationStrategy = degradationStrategy;
-    }
-
-    public int getSuccessesRequiredToRestore() {
-        return successesRequiredToRestore;
-    }
-
-    public void setSuccessesRequiredToRestore(int successesRequiredToRestore) {
-        this.successesRequiredToRestore = successesRequiredToRestore;
+    public void setDegradation(Degradation degradation) {
+        this.degradation = degradation;
     }
 
     /**
@@ -281,9 +378,9 @@ public class BindingConfig {
     }
 
     /**
-     * Returns the memory footprint of this binding: batchBytes * listenerThreads.
+     * Returns the memory footprint of this binding: batch bytes * listener threads.
      */
     public long getMemoryFootprint() {
-        return batchBytes * listenerThreads;
+        return batch.getBytes() * listenerThreads;
     }
 }

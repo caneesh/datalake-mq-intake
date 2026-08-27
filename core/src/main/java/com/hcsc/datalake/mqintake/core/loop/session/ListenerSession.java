@@ -65,10 +65,10 @@ public class ListenerSession implements AutoCloseable {
         consumer = session.createConsumer(sourceQueue);
 
         if (config.getMode() == BindingMode.TRACKED) {
-            Queue trackerQueue = session.createQueue(config.getTrackerQueue());
+            Queue trackerQueue = session.createQueue(config.getTracker().getQueue());
             trackerProducer = session.createProducer(trackerQueue);
             log.debug("Created tracker producer for binding '{}' on queue '{}'",
-                    config.getId(), config.getTrackerQueue());
+                    config.getId(), config.getTracker().getQueue());
         }
 
         log.info("Initialized session for binding '{}': source='{}', mode={}",

@@ -106,7 +106,7 @@ class BindingConfigValidatorTest {
     @Test
     void trackedBindingWithoutTrackerQueueFails() {
         BindingConfig binding = createValidTrackedBinding("rms");
-        binding.setTrackerQueue(null);
+        binding.getTracker().setQueue(null);
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -118,7 +118,7 @@ class BindingConfigValidatorTest {
     @Test
     void trackedBindingWithBlankTrackerQueueFails() {
         BindingConfig binding = createValidTrackedBinding("rms");
-        binding.setTrackerQueue("   ");
+        binding.getTracker().setQueue("   ");
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -130,7 +130,7 @@ class BindingConfigValidatorTest {
     @Test
     void landOnlyBindingWithTrackerQueueFails() {
         BindingConfig binding = createValidLandOnlyBinding("claims");
-        binding.setTrackerQueue("UNEXPECTED.TRACKER.QUEUE");
+        binding.getTracker().setQueue("UNEXPECTED.TRACKER.QUEUE");
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -142,7 +142,7 @@ class BindingConfigValidatorTest {
     @Test
     void trackedBindingBatchSizeExceedsHalfMaxumsgsFails() {
         BindingConfig binding = createValidTrackedBinding("rms");
-        binding.setBatchSize(6000); // > 10000/2 = 5000
+        binding.getBatch().setSize(6000); // > 10000/2 = 5000
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -154,7 +154,7 @@ class BindingConfigValidatorTest {
     @Test
     void trackedBindingBatchSizeAtExactlyHalfMaxumsgsPasses() {
         BindingConfig binding = createValidTrackedBinding("rms");
-        binding.setBatchSize(5000); // Exactly 10000/2
+        binding.getBatch().setSize(5000); // Exactly 10000/2
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -164,7 +164,7 @@ class BindingConfigValidatorTest {
     @Test
     void landOnlyBindingBatchSizeExceedsMaxumsgsFails() {
         BindingConfig binding = createValidLandOnlyBinding("claims");
-        binding.setBatchSize(11000); // > 10000
+        binding.getBatch().setSize(11000); // > 10000
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -176,7 +176,7 @@ class BindingConfigValidatorTest {
     @Test
     void landOnlyBindingBatchSizeAtExactlyMaxumsgsPasses() {
         BindingConfig binding = createValidLandOnlyBinding("claims");
-        binding.setBatchSize(10000); // Exactly MAXUMSGS
+        binding.getBatch().setSize(10000); // Exactly MAXUMSGS
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -186,7 +186,7 @@ class BindingConfigValidatorTest {
     @Test
     void zeroBatchSizeFails() {
         BindingConfig binding = createValidTrackedBinding("rms");
-        binding.setBatchSize(0);
+        binding.getBatch().setSize(0);
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -198,7 +198,7 @@ class BindingConfigValidatorTest {
     @Test
     void negativeBatchSizeFails() {
         BindingConfig binding = createValidTrackedBinding("rms");
-        binding.setBatchSize(-1);
+        binding.getBatch().setSize(-1);
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -212,11 +212,11 @@ class BindingConfigValidatorTest {
         properties.setAggregateMemoryCeilingBytes(100_000_000L); // 100 MB
 
         BindingConfig binding1 = createValidTrackedBinding("rms");
-        binding1.setBatchBytes(60_000_000L); // 60 MB
+        binding1.getBatch().setBytes(60_000_000L); // 60 MB
         binding1.setListenerThreads(1);
 
         BindingConfig binding2 = createValidLandOnlyBinding("claims");
-        binding2.setBatchBytes(60_000_000L); // 60 MB
+        binding2.getBatch().setBytes(60_000_000L); // 60 MB
         binding2.setListenerThreads(1);
         // Total: 120 MB > 100 MB ceiling
 
@@ -233,7 +233,7 @@ class BindingConfigValidatorTest {
         properties.setAggregateMemoryCeilingBytes(100_000_000L); // 100 MB
 
         BindingConfig binding = createValidTrackedBinding("rms");
-        binding.setBatchBytes(30_000_000L); // 30 MB per thread
+        binding.getBatch().setBytes(30_000_000L); // 30 MB per thread
         binding.setListenerThreads(4); // 4 threads = 120 MB total
 
         properties.setBindings(Collections.singletonList(binding));
@@ -295,7 +295,7 @@ class BindingConfigValidatorTest {
     @Test
     void missingHdfsBasePathFails() {
         BindingConfig binding = createValidTrackedBinding("rms");
-        binding.setHdfsBasePath(null);
+        binding.getHdfs().setBasePath(null);
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -307,7 +307,7 @@ class BindingConfigValidatorTest {
     @Test
     void zeroBatchBytesFails() {
         BindingConfig binding = createValidTrackedBinding("rms");
-        binding.setBatchBytes(0);
+        binding.getBatch().setBytes(0);
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -321,7 +321,7 @@ class BindingConfigValidatorTest {
         BindingConfig binding = createValidTrackedBinding("rms");
         // 0 means "no fixed timer" — the partition boundary remains an
         // unconditional flush trigger, so a batch is still bounded in time.
-        binding.setBatchIntervalMs(0);
+        binding.getBatch().setIntervalMs(0);
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -332,7 +332,7 @@ class BindingConfigValidatorTest {
     @Test
     void negativeBatchIntervalMsFails() {
         BindingConfig binding = createValidTrackedBinding("rms");
-        binding.setBatchIntervalMs(-1);
+        binding.getBatch().setIntervalMs(-1);
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -371,8 +371,8 @@ class BindingConfigValidatorTest {
     @Test
     void multipleErrorsAreAllReported() {
         BindingConfig binding = createValidTrackedBinding("rms");
-        binding.setTrackerQueue(null); // Error 1: TRACKED without tracker queue
-        binding.setBatchSize(6000);    // Error 2: exceeds MAXUMSGS/2
+        binding.getTracker().setQueue(null); // Error 1: TRACKED without tracker queue
+        binding.getBatch().setSize(6000);    // Error 2: exceeds MAXUMSGS/2
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -385,14 +385,14 @@ class BindingConfigValidatorTest {
     @Test
     void trackerBodyModeDefaultsToFullCopy() {
         BindingConfig binding = new BindingConfig();
-        assertThat(binding.getTrackerBodyMode()).isEqualTo(TrackerBodyMode.FULL_COPY);
+        assertThat(binding.getTracker().getBodyMode()).isEqualTo(TrackerBodyMode.FULL_COPY);
     }
 
     @Test
     void backoutQueueWithInvalidThresholdFails() {
         BindingConfig binding = createValidTrackedBinding("rms");
-        binding.setBackoutQueue("MQ.BACKOUT.RMS");
-        binding.setBackoutThreshold(0);
+        binding.getBackout().setQueue("MQ.BACKOUT.RMS");
+        binding.getBackout().setThreshold(0);
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -405,7 +405,7 @@ class BindingConfigValidatorTest {
     @Test
     void zeroSuccessesRequiredToRestoreFails() {
         BindingConfig binding = createValidTrackedBinding("rms");
-        binding.setSuccessesRequiredToRestore(0);
+        binding.getDegradation().setSuccessesRequiredToRestore(0);
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -417,9 +417,9 @@ class BindingConfigValidatorTest {
     @Test
     void validBackoutQueueConfigurationPasses() {
         BindingConfig binding = createValidTrackedBinding("rms");
-        binding.setBackoutQueue("MQ.BACKOUT.RMS");
-        binding.setBackoutThreshold(5);
-        binding.setSuccessesRequiredToRestore(10);
+        binding.getBackout().setQueue("MQ.BACKOUT.RMS");
+        binding.getBackout().setThreshold(5);
+        binding.getDegradation().setSuccessesRequiredToRestore(10);
 
         properties.setBindings(Collections.singletonList(binding));
 
@@ -431,13 +431,13 @@ class BindingConfigValidatorTest {
         binding.setId(id);
         binding.setSourceQueue("MQ.SOURCE." + id.toUpperCase());
         binding.setMode(BindingMode.TRACKED);
-        binding.setTrackerQueue("MQ.TRACKER." + id.toUpperCase());
-        binding.setTrackerBodyMode(TrackerBodyMode.FULL_COPY);
-        binding.setTrackerFields(new TrackerFields("DMIH/DL", "IIB", "RCVD", ""));
-        binding.setHdfsBasePath("/data/raw/" + id);
-        binding.setBatchSize(4000);
-        binding.setBatchBytes(134_217_728L); // 128 MB
-        binding.setBatchIntervalMs(30_000);
+        binding.getTracker().setQueue("MQ.TRACKER." + id.toUpperCase());
+        binding.getTracker().setBodyMode(TrackerBodyMode.FULL_COPY);
+        binding.getTracker().setFields(new TrackerFields("DMIH/DL", "IIB", "RCVD", ""));
+        binding.getHdfs().setBasePath("/data/raw/" + id);
+        binding.getBatch().setSize(4000);
+        binding.getBatch().setBytes(134_217_728L); // 128 MB
+        binding.getBatch().setIntervalMs(30_000);
         binding.setListenerThreads(4);
         return binding;
     }
@@ -447,11 +447,11 @@ class BindingConfigValidatorTest {
         binding.setId(id);
         binding.setSourceQueue("MQ.SOURCE." + id.toUpperCase());
         binding.setMode(BindingMode.LAND_ONLY);
-        binding.setTrackerQueue(null); // No tracker queue for LAND_ONLY
-        binding.setHdfsBasePath("/data/raw/" + id);
-        binding.setBatchSize(8000);
-        binding.setBatchBytes(134_217_728L); // 128 MB
-        binding.setBatchIntervalMs(30_000);
+        binding.getTracker().setQueue(null); // No tracker queue for LAND_ONLY
+        binding.getHdfs().setBasePath("/data/raw/" + id);
+        binding.getBatch().setSize(8000);
+        binding.getBatch().setBytes(134_217_728L); // 128 MB
+        binding.getBatch().setIntervalMs(30_000);
         binding.setListenerThreads(4);
         return binding;
     }
@@ -466,7 +466,7 @@ class BindingConfigValidatorTest {
 
         properties.setAggregateMemoryCeilingBytes(0); // unset -> derive
         BindingConfig binding = createValidLandOnlyBinding("claims");
-        binding.setBatchBytes(600_000_000L);
+        binding.getBatch().setBytes(600_000_000L);
         binding.setListenerThreads(1);
         properties.setBindings(Collections.singletonList(binding));
 
@@ -485,7 +485,7 @@ class BindingConfigValidatorTest {
 
         properties.setAggregateMemoryCeilingBytes(0);
         BindingConfig binding = createValidLandOnlyBinding("claims");
-        binding.setBatchBytes(600_000_000L);
+        binding.getBatch().setBytes(600_000_000L);
         binding.setListenerThreads(1);
         properties.setBindings(Collections.singletonList(binding));
 
@@ -501,7 +501,7 @@ class BindingConfigValidatorTest {
 
         properties.setAggregateMemoryCeilingBytes(1_073_741_824L);
         BindingConfig binding = createValidLandOnlyBinding("claims");
-        binding.setBatchBytes(1_000_000L);
+        binding.getBatch().setBytes(1_000_000L);
         binding.setListenerThreads(1);
         properties.setBindings(Collections.singletonList(binding));
 
@@ -521,12 +521,12 @@ class BindingConfigValidatorTest {
         properties.setAggregateMemoryCeilingBytes(0);
         BindingConfig qm1 = createValidLandOnlyBinding("feed-qm1");
         qm1.setMqConnection("qm1");
-        qm1.setBatchBytes(134_217_728L);
+        qm1.getBatch().setBytes(134_217_728L);
         qm1.setListenerThreads(4);
 
         BindingConfig qm2 = createValidLandOnlyBinding("feed-qm2");
         qm2.setMqConnection("qm2");
-        qm2.setBatchBytes(134_217_728L);
+        qm2.getBatch().setBytes(134_217_728L);
         qm2.setListenerThreads(4);
 
         properties.setBindings(Arrays.asList(qm1, qm2));

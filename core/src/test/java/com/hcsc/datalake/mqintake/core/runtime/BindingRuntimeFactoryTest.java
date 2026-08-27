@@ -181,8 +181,8 @@ class BindingRuntimeFactoryTest {
         BindingRuntimeFactory factory = createFactory(null);
 
         BindingConfig config = createLandOnlyConfig();
-        config.setBackoutQueue("TEST.BACKOUT");
-        config.setBackoutThreshold(5);
+        config.getBackout().setQueue("TEST.BACKOUT");
+        config.getBackout().setThreshold(5);
 
         BindingRuntime runtime = factory.create(config);
 
@@ -205,10 +205,10 @@ class BindingRuntimeFactoryTest {
         config.setMqConnection("test-conn");
         config.setSourceQueue("TEST.SOURCE");
         config.setMode(BindingMode.LAND_ONLY);
-        config.setHdfsBasePath(tempDir.toString());
-        config.setBatchSize(100);
-        config.setBatchBytes(1024 * 1024);
-        config.setBatchIntervalMs(30000);
+        config.getHdfs().setBasePath(tempDir.toString());
+        config.getBatch().setSize(100);
+        config.getBatch().setBytes(1024 * 1024);
+        config.getBatch().setIntervalMs(30000);
         config.setListenerThreads(2);
         return config;
     }
@@ -219,11 +219,11 @@ class BindingRuntimeFactoryTest {
         config.setMqConnection("test-conn");
         config.setSourceQueue("TEST.SOURCE");
         config.setMode(BindingMode.TRACKED);
-        config.setTrackerQueue("TEST.TRACKER");
-        config.setHdfsBasePath(tempDir.toString());
-        config.setBatchSize(100);
-        config.setBatchBytes(1024 * 1024);
-        config.setBatchIntervalMs(30000);
+        config.getTracker().setQueue("TEST.TRACKER");
+        config.getHdfs().setBasePath(tempDir.toString());
+        config.getBatch().setSize(100);
+        config.getBatch().setBytes(1024 * 1024);
+        config.getBatch().setIntervalMs(30000);
         config.setListenerThreads(3);
         return config;
     }

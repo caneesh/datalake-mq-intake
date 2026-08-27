@@ -247,10 +247,10 @@ class ListenerSupervisionTest {
         config.setId("test");
         config.setSourceQueue("TEST.QUEUE");
         config.setMode(BindingMode.LAND_ONLY);
-        config.setHdfsBasePath("/tmp/supervision-test");
-        config.setBatchSize(10);
-        config.setBatchBytes(1024 * 1024);
-        config.setBatchIntervalMs(1000);
+        config.getHdfs().setBasePath("/tmp/supervision-test");
+        config.getBatch().setSize(10);
+        config.getBatch().setBytes(1024 * 1024);
+        config.getBatch().setIntervalMs(1000);
         config.setListenerThreads(tasks.size());
 
         BindingRuntime runtime = new TaskBackedBindingRuntime(config, executor, tasks);

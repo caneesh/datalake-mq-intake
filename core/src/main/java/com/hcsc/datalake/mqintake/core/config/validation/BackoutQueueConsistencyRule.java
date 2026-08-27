@@ -13,14 +13,14 @@ public class BackoutQueueConsistencyRule implements BindingConfigRule {
     public List<String> validate(IntakeProperties properties) {
         List<String> errors = new ArrayList<>();
         for (BindingConfig binding : properties.getBindings()) {
-            boolean hasBackoutQueue = binding.getBackoutQueue() != null
-                    && !binding.getBackoutQueue().isBlank();
+            boolean hasBackoutQueue = binding.getBackout().getQueue() != null
+                    && !binding.getBackout().getQueue().isBlank();
 
-            if (hasBackoutQueue && binding.getBackoutThreshold() <= 0) {
+            if (hasBackoutQueue && binding.getBackout().getThreshold() <= 0) {
                 errors.add("Binding '" + binding.getId()
                         + "' has backout_queue configured but backout_threshold is not positive");
             }
-            if (binding.getSuccessesRequiredToRestore() <= 0) {
+            if (binding.getDegradation().getSuccessesRequiredToRestore() <= 0) {
                 errors.add("Binding '" + binding.getId()
                         + "' successes_required_to_restore must be positive");
             }

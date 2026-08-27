@@ -227,12 +227,12 @@ class ReconciliationSchedulerTest {
         config.setId(id);
         config.setSourceQueue("Q." + id);
         config.setMode(BindingMode.LAND_ONLY);
-        config.setHdfsBasePath("/data/" + id);
-        config.setBatchSize(10);
-        config.setBatchBytes(1024);
-        config.setBatchIntervalMs(0);
+        config.getHdfs().setBasePath("/data/" + id);
+        config.getBatch().setSize(10);
+        config.getBatch().setBytes(1024);
+        config.getBatch().setIntervalMs(0);
         config.setListenerThreads(1);
-        config.setRecordIndexEnabled(recordIndexEnabled);
+        config.getHdfs().setRecordIndexEnabled(recordIndexEnabled);
         return config;
     }
 

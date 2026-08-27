@@ -182,10 +182,10 @@ class ClaimsRuntimeTest {
         config.setMqConnection("primary");
         config.setSourceQueue("MQ.DMIH.CLAIMS.IN");
         config.setMode(BindingMode.LAND_ONLY);
-        config.setHdfsBasePath(tempDir.toString());
-        config.setBatchSize(100);
-        config.setBatchBytes(1024 * 1024);
-        config.setBatchIntervalMs(30000);
+        config.getHdfs().setBasePath(tempDir.toString());
+        config.getBatch().setSize(100);
+        config.getBatch().setBytes(1024 * 1024);
+        config.getBatch().setIntervalMs(30000);
         config.setListenerThreads(4);
         return config;
     }

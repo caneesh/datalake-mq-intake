@@ -547,15 +547,15 @@ class FailureModeTest {
         BindingConfig config = new BindingConfig();
         config.setId(BINDING_ID);
         config.setSourceQueue(SOURCE_QUEUE);
-        config.setHdfsBasePath(basePath);
+        config.getHdfs().setBasePath(basePath);
         config.setMode(mode);
-        config.setBatchSize(batchSize);
-        config.setBatchBytes(10_000_000L);
-        config.setBatchIntervalMs(5000L);
+        config.getBatch().setSize(batchSize);
+        config.getBatch().setBytes(10_000_000L);
+        config.getBatch().setIntervalMs(5000L);
         config.setListenerThreads(1);
 
         if (mode == BindingMode.TRACKED) {
-            config.setTrackerQueue(TRACKER_QUEUE);
+            config.getTracker().setQueue(TRACKER_QUEUE);
         }
 
         return config;

@@ -141,10 +141,10 @@ class SerializerValidatorTest {
         config.setId(id);
         config.setSourceQueue("TEST.QUEUE");
         config.setMode(BindingMode.LAND_ONLY);
-        config.setHdfsBasePath("/test/path");
-        config.setBatchSize(100);
-        config.setBatchBytes(1024);
-        config.setBatchIntervalMs(1000);
+        config.getHdfs().setBasePath("/test/path");
+        config.getBatch().setSize(100);
+        config.getBatch().setBytes(1024);
+        config.getBatch().setIntervalMs(1000);
         config.setListenerThreads(1);
         return config;
     }

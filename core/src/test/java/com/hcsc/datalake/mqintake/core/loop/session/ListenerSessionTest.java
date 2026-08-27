@@ -157,7 +157,7 @@ class ListenerSessionTest {
     private BindingConfig tracked() {
         BindingConfig config = base();
         config.setMode(BindingMode.TRACKED);
-        config.setTrackerQueue("TEST.TRACKER");
+        config.getTracker().setQueue("TEST.TRACKER");
         return config;
     }
 
@@ -165,10 +165,10 @@ class ListenerSessionTest {
         BindingConfig config = new BindingConfig();
         config.setId("test");
         config.setSourceQueue("TEST.SOURCE");
-        config.setHdfsBasePath("/tmp/listener-session");
-        config.setBatchSize(10);
-        config.setBatchBytes(1024 * 1024);
-        config.setBatchIntervalMs(1000);
+        config.getHdfs().setBasePath("/tmp/listener-session");
+        config.getBatch().setSize(10);
+        config.getBatch().setBytes(1024 * 1024);
+        config.getBatch().setIntervalMs(1000);
         config.setListenerThreads(1);
         return config;
     }

@@ -54,36 +54,40 @@ intake:
     - id: claims
       mq-connection: primary
       source-queue: MQ.DMIH.CLAIMS.IN
-      mode: LAND_ONLY
-      # No tracker-queue for LAND_ONLY mode
-      hdfs-base-path: /data/raw/claims/dmih
-      batch-size: 8000          # ≤ MAXUMSGS for LAND_ONLY mode (unit of work is N)
-      batch-bytes: 134217728    # 128 MB
-      # 0 = no fixed timer. Flushes on batch-size, batch-bytes, or the partition
-      # boundary. This matches the legacy writer, which rolls a file only when
-      # its partition path changes, and keeps a quiet window to one file instead
-      # of one per interval. Trade-off: a message can wait until the end of its
-      # quarter-hour window (worst case ~15 min) before landing. Set a positive
-      # value here if a freshness SLA requires it.
-      batch-interval-ms: 0
+      mode: LAND_ONLY           # no tracker group for LAND_ONLY mode
       listener-threads: 4
-      backout-queue: MQ.DMIH.CLAIMS.BACKOUT
-      # BISECT requires backout-threshold >= ceil(log2(batch-size)) + 1 = 14:
-      # while a poison bisects toward isolation, adjacent clean messages
-      # accumulate backout count too; a lower threshold would misroute them.
-      # Set BOTHRESH on the queue manager to match.
-      backout-threshold: 14
-      # Feeds the backout-depth gauge, which DESIGN §14 nominates as the
-      # pager condition. Sampled by browsing (read-only, does not consume).
-      # 0 disables the monitor and with it the alert.
-      backout-depth-poll-interval-ms: 30000
-      # Durability: fsync each batch to DataNode disks before close. hflush
-      # alone leaves bytes in OS page cache after the MQ commit has already
-      # acknowledged the messages; the legacy MDB hsync'd per RECORD. One sync
-      # per batch closes the same window at a fraction of that cost.
-      hsync-on-flush: true
-      degradation-strategy: BISECT  # Claims uses bisection per §6.1
-      successes-required-to-restore: 10
+      batch:
+        size: 8000              # ≤ MAXUMSGS for LAND_ONLY mode (unit of work is N)
+        bytes: 134217728        # 128 MB
+        # 0 = no fixed timer. Flushes on batch size, batch bytes, or the partition
+        # boundary. This matches the legacy writer, which rolls a file only when
+        # its partition path changes, and keeps a quiet window to one file instead
+        # of one per interval. Trade-off: a message can wait until the end of its
+        # quarter-hour window (worst case ~15 min) before landing. Set a positive
+        # value here if a freshness SLA requires it.
+        interval-ms: 0
+      hdfs:
+        base-path: /data/raw/claims/dmih
+        # Durability: fsync each batch to DataNode disks before close. hflush
+        # alone leaves bytes in OS page cache after the MQ commit has already
+        # acknowledged the messages; the legacy MDB hsync'd per RECORD. One sync
+        # per batch closes the same window at a fraction of that cost.
+        hsync-on-flush: true
+      backout:
+        queue: MQ.DMIH.CLAIMS.BACKOUT
+        # BISECT requires threshold >= ceil(log2(batch size)) + 1 = 14:
+        # while a poison bisects toward isolation, adjacent clean messages
+        # accumulate backout count too; a lower threshold would misroute them.
+        # Set BOTHRESH on the queue manager to match.
+        threshold: 14
+        # Feeds the backout-depth gauge, which DESIGN §14 nominates as the
+        # pager condition. Sampled by browsing (read-only, does not consume).
+        # 0 disables the monitor and with it the alert.
+        depth-poll-interval-ms: 30000
+      degradation:
+        strategy: BISECT        # Claims uses bisection per §6.1
+        successes-required-to-restore: 10
+
 
 # Health semantics for an MQ consumer: this service serves no inbound traffic,
 # so the ONLY thing a 503 achieves is a pod restart. DOWN (503) is therefore

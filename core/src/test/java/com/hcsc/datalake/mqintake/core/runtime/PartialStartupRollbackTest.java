@@ -275,10 +275,10 @@ class PartialStartupRollbackTest {
             } catch (java.io.IOException e) {
                 throw new IllegalStateException(e);
             }
-            binding.setHdfsBasePath(base);
-            binding.setBatchSize(10);
-            binding.setBatchBytes(1024 * 1024);
-            binding.setBatchIntervalMs(1000);
+            binding.getHdfs().setBasePath(base);
+            binding.getBatch().setSize(10);
+            binding.getBatch().setBytes(1024 * 1024);
+            binding.getBatch().setIntervalMs(1000);
             binding.setListenerThreads(1);
             bindings.add(binding);
         }

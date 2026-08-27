@@ -204,7 +204,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         for (BindingConfig binding : properties.getBindings()) {
             try {
                 StartupValidator validator = new StartupValidator(fileSystem, resolvedInstanceId);
-                int deleted = validator.cleanupInstanceTempFiles(binding.getHdfsBasePath(), maxAge);
+                int deleted = validator.cleanupInstanceTempFiles(binding.getHdfs().getBasePath(), maxAge);
                 if (deleted > 0) {
                     log.info("Cleaned up {} stale temp files for binding '{}'", deleted, binding.getId());
                 }

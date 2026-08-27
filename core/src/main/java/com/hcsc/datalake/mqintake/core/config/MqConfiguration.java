@@ -99,9 +99,9 @@ public class MqConfiguration {
             }
 
             if (binding.getMode() == BindingMode.TRACKED) {
-                if (binding.getTrackerQueue() == null || binding.getTrackerQueue().isBlank()) {
+                if (binding.getTracker().getQueue() == null || binding.getTracker().getQueue().isBlank()) {
                     throw new IllegalStateException(
-                            "TRACKED binding '" + binding.getId() + "' requires tracker-queue");
+                            "TRACKED binding '" + binding.getId() + "' requires tracker.queue");
                 }
             }
 

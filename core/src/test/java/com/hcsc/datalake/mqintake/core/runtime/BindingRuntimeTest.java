@@ -190,10 +190,10 @@ class BindingRuntimeTest {
         config.setId("test-land-only");
         config.setSourceQueue(SOURCE_QUEUE);
         config.setMode(BindingMode.LAND_ONLY);
-        config.setHdfsBasePath("/data/raw/test");
-        config.setBatchSize(100);
-        config.setBatchBytes(1024 * 1024);
-        config.setBatchIntervalMs(30000);
+        config.getHdfs().setBasePath("/data/raw/test");
+        config.getBatch().setSize(100);
+        config.getBatch().setBytes(1024 * 1024);
+        config.getBatch().setIntervalMs(30000);
         config.setListenerThreads(threads);
         return config;
     }
@@ -203,11 +203,11 @@ class BindingRuntimeTest {
         config.setId("test-tracked");
         config.setSourceQueue(SOURCE_QUEUE);
         config.setMode(BindingMode.TRACKED);
-        config.setTrackerQueue(TRACKER_QUEUE);
-        config.setHdfsBasePath("/data/raw/test");
-        config.setBatchSize(100);
-        config.setBatchBytes(1024 * 1024);
-        config.setBatchIntervalMs(30000);
+        config.getTracker().setQueue(TRACKER_QUEUE);
+        config.getHdfs().setBasePath("/data/raw/test");
+        config.getBatch().setSize(100);
+        config.getBatch().setBytes(1024 * 1024);
+        config.getBatch().setIntervalMs(30000);
         config.setListenerThreads(threads);
         return config;
     }

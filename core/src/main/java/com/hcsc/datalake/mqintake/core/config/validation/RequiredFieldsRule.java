@@ -32,13 +32,13 @@ public class RequiredFieldsRule implements BindingConfigRule {
             }
 
             requireText(binding.getSourceQueue(), prefix, "source_queue", errors);
-            requireText(binding.getHdfsBasePath(), prefix, "hdfs_base_path", errors);
+            requireText(binding.getHdfs().getBasePath(), prefix, "hdfs_base_path", errors);
 
             if (binding.getMode() == null) {
                 errors.add(prefix + " missing required field: mode");
             }
 
-            if (binding.getBatchBytes() <= 0) {
+            if (binding.getBatch().getBytes() <= 0) {
                 errors.add(prefix + " batch_bytes must be positive");
             }
             if (binding.getListenerThreads() <= 0) {
@@ -48,7 +48,7 @@ public class RequiredFieldsRule implements BindingConfigRule {
             // 0 disables the fixed timer, leaving the partition boundary as the
             // only time-based flush trigger (§7.1 cadence, matching the legacy
             // writer's roll-on-path-change behaviour). Negative is meaningless.
-            if (binding.getBatchIntervalMs() < 0) {
+            if (binding.getBatch().getIntervalMs() < 0) {
                 errors.add(prefix + " batch_interval_ms must not be negative "
                         + "(0 disables the fixed timer; the partition boundary still flushes)");
             }
@@ -56,7 +56,7 @@ public class RequiredFieldsRule implements BindingConfigRule {
             // 0 disables backout-depth sampling. Allowed, but it silently
             // removes the alert DESIGN §14 nominates as the pager condition,
             // so it should be a deliberate choice rather than a typo.
-            if (binding.getBackoutDepthPollIntervalMs() < 0) {
+            if (binding.getBackout().getDepthPollIntervalMs() < 0) {
                 errors.add(prefix + " backout_depth_poll_interval_ms must not be negative "
                         + "(0 disables backout-depth monitoring and its alert)");
             }

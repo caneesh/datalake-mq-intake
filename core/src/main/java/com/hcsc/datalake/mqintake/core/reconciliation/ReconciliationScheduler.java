@@ -173,12 +173,12 @@ public class ReconciliationScheduler implements AutoCloseable {
             PartitionReconciliationService.ReconciliationReport report =
                     reconciliationService.reconcilePartition(
                             binding.getId(),
-                            binding.getHdfsBasePath(),
+                            binding.getHdfs().getBasePath(),
                             window,
                             // Identity is only trustworthy where the sidecar
                             // index is written; without it reconciliation
                             // correctly refuses rather than guessing.
-                            binding.isRecordIndexEnabled(),
+                            binding.getHdfs().isRecordIndexEnabled(),
                             config.isQuarantineDuplicates(),
                             metrics);
 

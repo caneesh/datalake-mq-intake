@@ -91,7 +91,7 @@ public class StartupValidator {
      */
     private List<String> validateBinding(BindingConfig binding) {
         List<String> errors = new ArrayList<>();
-        String basePath = binding.getHdfsBasePath();
+        String basePath = binding.getHdfs().getBasePath();
         String bindingId = binding.getId();
 
         // Validate base path exists and is writable

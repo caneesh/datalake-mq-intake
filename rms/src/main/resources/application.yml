@@ -55,42 +55,48 @@ intake:
       mq-connection: primary
       source-queue: MQ.HPS.MEMBERSHIP.IN
       mode: TRACKED
-      tracker-queue: MQ.HPS.MEMBERSHIP.TRACKER
-      tracker-body-mode: FULL_COPY
-      tracker-fields:
-        reporting-system: DMIH/DL
-        source-system: IIB
-        message-status: RCVD
-        destination-status: ""
-      hdfs-base-path: /data/raw/membership/hps
-      batch-size: 4000          # ≤ MAXUMSGS/2 for TRACKED mode (unit of work is 2N)
-      batch-bytes: 134217728    # 128 MB
-      # 0 = no fixed timer. Flushes on batch-size, batch-bytes, or the partition
-      # boundary. This matches the legacy writer, which rolls a file only when
-      # its partition path changes, and keeps a quiet window to one file instead
-      # of one per interval. Trade-off: a message can wait until the end of its
-      # quarter-hour window (worst case ~15 min) before landing. Set a positive
-      # value here if a freshness SLA requires it.
-      batch-interval-ms: 0
       listener-threads: 4
-      backout-queue: MQ.HPS.MEMBERSHIP.BACKOUT
-      backout-threshold: 5
-      # Feeds the backout-depth gauge, which DESIGN §14 nominates as the
-      # pager condition. Sampled by browsing (read-only, does not consume).
-      # 0 disables the monitor and with it the alert.
-      backout-depth-poll-interval-ms: 30000
-      # Sidecar index: RMS payloads carry <MessageID>, a per-message UUID, so
-      # an index of identities is meaningful here. Claims deliberately leaves
-      # this off — its per-message key is still an open question, and an index
-      # of nulls would read as missing records.
-      record-index-enabled: true
-      # Durability: fsync each batch to DataNode disks before close. hflush
-      # alone leaves bytes in OS page cache after the MQ commit has already
-      # acknowledged the messages; the legacy MDB hsync'd per RECORD. One sync
-      # per batch closes the same window at a fraction of that cost.
-      hsync-on-flush: true
-      degradation-strategy: BATCH_OF_ONE
-      successes-required-to-restore: 10
+      batch:
+        size: 4000              # ≤ MAXUMSGS/2 for TRACKED mode (unit of work is 2N)
+        bytes: 134217728        # 128 MB
+        # 0 = no fixed timer. Flushes on batch size, batch bytes, or the partition
+        # boundary. This matches the legacy writer, which rolls a file only when
+        # its partition path changes, and keeps a quiet window to one file instead
+        # of one per interval. Trade-off: a message can wait until the end of its
+        # quarter-hour window (worst case ~15 min) before landing. Set a positive
+        # value here if a freshness SLA requires it.
+        interval-ms: 0
+      hdfs:
+        base-path: /data/raw/membership/hps
+        # Sidecar index: RMS payloads carry <MessageID>, a per-message UUID, so
+        # an index of identities is meaningful here. Claims deliberately leaves
+        # this off — its per-message key is still an open question, and an index
+        # of nulls would read as missing records.
+        record-index-enabled: true
+        # Durability: fsync each batch to DataNode disks before close. hflush
+        # alone leaves bytes in OS page cache after the MQ commit has already
+        # acknowledged the messages; the legacy MDB hsync'd per RECORD. One sync
+        # per batch closes the same window at a fraction of that cost.
+        hsync-on-flush: true
+      tracker:
+        queue: MQ.HPS.MEMBERSHIP.TRACKER
+        body-mode: FULL_COPY
+        fields:
+          reporting-system: DMIH/DL
+          source-system: IIB
+          message-status: RCVD
+          destination-status: ""
+      backout:
+        queue: MQ.HPS.MEMBERSHIP.BACKOUT
+        threshold: 5
+        # Feeds the backout-depth gauge, which DESIGN §14 nominates as the
+        # pager condition. Sampled by browsing (read-only, does not consume).
+        # 0 disables the monitor and with it the alert.
+        depth-poll-interval-ms: 30000
+      degradation:
+        strategy: BATCH_OF_ONE
+        successes-required-to-restore: 10
+
 
 # Health semantics for an MQ consumer: this service serves no inbound traffic,
 # so the ONLY thing a 503 achieves is a pod restart. DOWN (503) is therefore

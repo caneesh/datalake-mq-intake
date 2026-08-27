@@ -28,15 +28,15 @@ public class BatchSizeRule implements BindingConfigRule {
             }
 
             int maxAllowed = binding.getMaxBatchSizeFor(maxumsgs);
-            if (binding.getBatchSize() > maxAllowed) {
+            if (binding.getBatch().getSize() > maxAllowed) {
                 String modeExplanation = binding.getMode() == BindingMode.TRACKED
                         ? "MAXUMSGS/2 = " + maxAllowed + " (unit of work is 2N)"
                         : "MAXUMSGS = " + maxAllowed;
                 errors.add("Binding '" + binding.getId() + "' batch_size "
-                        + binding.getBatchSize() + " exceeds " + modeExplanation);
+                        + binding.getBatch().getSize() + " exceeds " + modeExplanation);
             }
 
-            if (binding.getBatchSize() <= 0) {
+            if (binding.getBatch().getSize() <= 0) {
                 errors.add("Binding '" + binding.getId() + "' batch_size must be positive");
             }
         }

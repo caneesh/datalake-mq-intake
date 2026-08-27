@@ -63,7 +63,7 @@ class BindingConfigRuleTest {
 
         BindingConfig landOnlyWith = binding("claims");
         landOnlyWith.setMode(BindingMode.LAND_ONLY);
-        landOnlyWith.setTrackerQueue("SOME.TRACKER");
+        landOnlyWith.getTracker().setQueue("SOME.TRACKER");
         assertThat(rule.validate(propertiesWith(landOnlyWith)))
                 .singleElement().asString().contains("must not configure a tracker_queue");
     }
@@ -89,8 +89,8 @@ class BindingConfigRuleTest {
 
         BindingConfig tracked = binding("rms");
         tracked.setMode(BindingMode.TRACKED);
-        tracked.setTrackerQueue("T");
-        tracked.setBatchSize(6000);
+        tracked.getTracker().setQueue("T");
+        tracked.getBatch().setSize(6000);
 
         IntakeProperties properties = propertiesWith(tracked);
         properties.setMaxumsgs(10_000);
@@ -98,7 +98,7 @@ class BindingConfigRuleTest {
         assertThat(rule.validate(properties))
                 .singleElement().asString().contains("MAXUMSGS/2");
 
-        tracked.setBatchSize(5000);
+        tracked.getBatch().setSize(5000);
         assertThat(rule.validate(properties)).isEmpty();
     }
 
@@ -114,17 +114,17 @@ class BindingConfigRuleTest {
         BindingConfigRule rule = new BisectBackoutThresholdRule();
 
         BindingConfig claims = binding("claims");
-        claims.setDegradationStrategy(DegradationStrategy.BISECT);
-        claims.setBackoutQueue("BOQ");
-        claims.setBatchSize(8000);
-        claims.setBackoutThreshold(5);
+        claims.getDegradation().setStrategy(DegradationStrategy.BISECT);
+        claims.getBackout().setQueue("BOQ");
+        claims.getBatch().setSize(8000);
+        claims.getBackout().setThreshold(5);
 
         assertThat(rule.validate(propertiesWith(claims)))
                 .singleElement().asString()
                 .contains("required minimum 14")
                 .contains("misrouted to the backout queue");
 
-        claims.setBackoutThreshold(14);
+        claims.getBackout().setThreshold(14);
         assertThat(rule.validate(propertiesWith(claims))).isEmpty();
     }
 
@@ -133,9 +133,9 @@ class BindingConfigRuleTest {
         BindingConfigRule rule = new BisectBackoutThresholdRule();
 
         BindingConfig noBoq = binding("x");
-        noBoq.setDegradationStrategy(DegradationStrategy.BISECT);
-        noBoq.setBatchSize(8000);
-        noBoq.setBackoutThreshold(1);
+        noBoq.getDegradation().setStrategy(DegradationStrategy.BISECT);
+        noBoq.getBatch().setSize(8000);
+        noBoq.getBackout().setThreshold(1);
 
         assertThat(rule.validate(propertiesWith(noBoq))).isEmpty();
     }
@@ -146,7 +146,7 @@ class BindingConfigRuleTest {
         BindingConfigRule rule = new AggregateMemoryRule(() -> 1_073_741_824L);
 
         BindingConfig big = binding("big");
-        big.setBatchBytes(400L * 1024 * 1024);
+        big.getBatch().setBytes(400L * 1024 * 1024);
         big.setListenerThreads(2);           // 800 MB > 512 MB
 
         assertThat(rule.validate(propertiesWith(big)))
@@ -174,10 +174,10 @@ class BindingConfigRuleTest {
         BindingConfigRule rule = new AggregateMemoryRule(() -> 1_073_741_824L);
 
         BindingConfig a = binding("rms");
-        a.setBatchBytes(300L * 1024 * 1024);
+        a.getBatch().setBytes(300L * 1024 * 1024);
         a.setListenerThreads(1);
         BindingConfig b = binding("claims");
-        b.setBatchBytes(300L * 1024 * 1024);
+        b.getBatch().setBytes(300L * 1024 * 1024);
         b.setListenerThreads(1);
 
         assertThat(rule.validate(propertiesWith(a, b)))
@@ -200,8 +200,8 @@ class BindingConfigRuleTest {
         // them one restart at a time.
         BindingConfig broken = binding("broken");
         broken.setSourceQueue(null);
-        broken.setHdfsBasePath(null);
-        broken.setBatchBytes(0);
+        broken.getHdfs().setBasePath(null);
+        broken.getBatch().setBytes(0);
         broken.setListenerThreads(0);
 
         assertThat(new RequiredFieldsRule().validate(propertiesWith(broken)))
@@ -276,7 +276,7 @@ class BindingConfigRuleTest {
 
         BindingConfig a = binding("a");
         BindingConfig b = binding("b");
-        b.setBackoutQueue(a.getSourceQueue());   // same connection
+        b.getBackout().setQueue(a.getSourceQueue());   // same connection
 
         assertThat(rule.validate(propertiesWith(a, b)))
                 .singleElement().asString()
@@ -293,10 +293,10 @@ class BindingConfigRuleTest {
 
         BindingConfig a = binding("a");
         a.setMode(BindingMode.TRACKED);
-        a.setTrackerQueue("SHARED.TRACKER");
+        a.getTracker().setQueue("SHARED.TRACKER");
         BindingConfig b = binding("b");
         b.setMode(BindingMode.TRACKED);
-        b.setTrackerQueue("SHARED.TRACKER");
+        b.getTracker().setQueue("SHARED.TRACKER");
 
         assertThat(rule.validate(propertiesWith(a, b)))
                 .singleElement().asString()
@@ -310,7 +310,7 @@ class BindingConfigRuleTest {
         BindingConfig a = binding("a");
         BindingConfig b = binding("b");
         b.setMode(BindingMode.TRACKED);
-        b.setTrackerQueue(a.getSourceQueue());
+        b.getTracker().setQueue(a.getSourceQueue());
 
         assertThat(rule.validate(propertiesWith(a, b)))
                 .singleElement().asString()
@@ -351,10 +351,10 @@ class BindingConfigRuleTest {
         config.setMqConnection("primary");
         config.setSourceQueue("QUEUE." + id);
         config.setMode(BindingMode.LAND_ONLY);
-        config.setHdfsBasePath("/data/" + id);
-        config.setBatchSize(100);
-        config.setBatchBytes(1024 * 1024);
-        config.setBatchIntervalMs(1000);
+        config.getHdfs().setBasePath("/data/" + id);
+        config.getBatch().setSize(100);
+        config.getBatch().setBytes(1024 * 1024);
+        config.getBatch().setIntervalMs(1000);
         config.setListenerThreads(1);
         return config;
     }

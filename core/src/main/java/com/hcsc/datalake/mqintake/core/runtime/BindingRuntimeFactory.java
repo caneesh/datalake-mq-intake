@@ -181,9 +181,9 @@ public class BindingRuntimeFactory {
                 fileSystem, hadoopConf, serializer, instanceId,
                 java.time.Clock.systemUTC(),
                 org.apache.hadoop.io.SequenceFile.CompressionType.RECORD,
-                java.util.Map.of(config.getId(), config.getHdfsBasePath()),
+                java.util.Map.of(config.getId(), config.getHdfs().getBasePath()),
                 createRecordIndexWriter(config),
-                config.isHsyncOnFlush());
+                config.getHdfs().isHsyncOnFlush());
     }
 
     /**
@@ -195,7 +195,7 @@ public class BindingRuntimeFactory {
      * records look like losses.
      */
     private RecordIndexWriter createRecordIndexWriter(BindingConfig config) {
-        if (!config.isRecordIndexEnabled()) {
+        if (!config.getHdfs().isRecordIndexEnabled()) {
             return RecordIndexWriter.disabled();
         }
         log.info("Record index enabled for binding '{}'", config.getId());
@@ -213,12 +213,12 @@ public class BindingRuntimeFactory {
     }
 
     private PoisonMessageHandler createPoisonHandler(BindingConfig config) {
-        if (config.getBackoutQueue() == null || config.getBackoutQueue().isBlank()) {
+        if (config.getBackout().getQueue() == null || config.getBackout().getQueue().isBlank()) {
             return null;
         }
         return new PoisonMessageHandler(
-                config.getBackoutThreshold(),
-                config.getBackoutQueue());
+                config.getBackout().getThreshold(),
+                config.getBackout().getQueue());
     }
 
     /**
@@ -228,15 +228,15 @@ public class BindingRuntimeFactory {
     private BackoutQueueDepthMonitor createBackoutDepthMonitor(BindingConfig config,
                                                                Connection jmsConnection,
                                                                BindingMetrics metrics) {
-        if (config.getBackoutQueue() == null || config.getBackoutQueue().isBlank()) {
+        if (config.getBackout().getQueue() == null || config.getBackout().getQueue().isBlank()) {
             return null;
         }
         return new BackoutQueueDepthMonitor(
                 config.getId(),
-                config.getBackoutQueue(),
+                config.getBackout().getQueue(),
                 jmsConnection,
                 metrics,
-                config.getBackoutDepthPollIntervalMs());
+                config.getBackout().getDepthPollIntervalMs());
     }
 
     private List<TransactedReceiveLoop> createLoops(BindingConfig config,
@@ -253,9 +253,9 @@ public class BindingRuntimeFactory {
         // degraded batch sizes until the binding recovers.
         DegradedModeManager degradedModeManager = new DegradedModeManager(
                 config.getId(),
-                config.getBatchSize(),
-                config.getDegradationStrategy(),
-                config.getSuccessesRequiredToRestore());
+                config.getBatch().getSize(),
+                config.getDegradation().getStrategy(),
+                config.getDegradation().getSuccessesRequiredToRestore());
 
         for (int i = 0; i < config.getListenerThreads(); i++) {
             TransactedReceiveLoop loop = new TransactedReceiveLoop(

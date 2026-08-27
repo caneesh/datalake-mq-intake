@@ -78,15 +78,15 @@ class BasicMqToHdfsDemoTest {
         config.setId("demo");
         config.setSourceQueue(QUEUE);
         config.setMode(BindingMode.LAND_ONLY);
-        config.setHdfsBasePath(landing.toString());
-        config.setBatchSize(3);
-        config.setBatchBytes(64L * 1024 * 1024);
-        config.setBatchIntervalMs(500);
+        config.getHdfs().setBasePath(landing.toString());
+        config.getBatch().setSize(3);
+        config.getBatch().setBytes(64L * 1024 * 1024);
+        config.getBatch().setIntervalMs(500);
         config.setListenerThreads(1);
 
         BatchWriter writer = new SequenceFileBatchWriter(
                 fs, conf, new RmsRecordSerializer(), "demo-instance",
-                config.getId(), config.getHdfsBasePath());
+                config.getId(), config.getHdfs().getBasePath());
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
                 config, connection, writer, null, null, null, null, null, null,

@@ -230,7 +230,7 @@ class IbmMqFailureIntegrationTest {
         // deterministically on the poison payload (DESIGN §15.7)
         BatchWriter writer = new SequenceFileBatchWriter(
                 fileSystem, hadoopConf, new PoisonSensitiveSerializer(),
-                "it-instance", config.getId(), config.getHdfsBasePath());
+                "it-instance", config.getId(), config.getHdfs().getBasePath());
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
                 config, connection, writer, null,
@@ -270,7 +270,7 @@ class IbmMqFailureIntegrationTest {
 
         BatchWriter writer = new SequenceFileBatchWriter(
                 fileSystem, hadoopConf, new PoisonSensitiveSerializer(),
-                "it-instance", config.getId(), config.getHdfsBasePath());
+                "it-instance", config.getId(), config.getHdfs().getBasePath());
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
                 config, connection, writer, null, null, null,
@@ -333,13 +333,13 @@ class IbmMqFailureIntegrationTest {
         // flushing, so the first three messages are still inside an
         // uncommitted transaction when the queue manager goes down.
         BindingConfig config = bindingConfig(5, 5);
-        config.setBatchIntervalMs(600_000);
+        config.getBatch().setIntervalMs(600_000);
         BindingHealthManager health = new BindingHealthManager();
         BindingMetrics metrics = new BindingMetrics("rms-it");
 
         BatchWriter writer = new SequenceFileBatchWriter(
                 fileSystem, hadoopConf, new PoisonSensitiveSerializer(),
-                "it-instance", config.getId(), config.getHdfsBasePath());
+                "it-instance", config.getId(), config.getHdfs().getBasePath());
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
                 config, connection, writer, null, null, null,
@@ -458,20 +458,20 @@ class IbmMqFailureIntegrationTest {
         config.setMqConnection("primary");
         config.setSourceQueue(SOURCE_QUEUE);
         config.setMode(BindingMode.LAND_ONLY);
-        config.setHdfsBasePath(tempDir.resolve("data").toString());
-        config.setBatchSize(batchSize);
-        config.setBatchBytes(64 * 1024 * 1024);
-        config.setBatchIntervalMs(500);
+        config.getHdfs().setBasePath(tempDir.resolve("data").toString());
+        config.getBatch().setSize(batchSize);
+        config.getBatch().setBytes(64 * 1024 * 1024);
+        config.getBatch().setIntervalMs(500);
         config.setListenerThreads(1);
-        config.setBackoutQueue(BACKOUT_QUEUE);
-        config.setBackoutThreshold(backoutThreshold);
-        config.setDegradationStrategy(DegradationStrategy.BISECT);
+        config.getBackout().setQueue(BACKOUT_QUEUE);
+        config.getBackout().setThreshold(backoutThreshold);
+        config.getDegradation().setStrategy(DegradationStrategy.BISECT);
         return config;
     }
 
     private Set<String> landedIdentities(BindingConfig config) throws Exception {
         Set<String> identities = new HashSet<>();
-        org.apache.hadoop.fs.Path base = new org.apache.hadoop.fs.Path(config.getHdfsBasePath());
+        org.apache.hadoop.fs.Path base = new org.apache.hadoop.fs.Path(config.getHdfs().getBasePath());
         if (!fileSystem.exists(base)) {
             return identities;
         }

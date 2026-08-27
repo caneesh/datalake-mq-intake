@@ -84,7 +84,7 @@ class MqConfigurationTest {
     void trackedBindingRequiresTrackerQueue() {
         IntakeProperties props = new IntakeProperties();
         BindingConfig binding = createBinding("test", "primary", BindingMode.TRACKED);
-        binding.setTrackerQueue(null);
+        binding.getTracker().setQueue(null);
         props.setBindings(List.of(binding));
 
         MqConnectionConfig config = createMqConfig("primary", "localhost", 1414);
@@ -96,14 +96,14 @@ class MqConfigurationTest {
         IllegalStateException ex = assertThrows(IllegalStateException.class, validator::validate);
 
         assertTrue(ex.getMessage().contains("TRACKED"));
-        assertTrue(ex.getMessage().contains("tracker-queue"));
+        assertTrue(ex.getMessage().contains("tracker.queue"));
     }
 
     @Test
     void trackedBindingWithBlankTrackerQueueFails() {
         IntakeProperties props = new IntakeProperties();
         BindingConfig binding = createBinding("test", "primary", BindingMode.TRACKED);
-        binding.setTrackerQueue("   ");
+        binding.getTracker().setQueue("   ");
         props.setBindings(List.of(binding));
 
         MqConnectionConfig config = createMqConfig("primary", "localhost", 1414);
@@ -114,14 +114,14 @@ class MqConfigurationTest {
 
         IllegalStateException ex = assertThrows(IllegalStateException.class, validator::validate);
 
-        assertTrue(ex.getMessage().contains("tracker-queue"));
+        assertTrue(ex.getMessage().contains("tracker.queue"));
     }
 
     @Test
     void trackedBindingWithTrackerQueuePasses() {
         IntakeProperties props = new IntakeProperties();
         BindingConfig binding = createBinding("test", "primary", BindingMode.TRACKED);
-        binding.setTrackerQueue("TRACKER.Q");
+        binding.getTracker().setQueue("TRACKER.Q");
         props.setBindings(List.of(binding));
 
         MqConnectionConfig config = createMqConfig("primary", "localhost", 1414);
@@ -137,7 +137,7 @@ class MqConfigurationTest {
     void landOnlyBindingDoesNotRequireTrackerQueue() {
         IntakeProperties props = new IntakeProperties();
         BindingConfig binding = createBinding("test", "primary", BindingMode.LAND_ONLY);
-        binding.setTrackerQueue(null);
+        binding.getTracker().setQueue(null);
         props.setBindings(List.of(binding));
 
         MqConnectionConfig config = createMqConfig("primary", "localhost", 1414);
@@ -243,10 +243,10 @@ class MqConfigurationTest {
         binding.setMqConnection(mqConnection);
         binding.setMode(mode);
         binding.setSourceQueue("TEST.Q");
-        binding.setHdfsBasePath("/data/test");
-        binding.setBatchSize(100);
-        binding.setBatchBytes(1024 * 1024);
-        binding.setBatchIntervalMs(1000);
+        binding.getHdfs().setBasePath("/data/test");
+        binding.getBatch().setSize(100);
+        binding.getBatch().setBytes(1024 * 1024);
+        binding.getBatch().setIntervalMs(1000);
         return binding;
     }
 

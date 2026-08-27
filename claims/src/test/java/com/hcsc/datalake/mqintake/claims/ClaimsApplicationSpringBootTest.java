@@ -52,18 +52,18 @@ class ClaimsApplicationSpringBootTest {
         registry.add("intake.bindings[0].mq-connection", () -> "primary");
         registry.add("intake.bindings[0].source-queue", () -> SOURCE_QUEUE);
         registry.add("intake.bindings[0].mode", () -> "LAND_ONLY");
-        registry.add("intake.bindings[0].hdfs-base-path", () -> dataDir.toString());
-        registry.add("intake.bindings[0].batch-size", () -> 4);
-        registry.add("intake.bindings[0].batch-bytes", () -> 64 * 1024 * 1024);
-        registry.add("intake.bindings[0].batch-interval-ms", () -> 400);
+        registry.add("intake.bindings[0].hdfs.base-path", () -> dataDir.toString());
+        registry.add("intake.bindings[0].batch.size", () -> 4);
+        registry.add("intake.bindings[0].batch.bytes", () -> 64 * 1024 * 1024);
+        registry.add("intake.bindings[0].batch.interval-ms", () -> 400);
         registry.add("intake.bindings[0].listener-threads", () -> 2);
-        registry.add("intake.bindings[0].backout-queue", () -> "MQ.DMIH.CLAIMS.BACKOUT");
+        registry.add("intake.bindings[0].backout.queue", () -> "MQ.DMIH.CLAIMS.BACKOUT");
         // Production default is 30s; sampled fast here so the test does not
         // have to wait out a real interval
-        registry.add("intake.bindings[0].backout-depth-poll-interval-ms", () -> 200);
+        registry.add("intake.bindings[0].backout.depth-poll-interval-ms", () -> 200);
         // BISECT with batch 4 requires threshold >= ceil(log2(4)) + 1 = 3
-        registry.add("intake.bindings[0].backout-threshold", () -> 3);
-        registry.add("intake.bindings[0].degradation-strategy", () -> "BISECT");
+        registry.add("intake.bindings[0].backout.threshold", () -> 3);
+        registry.add("intake.bindings[0].degradation.strategy", () -> "BISECT");
         registry.add("intake.hdfs.audit-base-path", () -> auditDir.toString());
         registry.add("intake.instance-id", () -> "claims-sbt");
     }
