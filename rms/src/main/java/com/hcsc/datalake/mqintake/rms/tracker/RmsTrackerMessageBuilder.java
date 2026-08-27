@@ -50,9 +50,11 @@ public class RmsTrackerMessageBuilder implements TrackerMessageBuilder {
      * rewrite is contract-complete (§20.4). An empty list means the contract
      * is ready for production.
      *
-     * <p>Derived from evidence in this class: an empty {@code TAG_LIST} and
-     * placeholder {@code processTag} mean the legacy transformation cannot be
-     * reproduced exactly.
+     * <p>Each gap is derived from the evidence flags in {@link HeaderRewriter}
+     * ({@code TAG_LIST}, {@code ROOT_END_TAG_VERIFIED}, …), which are set as
+     * legacy artifacts are captured and verified. The production startup gate
+     * reads this list, so a regression in captured evidence fails startup
+     * rather than silently shipping a divergent rewrite.
      */
     public static java.util.List<String> trackerContractGaps() {
         java.util.List<String> gaps = new java.util.ArrayList<>();

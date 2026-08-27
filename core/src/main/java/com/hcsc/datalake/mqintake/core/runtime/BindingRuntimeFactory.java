@@ -157,7 +157,6 @@ public class BindingRuntimeFactory {
         String mqConnId = config.getMqConnection();
         try {
             Connection connection = mqConnectionManager.getConnection(mqConnId);
-            Optional<MqConnectionConfig> mqConfig = mqConnectionManager.getConfig(mqConnId);
             log.debug("Obtained connection for binding '{}' from mq-connection '{}'",
                     config.getId(), mqConnId);
             return connection;

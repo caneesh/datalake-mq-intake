@@ -18,6 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.jms.*;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -83,8 +84,8 @@ public class TransactedReceiveLoop implements Runnable {
      * @param poisonMessageHandler  handler for poison messages (null to disable)
      * @param degradedModeManager   manager for degraded batch mode (null to disable)
      * @param healthManager         health manager for binding health updates (null to disable)
-     * @param auditRecordEmitter    emitter for audit records (null to disable)
-     * @param metrics               binding metrics (null to disable)
+     * @param auditRecordEmitter    emitter for audit records (null for a no-op emitter)
+     * @param metrics               binding metrics (null for a no-op sink)
      * @param instanceId            instance identifier for audit records
      * @param receiveTimeoutMs      timeout for receive() calls
      */
@@ -106,8 +107,13 @@ public class TransactedReceiveLoop implements Runnable {
         this.poisonMessageHandler = poisonMessageHandler;
         this.degradedModeManager = degradedModeManager;
         this.healthManager = healthManager;
-        this.auditRecordEmitter = auditRecordEmitter;
-        this.metrics = metrics;
+        // Normalised to no-ops rather than null-checked at every recording
+        // site: both are pure sinks with no behaviour to disable, unlike the
+        // handler/manager collaborators above, whose absence changes what the
+        // loop does and stays an explicit null check.
+        this.auditRecordEmitter =
+                auditRecordEmitter != null ? auditRecordEmitter : AuditRecordEmitter.noop();
+        this.metrics = metrics != null ? metrics : BindingMetrics.noop();
         this.instanceId = instanceId;
         this.receiveTimeoutMs = receiveTimeoutMs;
         this.listenerSession = new ListenerSession(connection, config);
@@ -160,19 +166,12 @@ public class TransactedReceiveLoop implements Runnable {
                 if (message != null) {
                     batch.add(message);
                     flushTrigger.trackMessage(message);
-                    if (metrics != null) {
-                        // In-flight batch depth. One atomic store per message,
-                        // negligible beside the JMS receive that produced it.
-                        metrics.setCurrentBatchSize(batch.size());
-                    }
+                    // In-flight batch depth. One atomic store per message,
+                    // negligible beside the JMS receive that produced it.
+                    metrics.setCurrentBatchSize(batch.size());
 
                     if (batch.size() >= effectiveBatchSize || flushTrigger.shouldFlush()) {
-                        processBatch(batch);
-                        batch.clear();
-                        flushTrigger.reset();
-                        if (metrics != null) {
-                            metrics.setCurrentBatchSize(0);
-                        }
+                        flushBatch(batch, flushTrigger);
                     }
                 } else {
                     // Idle poll. shouldFlush() rather than isTimeoutExpired()
@@ -180,12 +179,7 @@ public class TransactedReceiveLoop implements Runnable {
                     // a quiet batch would sit until the next message arrived,
                     // and land in a later partition than the one it belongs to.
                     if (!batch.isEmpty() && flushTrigger.shouldFlush()) {
-                        processBatch(batch);
-                        batch.clear();
-                        flushTrigger.reset();
-                        if (metrics != null) {
-                            metrics.setCurrentBatchSize(0);
-                        }
+                        flushBatch(batch, flushTrigger);
                     }
                 }
             } catch (JMSException e) {
@@ -196,12 +190,10 @@ public class TransactedReceiveLoop implements Runnable {
                     rollbackQuietly();
                     batch.clear();
                     flushTrigger.reset();
-                    if (metrics != null) {
-                        // Without this the gauge kept reporting the rolled-back
-                        // batch's size through the whole reconnect backoff —
-                        // a phantom stuck batch on the dashboard.
-                        metrics.setCurrentBatchSize(0);
-                    }
+                    // Without this the gauge kept reporting the rolled-back
+                    // batch's size through the whole reconnect backoff —
+                    // a phantom stuck batch on the dashboard.
+                    metrics.setCurrentBatchSize(0);
 
                     if (faultPolicy.isFatal(e)) {
                         // Reconnecting cannot fix bad credentials or denied
@@ -260,6 +252,14 @@ public class TransactedReceiveLoop implements Runnable {
         }
     }
 
+    /** Processes the accumulated batch and resets the accumulation state. */
+    private void flushBatch(List<Message> batch, FlushTrigger flushTrigger) {
+        processBatch(batch);
+        batch.clear();
+        flushTrigger.reset();
+        metrics.setCurrentBatchSize(0);
+    }
+
     /** Brief pause after a JMS fault the policy does not classify as broken. */
     private void pauseAfterUnrecognisedFault() {
         try {
@@ -292,61 +292,23 @@ public class TransactedReceiveLoop implements Runnable {
         int poisonCount = 0;
         try {
             if (poisonMessageHandler != null) {
-                PoisonMessageHandler.BatchPoisonCheckResult poisonResult;
-                try {
-                    poisonResult = poisonMessageHandler.screen(listenerSession.session(), batch);
-                } catch (PoisonMessageHandler.BackoutFailureException e) {
-                    // CRITICAL: BOQ routing failed - we MUST rollback to avoid losing messages
-                    log.error("Backout queue routing failed for binding '{}', rolling back: {}",
-                            config.getId(), e.getMessage(), e);
-                    throw e; // Re-throw to trigger rollback in outer catch
-                }
-
+                PoisonMessageHandler.BatchPoisonCheckResult poisonResult = screenForPoison(batch);
                 poisonCount = poisonResult.getPoisonCount();
-                if (poisonResult.hasPoisonMessages()) {
-                    log.warn("Routed {} poison messages to backout queue for binding '{}'",
-                            poisonResult.getPoisonCount(), config.getId());
-                    if (metrics != null) {
-                        for (int i = 0; i < poisonResult.getPoisonCount(); i++) {
-                            metrics.recordPoisonMessageRouted();
-                        }
-                    }
-                }
-
                 cleanMessages = poisonResult.getCleanMessages();
+
                 if (cleanMessages.isEmpty()) {
                     // Nothing landed, but messages were consumed. Without a
                     // record of its own this unit of work appears in no audit
                     // anywhere and the balance shows those messages as lost.
-                    emitBackoutOnlyAudit(batch, poisonResult.getPoisonCount());
-                    listenerSession.session().commit();
+                    emitBackoutOnlyAudit(batch, poisonCount);
+                    commitSession();
                     committed = true;
-                    commitCount.incrementAndGet();
-                    // The shared metrics must advance here too: this branch
-                    // used to update only the loop's internal counter, so
-                    // dashboards undercounted commits and consumption exactly
-                    // when poison was churning.
-                    if (metrics != null) {
-                        metrics.recordCommit();
-                        metrics.recordMessagesConsumed(batchSize);
-                    }
-                    if (degradedModeManager != null) {
-                        degradedModeManager.clearSuspects(batchMessageIds);
-                    }
-                    handleSuccess();
+                    recordBackoutOnlyCommit(batchSize, batchMessageIds);
                     return;
                 }
             }
 
-            // Flush latency covers the whole durable write — serialize, _tmp
-            // write, hflush, close, rename — which is the part that dominates
-            // batch time and the first thing to look at when throughput drops.
-            long flushStartNanos = System.nanoTime();
-            BatchWriter.BatchWriteResult writeResult = batchWriter.write(config.getId(), cleanMessages);
-            if (metrics != null) {
-                metrics.recordFlushLatency(
-                        java.time.Duration.ofNanos(System.nanoTime() - flushStartNanos));
-            }
+            BatchWriter.BatchWriteResult writeResult = writeBatchToHdfs(cleanMessages);
 
             if (config.getMode() == BindingMode.TRACKED) {
                 sendTrackerMessages(cleanMessages);
@@ -362,35 +324,9 @@ public class TransactedReceiveLoop implements Runnable {
             // logged and forgotten.
             emitAuditRecord(cleanMessages, writeResult, poisonCount);
 
-            listenerSession.session().commit();
+            commitSession();
             committed = true;
-            commitCount.incrementAndGet();
-            messageCount.addAndGet(cleanMessages.size());
-
-            // Counted at commit, not at receive. A rolled-back batch is
-            // redelivered, so counting on receive would tally the same message
-            // repeatedly and overstate throughput during poison isolation.
-            // batchSize rather than cleanMessages.size(): messages routed to
-            // the BOQ in this unit of work were also consumed.
-            if (metrics != null) {
-                metrics.recordMessagesConsumed(batchSize);
-            }
-
-            // Committed messages (including any routed to BOQ in this unit of
-            // work) are no longer suspects
-            if (degradedModeManager != null) {
-                degradedModeManager.clearSuspects(batchMessageIds);
-            }
-
-            handleSuccess();
-
-            if (metrics != null) {
-                metrics.recordCommit();
-                metrics.recordMessagesWritten(cleanMessages.size(), writeResult.getByteCount());
-            }
-
-            log.debug("Committed batch of {} messages for binding '{}'",
-                    cleanMessages.size(), config.getId());
+            recordCommittedBatch(batchSize, cleanMessages, writeResult, batchMessageIds);
 
         } catch (Exception e) {
             if (committed) {
@@ -409,11 +345,98 @@ public class TransactedReceiveLoop implements Runnable {
                     config.getId(), batchSize, e.getMessage(), e);
             handleFailure(e, batchMessageIds);
             rollbackQuietly();
+            metrics.recordRollback();
+        }
+    }
 
-            if (metrics != null) {
-                metrics.recordRollback();
+    /**
+     * Routes poison messages to the backout queue and returns the screen
+     * result. A failure to route MUST propagate: rolling the batch back is
+     * what keeps the message on the queue instead of dropping it.
+     */
+    private PoisonMessageHandler.BatchPoisonCheckResult screenForPoison(List<Message> batch)
+            throws PoisonMessageHandler.BackoutFailureException {
+        PoisonMessageHandler.BatchPoisonCheckResult poisonResult;
+        try {
+            poisonResult = poisonMessageHandler.screen(listenerSession.session(), batch);
+        } catch (PoisonMessageHandler.BackoutFailureException e) {
+            log.error("Backout queue routing failed for binding '{}', rolling back: {}",
+                    config.getId(), e.getMessage(), e);
+            throw e; // Re-throw to trigger rollback in processBatch's catch
+        }
+
+        if (poisonResult.hasPoisonMessages()) {
+            log.warn("Routed {} poison messages to backout queue for binding '{}'",
+                    poisonResult.getPoisonCount(), config.getId());
+            for (int i = 0; i < poisonResult.getPoisonCount(); i++) {
+                metrics.recordPoisonMessageRouted();
             }
         }
+        return poisonResult;
+    }
+
+    /**
+     * The durable write: serialize, _tmp write, flush, close, rename into the
+     * partition. Flush latency covers the whole of it — the part that
+     * dominates batch time and the first thing to look at when throughput
+     * drops.
+     */
+    private BatchWriter.BatchWriteResult writeBatchToHdfs(List<Message> cleanMessages)
+            throws BatchWriter.BatchWriteException {
+        long flushStartNanos = System.nanoTime();
+        BatchWriter.BatchWriteResult writeResult = batchWriter.write(config.getId(), cleanMessages);
+        metrics.recordFlushLatency(Duration.ofNanos(System.nanoTime() - flushStartNanos));
+        return writeResult;
+    }
+
+    /**
+     * The acknowledgement to MQ. Everything before this call can roll back;
+     * nothing after it can.
+     */
+    private void commitSession() throws JMSException {
+        listenerSession.session().commit();
+        commitCount.incrementAndGet();
+    }
+
+    /** Post-commit bookkeeping for a unit of work that landed nothing. */
+    private void recordBackoutOnlyCommit(int batchSize, List<String> batchMessageIds) {
+        // The shared metrics must advance here too: this branch used to update
+        // only the loop's internal counter, so dashboards undercounted commits
+        // and consumption exactly when poison was churning.
+        metrics.recordCommit();
+        metrics.recordMessagesConsumed(batchSize);
+        if (degradedModeManager != null) {
+            degradedModeManager.clearSuspects(batchMessageIds);
+        }
+        handleSuccess();
+    }
+
+    /** Post-commit bookkeeping for a normally landed batch. */
+    private void recordCommittedBatch(int batchSize, List<Message> cleanMessages,
+                                      BatchWriter.BatchWriteResult writeResult,
+                                      List<String> batchMessageIds) {
+        messageCount.addAndGet(cleanMessages.size());
+
+        // Counted at commit, not at receive. A rolled-back batch is
+        // redelivered, so counting on receive would tally the same message
+        // repeatedly and overstate throughput during poison isolation.
+        // batchSize rather than cleanMessages.size(): messages routed to
+        // the BOQ in this unit of work were also consumed.
+        metrics.recordMessagesConsumed(batchSize);
+
+        // Committed messages (including any routed to BOQ in this unit of
+        // work) are no longer suspects
+        if (degradedModeManager != null) {
+            degradedModeManager.clearSuspects(batchMessageIds);
+        }
+
+        handleSuccess();
+
+        metrics.recordCommit();
+        metrics.recordMessagesWritten(cleanMessages.size(), writeResult.getByteCount());
+
+        log.debug("Committed batch of {} messages for binding '{}'",
+                cleanMessages.size(), config.getId());
     }
 
     private void handleFailure(Throwable e) {
@@ -421,9 +444,7 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     private void handleFailure(Throwable e, List<String> failedBatchMessageIds) {
-        if (metrics != null) {
-            metrics.setHealthy(false);
-        }
+        metrics.setHealthy(false);
         if (degradedModeManager != null) {
             boolean wasDegraded = degradedModeManager.isInDegradedMode();
 
@@ -434,17 +455,13 @@ public class TransactedReceiveLoop implements Runnable {
             FailureClass failureClass =
                     degradedModeManager.recordFailure(e, failedBatchMessageIds);
             log.debug("Failure classified as {} for binding '{}'", failureClass, config.getId());
-            if (metrics != null) {
-                metrics.setSuspectCount(degradedModeManager.getSuspectCount());
-            }
+            metrics.setSuspectCount(degradedModeManager.getSuspectCount());
 
             // Update health if we just entered degraded mode
             if (!wasDegraded && degradedModeManager.isInDegradedMode() && healthManager != null) {
                 healthManager.recordDegraded(config.getId(),
                         "Entered degraded mode due to " + failureClass + " failure");
-                if (metrics != null) {
-                    metrics.recordDegradedModeEntry();
-                }
+                metrics.recordDegradedModeEntry();
             }
         }
     }
@@ -468,22 +485,17 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     private void handleSuccess() {
-        if (metrics != null) {
-            metrics.setHealthy(true);
-            if (degradedModeManager != null) {
-                metrics.setSuspectCount(degradedModeManager.getSuspectCount());
-            }
-        }
+        metrics.setHealthy(true);
         if (degradedModeManager != null) {
+            metrics.setSuspectCount(degradedModeManager.getSuspectCount());
+
             boolean wasDegraded = degradedModeManager.isInDegradedMode();
             degradedModeManager.recordSuccess();
 
             // Update health if we just exited degraded mode
             if (wasDegraded && !degradedModeManager.isInDegradedMode() && healthManager != null) {
                 healthManager.recordHealthy(config.getId());
-                if (metrics != null) {
-                    metrics.recordDegradedModeExit();
-                }
+                metrics.recordDegradedModeExit();
             }
         }
     }
@@ -499,16 +511,10 @@ public class TransactedReceiveLoop implements Runnable {
      */
     private void emitAuditRecord(List<Message> messages, BatchWriter.BatchWriteResult writeResult,
                                  int backoutCount) throws Exception {
-        if (auditRecordEmitter == null) {
-            return;
-        }
-
         try {
             auditRecordEmitter.emit(config.getId(), writeResult, messages, backoutCount);
         } catch (Exception e) {
-            if (metrics != null) {
-                metrics.recordAuditFailure();
-            }
+            metrics.recordAuditFailure();
             if (config.isFailBatchOnAuditError()) {
                 log.error("Audit record could not be written for binding '{}' — rolling back so "
                                 + "no unaudited data is committed: {}",
@@ -523,16 +529,14 @@ public class TransactedReceiveLoop implements Runnable {
 
     /** Audit for a unit of work that landed nothing because every message was poison. */
     private void emitBackoutOnlyAudit(List<Message> batch, int backoutCount) throws Exception {
-        if (auditRecordEmitter == null || backoutCount == 0) {
+        if (backoutCount == 0) {
             return;
         }
 
         try {
             auditRecordEmitter.emitBackoutOnly(config.getId(), batch, backoutCount);
         } catch (Exception e) {
-            if (metrics != null) {
-                metrics.recordAuditFailure();
-            }
+            metrics.recordAuditFailure();
             if (config.isFailBatchOnAuditError()) {
                 log.error("Backout-only audit record could not be written for binding '{}' — "
                         + "rolling back: {}", config.getId(), e.getMessage(), e);
@@ -571,9 +575,7 @@ public class TransactedReceiveLoop implements Runnable {
                 if (config.isFailBatchOnTrackerError()) {
                     throw e;
                 }
-                if (metrics != null) {
-                    metrics.recordTrackerFailure();
-                }
+                metrics.recordTrackerFailure();
                 log.warn("Tracker send failed for binding '{}' — message still commits, " +
                         "this tracker notification is lost: {}",
                         config.getId(), e.getMessage());
@@ -657,9 +659,7 @@ public class TransactedReceiveLoop implements Runnable {
                 healthManager.recordUnhealthy(config.getId(),
                         new RuntimeException("Max reconnect attempts exceeded"));
             }
-            if (metrics != null) {
-                metrics.recordReconnectFailure();
-            }
+            metrics.recordReconnectFailure();
             return false;
         }
 
@@ -702,9 +702,7 @@ public class TransactedReceiveLoop implements Runnable {
             log.info("Session recovered successfully for binding '{}' after {} attempt(s)",
                     config.getId(), attempts);
 
-            if (metrics != null) {
-                metrics.recordReconnect();
-            }
+            metrics.recordReconnect();
 
             // Restore health to HEALTHY after successful recovery
             if (healthManager != null) {

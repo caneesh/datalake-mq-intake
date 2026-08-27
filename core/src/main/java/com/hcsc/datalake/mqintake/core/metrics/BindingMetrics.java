@@ -69,6 +69,16 @@ public class BindingMetrics {
         this.bindingId = Objects.requireNonNull(bindingId, "bindingId required");
     }
 
+    /**
+     * A metrics sink for callers wired without metrics (tests, disabled
+     * observability). It records into ordinary counters that nothing ever
+     * reads — never registered with a meter registry — so callers can invoke
+     * it unconditionally instead of null-checking before every recording.
+     */
+    public static BindingMetrics noop() {
+        return new BindingMetrics("noop");
+    }
+
     // --- Counter increments ---
 
     public void recordCommit() {

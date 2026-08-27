@@ -7,10 +7,12 @@ import java.io.IOException;
 import java.util.List;
 
 /**
- * Interface for emitting audit records after successful commits.
+ * Interface for emitting per-batch audit records.
  *
- * <p>From DESIGN.md §12: immediately after a successful commit, the writer
- * emits an audit record to an audit store (HDFS audit path or a control table).
+ * <p>Emitted BEFORE the MQ commit (see {@link #emit(AuditRecord)}), so every
+ * committed batch has a record. This is the ABC posture: the audit is a
+ * balancing control, and under {@code fail_batch_on_audit_error} an
+ * unwritable audit rolls the batch back rather than committing unaudited data.
  *
  * <p>Implementations may write to HDFS, a database, or both. The audit record
  * is critical for reconciliation — commit state is ambiguous until reconciled.
@@ -18,7 +20,31 @@ import java.util.List;
 public interface AuditRecordEmitter {
 
     /**
-     * Emits an audit record after a successful commit.
+     * An emitter that records nothing, for callers wired without audit
+     * (tests, LAND-only harnesses). Production wiring always supplies a real
+     * emitter; this exists so the receive loop can call the emitter
+     * unconditionally.
+     */
+    static AuditRecordEmitter noop() {
+        return new AuditRecordEmitter() {
+            @Override
+            public void emit(AuditRecord record) {
+            }
+
+            @Override
+            public void emit(String bindingId, BatchWriter.BatchWriteResult writeResult,
+                             List<Message> messages) {
+            }
+
+            @Override
+            public void emitBackoutOnly(String bindingId, List<Message> messages,
+                                        int backoutCount) {
+            }
+        };
+    }
+
+    /**
+     * Emits the audit record for a unit of work.
      *
      * <p>Called BEFORE the MQ commit, so that every committed batch has an
      * audit record. Writing after the commit leaves a window in which

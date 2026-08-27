@@ -4,7 +4,10 @@ import com.hcsc.datalake.mqintake.core.audit.AuditRecordEmitter;
 import com.hcsc.datalake.mqintake.core.audit.HdfsAuditRecordEmitter;
 import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.BindingConfigValidator;
+import com.hcsc.datalake.mqintake.core.config.InstanceId;
 import com.hcsc.datalake.mqintake.core.config.IntakeProperties;
+import com.hcsc.datalake.mqintake.core.config.ProductionMode;
+import com.hcsc.datalake.mqintake.core.config.SerializerValidator;
 import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.lifecycle.StartupValidator;
 import com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry;
@@ -12,6 +15,8 @@ import com.hcsc.datalake.mqintake.core.mq.MqConnectionManager;
 import com.hcsc.datalake.mqintake.core.mq.MqConnectionProvider;
 import com.hcsc.datalake.mqintake.core.orchestration.RecordSerializerFactory;
 import com.hcsc.datalake.mqintake.core.orchestration.TrackerMessageBuilderFactory;
+import com.hcsc.datalake.mqintake.core.reconciliation.ReconciliationFactory;
+import com.hcsc.datalake.mqintake.core.reconciliation.ReconciliationScheduler;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.slf4j.Logger;
@@ -61,8 +66,8 @@ public class IntakeRuntimeManager implements SmartLifecycle {
     private final RecordSerializerFactory serializerFactory;
     private final TrackerMessageBuilderFactory trackerBuilderFactory;
     private final BindingConfigValidator bindingConfigValidator;
-    private final com.hcsc.datalake.mqintake.core.config.ProductionMode productionMode;
-    private final com.hcsc.datalake.mqintake.core.config.InstanceId instanceId;
+    private final ProductionMode productionMode;
+    private final InstanceId instanceId;
 
     private final MetricsRegistry metricsRegistry;
     private final BindingHealthManager healthManager;
@@ -71,8 +76,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
 
     private volatile boolean running = false;
     private volatile BindingRuntimeFactory runtimeFactory;
-    private volatile com.hcsc.datalake.mqintake.core.reconciliation.ReconciliationScheduler
-            reconciliationScheduler;
+    private volatile ReconciliationScheduler reconciliationScheduler;
 
     @Autowired
     public IntakeRuntimeManager(IntakeProperties properties,
@@ -82,8 +86,8 @@ public class IntakeRuntimeManager implements SmartLifecycle {
                                  RecordSerializerFactory serializerFactory,
                                  BindingConfigValidator bindingConfigValidator,
                                  BindingHealthManager healthManager,
-                                 com.hcsc.datalake.mqintake.core.config.ProductionMode productionMode,
-                                 com.hcsc.datalake.mqintake.core.config.InstanceId instanceId,
+                                 ProductionMode productionMode,
+                                 InstanceId instanceId,
                                  @Autowired(required = false) TrackerMessageBuilderFactory trackerBuilderFactory) {
         this.productionMode = productionMode;
         this.instanceId = instanceId;
@@ -175,17 +179,16 @@ public class IntakeRuntimeManager implements SmartLifecycle {
      * fail startup in production mode; otherwise they run with a loud warning.
      * Never a silent fallback.
      */
-    private void validateSerializers() throws com.hcsc.datalake.mqintake.core.config.SerializerValidator.SerializerValidationException {
-        com.hcsc.datalake.mqintake.core.config.SerializerValidator validator =
-                new com.hcsc.datalake.mqintake.core.config.SerializerValidator(
-                        serializerFactory, productionMode);
-        validator.validateOrFail(properties.getBindings());
+    private void validateSerializers() throws SerializerValidator.SerializerValidationException {
+        new SerializerValidator(serializerFactory, productionMode)
+                .validateOrFail(properties.getBindings());
     }
 
     private void validateAllBindings() throws StartupValidator.StartupValidationException {
-        // Includes the audit destination: it is written after the MQ commit,
-        // so without this check the service can start, land data and
-        // acknowledge messages before discovering it cannot record what it did.
+        // Includes the audit destination: audit is written BEFORE the commit
+        // and fails the batch when unwritable, so without this check the
+        // service would start and then stall on its very first batch instead
+        // of refusing to start with a message naming the path.
         StartupValidator validator = new StartupValidator(
                 fileSystem,
                 instanceId.value(),
@@ -295,34 +298,13 @@ public class IntakeRuntimeManager implements SmartLifecycle {
      * demand.
      */
     void startReconciliation() {
-        var reconciliationConfig = properties.getReconciliation();
-
-        var auditReader = new com.hcsc.datalake.mqintake.core.reconciliation.AuditRecordReader(
-                fileSystem, properties.getHdfs().getAuditBasePath());
-
-        // Identity comes from the sidecar index where a binding writes one,
-        // falling back to the file reader — which, under the production key,
-        // finds nothing and says so.
-        var identityReader = new com.hcsc.datalake.mqintake.core.index.RecordIndexIdentityExtractor(
-                new com.hcsc.datalake.mqintake.core.index.RecordIndexReader(fileSystem),
-                new com.hcsc.datalake.mqintake.core.reconciliation.SequenceFileIdentityReader(
-                        hadoopConf));
-
-        var service = new com.hcsc.datalake.mqintake.core.reconciliation.PartitionReconciliationService(
+        reconciliationScheduler = ReconciliationFactory.createScheduler(
                 fileSystem,
-                identityReader,
-                auditReader,
-                new HdfsAuditRecordEmitter(fileSystem,
-                        properties.getHdfs().getAuditBasePath(),
-                        instanceId.value(), Clock.systemUTC()),
-                java.time.Duration.ofMillis(reconciliationConfig.getGracePeriodMs()),
-                Clock.systemUTC(),
-                instanceId.value());
-
-        reconciliationScheduler =
-                new com.hcsc.datalake.mqintake.core.reconciliation.ReconciliationScheduler(
-                        service, properties, metricsRegistry::getBindingMetrics,
-                        Clock.systemUTC());
+                hadoopConf,
+                properties,
+                instanceId.value(),
+                metricsRegistry::getBindingMetrics,
+                Clock.systemUTC());
         reconciliationScheduler.start();
     }
 
