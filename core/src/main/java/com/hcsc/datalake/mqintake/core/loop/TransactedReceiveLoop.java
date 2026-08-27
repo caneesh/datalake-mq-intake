@@ -5,7 +5,6 @@ import com.hcsc.datalake.mqintake.core.batch.BatchWriter;
 import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.BindingMode;
 import com.hcsc.datalake.mqintake.core.failure.DegradationPolicy;
-import com.hcsc.datalake.mqintake.core.failure.FailureClass;
 import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
 import com.hcsc.datalake.mqintake.core.loop.recovery.BackoffPolicy;
@@ -500,21 +499,21 @@ public class TransactedReceiveLoop implements Runnable {
             return;
         }
 
-        boolean wasDegraded = degradedModeManager.isInDegradedMode();
-
         // Data failures mark the failed batch's message IDs as suspects so
         // the bisection coordinator can track them across redelivery to
         // any listener thread (§6.1). Marking is done inside recordFailure
-        // so it cannot be separated from the degraded-mode transition.
-        FailureClass failureClass =
+        // so it cannot be separated from the degraded-mode transition — and
+        // the entry edge is reported from inside that same transition, so
+        // racing listener threads record it exactly once.
+        DegradationPolicy.FailureResult result =
                 degradedModeManager.recordFailure(e, failedBatchMessageIds);
-        log.debug("Failure classified as {} for binding '{}'", failureClass, config.getId());
+        log.debug("Failure classified as {} for binding '{}'",
+                result.getFailureClass(), config.getId());
         metrics.setSuspectCount(degradedModeManager.getSuspectCount());
 
-        boolean enteredDegradedMode = !wasDegraded && degradedModeManager.isInDegradedMode();
-        if (enteredDegradedMode && healthManager != null) {
+        if (result.enteredDegradedMode() && healthManager != null) {
             healthManager.recordDegraded(config.getId(),
-                    "Entered degraded mode due to " + failureClass + " failure");
+                    "Entered degraded mode due to " + result.getFailureClass() + " failure");
             metrics.recordDegradedModeEntry();
         }
     }
@@ -545,10 +544,7 @@ public class TransactedReceiveLoop implements Runnable {
 
         metrics.setSuspectCount(degradedModeManager.getSuspectCount());
 
-        boolean wasDegraded = degradedModeManager.isInDegradedMode();
-        degradedModeManager.recordSuccess();
-
-        boolean exitedDegradedMode = wasDegraded && !degradedModeManager.isInDegradedMode();
+        boolean exitedDegradedMode = degradedModeManager.recordSuccess();
         if (exitedDegradedMode && healthManager != null) {
             healthManager.recordHealthy(config.getId());
             metrics.recordDegradedModeExit();

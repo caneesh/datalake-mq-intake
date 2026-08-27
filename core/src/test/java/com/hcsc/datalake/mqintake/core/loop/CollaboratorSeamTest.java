@@ -181,13 +181,14 @@ class CollaboratorSeamTest {
         }
 
         @Override
-        public void recordSuccess() {
+        public boolean recordSuccess() {
             successes.incrementAndGet();
+            return false; // never degraded, so never an exit edge
         }
 
         @Override
-        public FailureClass recordFailure(Throwable throwable, Collection<String> ids) {
-            return FailureClass.UNKNOWN;
+        public FailureResult recordFailure(Throwable throwable, Collection<String> ids) {
+            return new FailureResult(FailureClass.UNKNOWN, false);
         }
 
         @Override

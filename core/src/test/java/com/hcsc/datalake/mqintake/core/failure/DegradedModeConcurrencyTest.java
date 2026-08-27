@@ -116,6 +116,71 @@ class DegradedModeConcurrencyTest {
         assertThat(manager.getCurrentBatchSize()).isEqualTo(64);
     }
 
+    @Test
+    void racingFailuresReportTheEntryEdgeExactlyOnce() throws Exception {
+        // The edge is decided inside the synchronized transition, so of N
+        // threads whose batches fail together — the normal case, since MQ
+        // redistributes a rolled-back batch — exactly one must see
+        // enteredDegradedMode()=true, or the loop's entry health/metrics
+        // updates would fire once per racing thread.
+        DegradedModeManager manager = new DegradedModeManager(
+                "race-entry", 64, DegradationStrategy.BISECT, 3);
+        int threads = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch go = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicInteger entries =
+                new java.util.concurrent.atomic.AtomicInteger();
+
+        for (int t = 0; t < threads; t++) {
+            final String id = "ID:entry:" + t;
+            pool.submit(() -> {
+                go.await();
+                if (manager.recordFailure(dataFailure(), List.of(id)).enteredDegradedMode()) {
+                    entries.incrementAndGet();
+                }
+                return null;
+            });
+        }
+        go.countDown();
+        pool.shutdown();
+        assertThat(pool.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
+
+        assertThat(entries.get()).isEqualTo(1);
+        assertThat(manager.isInDegradedMode()).isTrue();
+    }
+
+    @Test
+    void racingSuccessesReportTheExitEdgeExactlyOnce() throws Exception {
+        DegradedModeManager manager = new DegradedModeManager(
+                "race-exit", 64, DegradationStrategy.BISECT, 1);
+        manager.recordFailure(dataFailure(), List.of("ID:seed"));
+        manager.clearSuspects(List.of("ID:seed"));
+        assertThat(manager.isInDegradedMode()).isTrue();
+
+        int threads = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch go = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicInteger exits =
+                new java.util.concurrent.atomic.AtomicInteger();
+
+        for (int t = 0; t < threads; t++) {
+            pool.submit(() -> {
+                go.await();
+                if (manager.recordSuccess()) {
+                    exits.incrementAndGet();
+                }
+                return null;
+            });
+        }
+        go.countDown();
+        pool.shutdown();
+        assertThat(pool.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
+
+        assertThat(exits.get()).isEqualTo(1);
+        assertThat(manager.isInDegradedMode()).isFalse();
+        assertThat(manager.getCurrentBatchSize()).isEqualTo(64);
+    }
+
     // --- helpers ---
 
     private RecordSerializer.SerializationException dataFailure() {
@@ -143,7 +208,7 @@ class DegradedModeConcurrencyTest {
         }
 
         @Override
-        public synchronized FailureClass recordFailure(Throwable throwable,
+        public synchronized DegradationPolicy.FailureResult recordFailure(Throwable throwable,
                 java.util.Collection<String> batchMessageIds) {
             if (!passThrough.get()) {
                 inside.countDown();

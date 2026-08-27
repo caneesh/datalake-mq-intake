@@ -98,6 +98,9 @@ public class DegradedModeManager implements DegradationPolicy {
      * Records a successful batch commit.
      * May restore normal batch size after enough consecutive successes,
      * but never while suspect messages remain unresolved.
+     *
+     * @return true when this call restored normal mode. Detected inside the
+     *         lock, so exactly one of any racing callers observes the edge.
      */
     @Override
     // recordSuccess, recordFailure and clearSuspects are synchronized. Each
@@ -107,9 +110,9 @@ public class DegradedModeManager implements DegradationPolicy {
     // markBatchSuspect, restoring full batch size in a window the design says
     // must not exist. Failures and commits are batch-cadence events, not
     // per-message, so an uncontended lock here costs nanoseconds.
-    public synchronized void recordSuccess() {
+    public synchronized boolean recordSuccess() {
         if (!inDegradedMode.get()) {
-            return;
+            return false;
         }
 
         int successes = consecutiveSuccesses.incrementAndGet();
@@ -118,7 +121,9 @@ public class DegradedModeManager implements DegradationPolicy {
 
         if (successes >= successesRequiredToRestore && suspectMessageIds.isEmpty()) {
             restore();
+            return true;
         }
+        return false;
     }
 
     /**
@@ -174,9 +179,9 @@ public class DegradedModeManager implements DegradationPolicy {
      * Records a failure and determines if degraded mode should be entered/deepened.
      *
      * @param throwable the failure
-     * @return the classified failure
+     * @return the classification, plus whether this call entered degraded mode
      */
-    public FailureClass recordFailure(Throwable throwable) {
+    public FailureResult recordFailure(Throwable throwable) {
         return recordFailure(throwable, null);
     }
 
@@ -193,12 +198,15 @@ public class DegradedModeManager implements DegradationPolicy {
      *
      * @param throwable         the failure
      * @param batchMessageIds   IDs of the failed batch, or null if unknown
-     * @return the classified failure
+     * @return the classification, plus whether this call entered degraded
+     *         mode — decided under the lock, so racing failures report the
+     *         entry edge exactly once
      */
     @Override
-    public synchronized FailureClass recordFailure(Throwable throwable,
+    public synchronized FailureResult recordFailure(Throwable throwable,
                                       java.util.Collection<String> batchMessageIds) {
         FailureClass failureClass = classifier.classify(throwable);
+        boolean entered = false;
 
         if (failureClass.triggersDegradedMode()) {
             // Suspects first: once they are registered, no concurrent
@@ -207,7 +215,7 @@ public class DegradedModeManager implements DegradationPolicy {
             if (batchMessageIds != null) {
                 markBatchSuspect(batchMessageIds);
             }
-            enterOrDeepenDegradedMode();
+            entered = enterOrDeepenDegradedMode();
         } else {
             // Deliberately does NOT reset consecutiveSuccesses: an unrelated
             // infrastructure blip while we are isolating a poison message
@@ -218,13 +226,16 @@ public class DegradedModeManager implements DegradationPolicy {
                     bindingId, failureClass);
         }
 
-        return failureClass;
+        return new FailureResult(failureClass, entered);
     }
 
     /**
      * Enters degraded mode or deepens it (for BISECT strategy).
+     *
+     * @return true when this call ENTERED degraded mode; false when it
+     *         deepened an already-degraded binding
      */
-    private void enterOrDeepenDegradedMode() {
+    private boolean enterOrDeepenDegradedMode() {
         // CAS rather than get/compute/set: two threads failing concurrently —
         // the normal case, since MQ redistributes a rolled-back batch across
         // listener threads — would otherwise both read the same size, compute
@@ -242,7 +253,8 @@ public class DegradedModeManager implements DegradationPolicy {
         // Publish the smaller batch size before announcing degraded mode, so a
         // concurrent getCurrentBatchSize() can never observe "degraded" while
         // still returning the old, larger size.
-        if (!inDegradedMode.getAndSet(true)) {
+        boolean entered = !inDegradedMode.getAndSet(true);
+        if (entered) {
             log.warn("Binding '{}': ENTERING degraded mode. Strategy={}, batch size {} -> {}",
                     bindingId, strategy, normalBatchSize, newBatchSize);
         } else {
@@ -250,6 +262,7 @@ public class DegradedModeManager implements DegradationPolicy {
             log.warn("Binding '{}': DEEPENING degraded mode. Level={}, batch size {} -> {}",
                     bindingId, degradationLevel.get(), oldBatchSize, newBatchSize);
         }
+        return entered;
     }
 
     /**

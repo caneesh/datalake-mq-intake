@@ -150,7 +150,7 @@ class DegradedModeManagerTest {
                 "test", 100, DegradationStrategy.BATCH_OF_ONE, 5);
 
         FailureClass result = manager.recordFailure(
-                new RecordSerializer.SerializationException("Bad data"));
+                new RecordSerializer.SerializationException("Bad data")).getFailureClass();
 
         assertThat(result).isEqualTo(FailureClass.MESSAGE_DATA);
         assertThat(manager.isInDegradedMode()).isTrue();
@@ -161,7 +161,7 @@ class DegradedModeManagerTest {
         DegradedModeManager manager = new DegradedModeManager(
                 "test", 100, DegradationStrategy.BATCH_OF_ONE, 5);
 
-        FailureClass result = manager.recordFailure(new JMSException("Connection lost"));
+        FailureClass result = manager.recordFailure(new JMSException("Connection lost")).getFailureClass();
 
         assertThat(result).isEqualTo(FailureClass.MQ_INFRASTRUCTURE);
         assertThat(manager.isInDegradedMode()).isFalse();
@@ -174,7 +174,7 @@ class DegradedModeManagerTest {
                 "test", 100, DegradationStrategy.BATCH_OF_ONE, 5);
 
         FailureClass result = manager.recordFailure(
-                new IOException("NameNode failover in progress"));
+                new IOException("NameNode failover in progress")).getFailureClass();
 
         assertThat(result).isEqualTo(FailureClass.HDFS_INFRASTRUCTURE);
         assertThat(manager.isInDegradedMode()).isFalse();
@@ -187,7 +187,7 @@ class DegradedModeManagerTest {
                 "test", 100, DegradationStrategy.BATCH_OF_ONE, 5);
 
         FailureClass result = manager.recordFailure(
-                new RuntimeException("Totally unexpected error"));
+                new RuntimeException("Totally unexpected error")).getFailureClass();
 
         assertThat(result).isEqualTo(FailureClass.UNKNOWN);
         assertThat(manager.isInDegradedMode()).isFalse();
@@ -199,7 +199,7 @@ class DegradedModeManagerTest {
         DegradedModeManager manager = new DegradedModeManager(
                 "test", 100, DegradationStrategy.BATCH_OF_ONE, 5);
 
-        FailureClass result = manager.recordFailure(new InterruptedException("Shutdown"));
+        FailureClass result = manager.recordFailure(new InterruptedException("Shutdown")).getFailureClass();
 
         assertThat(result).isEqualTo(FailureClass.SHUTDOWN);
         assertThat(manager.isInDegradedMode()).isFalse();
@@ -211,7 +211,7 @@ class DegradedModeManagerTest {
                 "test", 100, DegradationStrategy.BATCH_OF_ONE, 5);
 
         FailureClass result = manager.recordFailure(
-                new SecurityException("Permission denied"));
+                new SecurityException("Permission denied")).getFailureClass();
 
         assertThat(result).isEqualTo(FailureClass.SECURITY_CONFIG);
         assertThat(manager.isInDegradedMode()).isFalse();
@@ -305,6 +305,76 @@ class DegradedModeManagerTest {
 
         assertThat(manager.isInDegradedMode()).isFalse();
         assertThat(manager.getCurrentBatchSize()).isEqualTo(100);
+    }
+
+    // --- Transition-edge reporting ---
+    //
+    // recordFailure/recordSuccess report the entered/exited edge themselves,
+    // from inside the synchronized transition. The receive loop keys its
+    // health updates and degraded-entry/exit metrics off these flags, so
+    // "entering" must be distinguishable from "deepening", and "restored"
+    // from "still counting".
+
+    @Test
+    void firstDataFailureReportsEntry_deepeningDoesNot() {
+        DegradedModeManager manager = new DegradedModeManager(
+                "claims", 64, DegradationStrategy.BISECT, 3);
+
+        assertThat(manager.recordFailure(
+                new RecordSerializer.SerializationException("bad"))
+                .enteredDegradedMode()).isTrue();
+
+        // Already degraded: this halves the batch again but is not an entry
+        assertThat(manager.recordFailure(
+                new RecordSerializer.SerializationException("bad again"))
+                .enteredDegradedMode()).isFalse();
+        assertThat(manager.isInDegradedMode()).isTrue();
+    }
+
+    @Test
+    void nonDataFailureNeverReportsEntry() {
+        DegradedModeManager manager = new DegradedModeManager(
+                "rms", 100, DegradationStrategy.BATCH_OF_ONE, 3);
+
+        assertThat(manager.recordFailure(new IOException("HDFS wobble"))
+                .enteredDegradedMode()).isFalse();
+        assertThat(manager.isInDegradedMode()).isFalse();
+    }
+
+    @Test
+    void recordSuccessReportsExitExactlyOnTheRestoringCall() {
+        DegradedModeManager manager = new DegradedModeManager(
+                "rms", 100, DegradationStrategy.BATCH_OF_ONE, 3);
+
+        // Not degraded: no edge to report
+        assertThat(manager.recordSuccess()).isFalse();
+
+        manager.recordFailure(new RecordSerializer.SerializationException("bad"));
+
+        assertThat(manager.recordSuccess()).isFalse();  // 1/3
+        assertThat(manager.recordSuccess()).isFalse();  // 2/3
+        assertThat(manager.recordSuccess()).isTrue();   // 3/3 — restores
+        assertThat(manager.isInDegradedMode()).isFalse();
+
+        // Restored: back to no-edge
+        assertThat(manager.recordSuccess()).isFalse();
+    }
+
+    @Test
+    void outstandingSuspectsSuppressTheExitEdgeUntilCleared() {
+        DegradedModeManager manager = new DegradedModeManager(
+                "rms", 100, DegradationStrategy.BATCH_OF_ONE, 1);
+
+        manager.recordFailure(new RecordSerializer.SerializationException("bad"),
+                java.util.List.of("ID:poison"));
+
+        // Threshold met, but the suspect is unresolved: no restore, no edge
+        assertThat(manager.recordSuccess()).isFalse();
+        assertThat(manager.isInDegradedMode()).isTrue();
+
+        manager.clearSuspects(java.util.List.of("ID:poison"));
+        assertThat(manager.recordSuccess()).isTrue();
+        assertThat(manager.isInDegradedMode()).isFalse();
     }
 
 }
