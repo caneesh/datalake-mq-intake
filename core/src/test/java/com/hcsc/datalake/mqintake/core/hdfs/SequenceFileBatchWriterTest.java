@@ -1,6 +1,7 @@
 package com.hcsc.datalake.mqintake.core.hdfs;
 
 import com.hcsc.datalake.mqintake.core.batch.BatchWriter;
+import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
 import com.hcsc.datalake.mqintake.core.serializer.TestRecordSerializer;
 import org.apache.activemq.ActiveMQConnectionFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -202,28 +203,141 @@ class SequenceFileBatchWriterTest {
     }
 
     @Test
-    void simulatedCrashMidWriteLeavesNothingInPartition() throws Exception {
+    void aSerializerThrowMidBatchLeavesNoTempFileAndNothingInThePartition() throws Exception {
+        // The previous version of this test overrode write() entirely and
+        // never touched the parent — it passed vacuously whatever the cleanup
+        // code did. This one drives the REAL write path and fails on record 2
+        // of 3, inside the SequenceFile append loop.
         TestClock clock = new TestClock(
                 ZonedDateTime.of(2025, 8, 22, 10, 20, 0, 0, ZoneOffset.UTC).toInstant());
         String basePath = tempDir.resolve("data").toString();
 
-        // Use a writer that fails after writing but before rename
-        FailingWriter writer = new FailingWriter(
-                fileSystem, conf, new TestRecordSerializer(), "instance-1", basePath, clock);
+        java.util.concurrent.atomic.AtomicInteger calls =
+                new java.util.concurrent.atomic.AtomicInteger();
+        RecordSerializer failsOnSecond = new RecordSerializer() {
+            private final TestRecordSerializer delegate = new TestRecordSerializer();
 
-        List<Message> batch = createMessages(3);
+            @Override
+            public SerializedRecord serialize(Message message,
+                    com.hcsc.datalake.mqintake.core.serializer.RecordMetadata metadata)
+                    throws SerializationException {
+                if (calls.incrementAndGet() == 2) {
+                    throw new SerializationException("record 2 is unserialisable");
+                }
+                return delegate.serialize(message, metadata);
+            }
 
-        // Write should fail
-        assertThatThrownBy(() -> writer.write("binding", batch))
+            @Override
+            public Class<? extends org.apache.hadoop.io.Writable> getKeyClass() {
+                return delegate.getKeyClass();
+            }
+
+            @Override
+            public Class<? extends org.apache.hadoop.io.Writable> getValueClass() {
+                return delegate.getValueClass();
+            }
+        };
+
+        SequenceFileBatchWriter writer = new SequenceFileBatchWriter(
+                fileSystem, conf, failsOnSecond, "instance-1", clock,
+                CompressionType.RECORD, createBindingMap(basePath));
+
+        assertThatThrownBy(() -> writer.write("binding", createMessages(3)))
                 .isInstanceOf(BatchWriter.BatchWriteException.class);
 
-        // Partition should have NO files
-        String partitionPath = PartitionPath.compute(basePath, clock.instant());
-        Path partition = new Path(partitionPath);
-        if (fileSystem.exists(partition)) {
-            var files = fileSystem.listStatus(partition);
-            assertThat(files).isEmpty();
+        assertNoFilesUnder(basePath + "/_tmp");
+        assertNoFilesUnder(PartitionPath.compute(basePath, clock.instant()));
+    }
+
+    @Test
+    void renameReturningFalseCleansTheTempFileAndThrows() throws Exception {
+        // rename() returning false (not throwing) is a real HDFS outcome —
+        // destination exists, parent vanished — and used to have no test at
+        // all. A wrapping FileSystem forces it against the real write path.
+        TestClock clock = new TestClock(
+                ZonedDateTime.of(2025, 8, 22, 10, 20, 0, 0, ZoneOffset.UTC).toInstant());
+        String basePath = tempDir.resolve("data").toString();
+
+        org.apache.hadoop.fs.FilterFileSystem renameRefuses =
+                new org.apache.hadoop.fs.FilterFileSystem(fileSystem) {
+            @Override
+            public boolean rename(Path src, Path dst) throws java.io.IOException {
+                if (src.toString().contains("/_tmp/")) {
+                    return false;   // the batch's own rename fails
+                }
+                return super.rename(src, dst);
+            }
+        };
+
+        SequenceFileBatchWriter writer = new SequenceFileBatchWriter(
+                renameRefuses, conf, new TestRecordSerializer(), "instance-1", clock,
+                CompressionType.RECORD, createBindingMap(basePath));
+
+        assertThatThrownBy(() -> writer.write("binding", createMessages(2)))
+                .isInstanceOf(BatchWriter.BatchWriteException.class)
+                .hasMessageContaining("rename");
+
+        assertNoFilesUnder(basePath + "/_tmp");
+        assertNoFilesUnder(PartitionPath.compute(basePath, clock.instant()));
+    }
+
+    @Test
+    void concurrentWritesFromManyThreadsProduceDistinctCompleteFiles() throws Exception {
+        // One SequenceFileBatchWriter is shared by every listener thread of a
+        // binding in production. Its thread-safety was correct by inspection
+        // (all state method-local or atomic) but never tested — and a future
+        // instance field would break it silently.
+        TestClock clock = new TestClock(
+                ZonedDateTime.of(2025, 8, 22, 10, 20, 0, 0, ZoneOffset.UTC).toInstant());
+        String basePath = tempDir.resolve("data").toString();
+        SequenceFileBatchWriter writer = createWriter(basePath, clock);
+
+        int threads = 4;
+        int batchesPerThread = 5;
+        java.util.concurrent.ExecutorService pool =
+                java.util.concurrent.Executors.newFixedThreadPool(threads);
+        java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+        java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+
+        for (int t = 0; t < threads; t++) {
+            futures.add(pool.submit(() -> {
+                go.await();
+                for (int b = 0; b < batchesPerThread; b++) {
+                    writer.write("binding", createMessages(2));
+                }
+                return null;
+            }));
         }
+        go.countDown();
+        for (java.util.concurrent.Future<?> f : futures) {
+            f.get(30, java.util.concurrent.TimeUnit.SECONDS);   // propagate failures
+        }
+        pool.shutdownNow();
+
+        Path partition = new Path(PartitionPath.compute(basePath, clock.instant()));
+        org.apache.hadoop.fs.FileStatus[] files = fileSystem.listStatus(partition,
+                path -> path.getName().endsWith(".seq"));
+        assertThat(files)
+                .as("every batch lands as its own distinctly named file")
+                .hasSize(threads * batchesPerThread);
+        assertNoFilesUnder(basePath + "/_tmp");
+    }
+
+    private void assertNoFilesUnder(String dir) throws Exception {
+        Path path = new Path(dir);
+        if (!fileSystem.exists(path)) {
+            return;
+        }
+        java.util.List<String> found = new java.util.ArrayList<>();
+        org.apache.hadoop.fs.RemoteIterator<org.apache.hadoop.fs.LocatedFileStatus> it =
+                fileSystem.listFiles(path, true);
+        while (it.hasNext()) {
+            String name = it.next().getPath().getName();
+            if (!name.endsWith(".crc")) {   // local-FS checksum sidecars
+                found.add(name);
+            }
+        }
+        assertThat(found).as("no files under %s", dir).isEmpty();
     }
 
     @Test
@@ -300,38 +414,6 @@ class SequenceFileBatchWriterTest {
                 .hasMessageContaining("BLOCK compression is forbidden");
     }
 
-    @Test
-    void cleanupRemovesOnlyOwnInstanceFiles() throws Exception {
-        String basePath = tempDir.resolve("data").toString();
-
-        // Create temp directories for two instances
-        Path tmpA = new Path(basePath + "/_tmp/instance-A");
-        Path tmpB = new Path(basePath + "/_tmp/instance-B");
-        fileSystem.mkdirs(tmpA);
-        fileSystem.mkdirs(tmpB);
-
-        // Create files
-        Path fileA = new Path(tmpA, "old-file.seq");
-        Path fileB = new Path(tmpB, "old-file.seq");
-        fileSystem.create(fileA).close();
-        fileSystem.create(fileB).close();
-
-        // Verify files exist
-        assertThat(fileSystem.exists(fileA)).isTrue();
-        assertThat(fileSystem.exists(fileB)).isTrue();
-
-        // Use a clock in the "future" so files appear old
-        TestClock futureClock = new TestClock(Instant.now().plusSeconds(3600));
-        SequenceFileBatchWriter writerA = createWriter(basePath, futureClock, "instance-A");
-
-        // Cleanup with 1 hour maxAge - files created "1 hour ago" should be deleted
-        int deleted = writerA.cleanupTempFiles(basePath, 3600 * 1000);
-
-        // Only instance-A's files should be cleaned (its file is "old" relative to future clock)
-        assertThat(deleted).isEqualTo(1);
-        assertThat(fileSystem.exists(fileA)).isFalse();
-        assertThat(fileSystem.exists(fileB)).isTrue(); // instance-B's file untouched
-    }
 
     // --- Helper methods ---
 
@@ -461,17 +543,4 @@ class SequenceFileBatchWriterTest {
     /**
      * Writer that fails after writing but before rename.
      */
-    private class FailingWriter extends SequenceFileBatchWriter {
-
-        FailingWriter(FileSystem fs, Configuration conf, TestRecordSerializer serializer,
-                      String instanceId, String basePath, Clock clock) {
-            super(fs, conf, serializer, instanceId, clock, CompressionType.RECORD, createBindingMap(basePath));
-        }
-
-        @Override
-        public BatchWriteResult write(String bindingId, List<Message> messages) throws BatchWriteException {
-            // Let the parent write to temp, then throw before rename
-            throw new BatchWriteException("Simulated crash after write, before rename");
-        }
-    }
 }

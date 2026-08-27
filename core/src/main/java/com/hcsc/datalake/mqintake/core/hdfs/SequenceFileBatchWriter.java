@@ -76,18 +76,6 @@ public class SequenceFileBatchWriter implements BatchWriter {
     }
 
     /**
-     * Creates a writer with multiple binding paths.
-     */
-    public SequenceFileBatchWriter(FileSystem fileSystem,
-                                    Configuration conf,
-                                    RecordSerializer serializer,
-                                    String instanceId,
-                                    Map<String, String> bindingBasePaths) {
-        this(fileSystem, conf, serializer, instanceId, Clock.systemUTC(),
-                CompressionType.RECORD, bindingBasePaths);
-    }
-
-    /**
      * Creates a writer with full configuration.
      */
     public SequenceFileBatchWriter(FileSystem fileSystem,
@@ -148,13 +136,6 @@ public class SequenceFileBatchWriter implements BatchWriter {
                     "BLOCK compression is forbidden — it triggers mid-stream sync behavior " +
                     "that interacts badly with erasure-coded files. Use RECORD or NONE.");
         }
-    }
-
-    /**
-     * Registers a base path for a binding.
-     */
-    public void registerBinding(String bindingId, String basePath) {
-        bindingBasePaths.put(bindingId, basePath);
     }
 
     @Override
@@ -322,29 +303,6 @@ public class SequenceFileBatchWriter implements BatchWriter {
         } catch (IOException e) {
             log.debug("Failed to delete temp file {}: {}", path, e.getMessage());
         }
-    }
-
-    public int cleanupTempFiles(String basePath, long maxAgeMs) throws IOException {
-        String tempDir = PartitionPath.tempDir(basePath, instanceId);
-        Path tempPath = new Path(tempDir);
-
-        if (!fileSystem.exists(tempPath)) {
-            return 0;
-        }
-
-        int deleted = 0;
-        long cutoff = clock.millis() - maxAgeMs;
-
-        for (var status : fileSystem.listStatus(tempPath)) {
-            if (status.getModificationTime() < cutoff) {
-                if (fileSystem.delete(status.getPath(), false)) {
-                    log.info("Deleted stale temp file: {}", status.getPath());
-                    deleted++;
-                }
-            }
-        }
-
-        return deleted;
     }
 
     public String getInstanceId() {

@@ -101,6 +101,16 @@ public class IntakeRuntimeManager implements SmartLifecycle {
 
     @Override
     public void start() {
+        if (running) {
+            // Spring's lifecycle processor never double-starts, but an
+            // out-of-band caller (admin hook, test misuse) would re-run
+            // createAndStartRuntimes, silently overwriting the runtimes map —
+            // leaking the old executors and JMS sessions and creating a second
+            // competing consumer against the same queues.
+            log.warn("IntakeRuntimeManager.start() called while already running — ignoring");
+            return;
+        }
+
         log.info("Starting IntakeRuntimeManager");
 
         if (properties.getBindings().isEmpty()) {
@@ -110,10 +120,15 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         }
 
         if (properties.getMqConnections().isEmpty()) {
-            log.warn("No MQ connections configured — bindings will not start. " +
-                    "Configure intake.mq-connections to enable MQ connectivity.");
-            running = true;
-            return;
+            // Two independent reviewers flagged the old warn-and-pretend-
+            // healthy behaviour here. In a real boot this branch is already
+            // unreachable — MqConfiguration's @PostConstruct validator fails
+            // the context first when bindings reference unknown connections —
+            // but a belt should agree with its braces: bindings with nothing
+            // to connect them is a misconfiguration, not a healthy idle state.
+            throw new IllegalStateException(
+                    "Bindings are configured but intake.mq-connections is empty — nothing "
+                            + "could ever be consumed. Configure intake.mq-connections.");
         }
 
         try {
@@ -396,9 +411,12 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         for (BindingRuntime runtime : runtimes.values()) {
             try {
                 runtime.stop(drainTimeout);
-                healthManager.recordStopped(runtime.getBindingId());
             } catch (Exception e) {
                 log.error("Error stopping binding '{}': {}", runtime.getBindingId(), e.getMessage(), e);
+            } finally {
+                // Recorded even when stop() failed: after shutdown, a snapshot
+                // still showing UNHEALTHY/DEGRADED reads as a live problem.
+                healthManager.recordStopped(runtime.getBindingId());
             }
         }
 

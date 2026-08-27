@@ -120,7 +120,10 @@ public class HdfsRecordIndexWriter implements RecordIndexWriter {
      */
     private String basePathOf(RecordIndex index) {
         String partition = index.getPartitionPath();
-        int yearMarker = partition.indexOf("/year=");
+        // LAST occurrence: the partition component the writer appended is the
+        // final /year= in the string, so an admin-configured base path that
+        // itself contains "/year=" no longer truncates at the wrong point.
+        int yearMarker = partition.lastIndexOf("/year=");
         return yearMarker > 0 ? partition.substring(0, yearMarker) : partition;
     }
 

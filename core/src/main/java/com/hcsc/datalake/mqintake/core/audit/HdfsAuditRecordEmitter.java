@@ -58,6 +58,18 @@ public class HdfsAuditRecordEmitter implements AuditRecordEmitter {
         String json = toJson(record);
 
         Path path = new Path(auditPath);
+
+        // Idempotent by name: audit records are immutable and one-per-batch,
+        // so an existing target means this exact record was already written.
+        // Reconciliation re-classifies a SOLE_COPY orphan on every pass until
+        // its retrospective audit is found, and the rename below does not
+        // overwrite — without this check the re-emit failed noisily and
+        // surfaced as a discrepancy on an otherwise-fine file.
+        if (fileSystem.exists(path)) {
+            log.debug("Audit record already present, not rewriting: {}", path);
+            return;
+        }
+
         byte[] content = (json + "\n").getBytes(StandardCharsets.UTF_8);
 
         // Staged and renamed rather than written in place. A record streamed
@@ -129,13 +141,10 @@ public class HdfsAuditRecordEmitter implements AuditRecordEmitter {
     }
 
     private String buildAuditPath(AuditRecord record) {
-        String date = DATE_FORMAT.format(
-                record.getCommitTimestamp().atZone(java.time.ZoneOffset.UTC).toLocalDate());
-        // Derive audit filename from the data filename (strip extension, add audit prefix)
-        String dataFilename = record.getFilename();
-        String auditFilename = "audit_" + stripExtension(dataFilename) + ".json";
-        return String.format("%s/%s/%s/%s",
-                auditBasePath, record.getBindingId(), date, auditFilename);
+        java.time.LocalDate date =
+                record.getCommitTimestamp().atZone(java.time.ZoneOffset.UTC).toLocalDate();
+        String auditFilename = "audit_" + stripExtension(record.getFilename()) + ".json";
+        return AuditPaths.recordFile(auditBasePath, record.getBindingId(), date, auditFilename);
     }
 
     private String stripExtension(String filename) {

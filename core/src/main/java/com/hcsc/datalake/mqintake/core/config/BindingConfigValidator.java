@@ -7,6 +7,7 @@ import com.hcsc.datalake.mqintake.core.config.validation.BindingConfigRule;
 import com.hcsc.datalake.mqintake.core.config.validation.BisectBackoutThresholdRule;
 import com.hcsc.datalake.mqintake.core.config.validation.HdfsPathWritableRule;
 import com.hcsc.datalake.mqintake.core.config.validation.MqConnectionSanityRule;
+import com.hcsc.datalake.mqintake.core.config.validation.QueueCollisionRule;
 import com.hcsc.datalake.mqintake.core.config.validation.RequiredFieldsRule;
 import com.hcsc.datalake.mqintake.core.config.validation.TrackerQueueConsistencyRule;
 import com.hcsc.datalake.mqintake.core.config.validation.UniqueBindingIdsRule;
@@ -69,6 +70,7 @@ public class BindingConfigValidator {
                 new AggregateMemoryRule(maxHeapSupplier),
                 new RequiredFieldsRule(),
                 new MqConnectionSanityRule(),
+                new QueueCollisionRule(),
                 new BisectBackoutThresholdRule(),
                 new HdfsPathWritableRule(hdfsPathValidator));
     }

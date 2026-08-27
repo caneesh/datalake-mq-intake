@@ -59,7 +59,7 @@ import java.util.Set;
 public class PartitionReconciliationService implements PartitionReconciler {
 
     private static final Logger log = LoggerFactory.getLogger(PartitionReconciliationService.class);
-    private static final Duration PARTITION_LENGTH = Duration.ofMinutes(15);
+    private static final Duration PARTITION_LENGTH = com.hcsc.datalake.mqintake.core.hdfs.PartitionPath.WINDOW;
 
     private final FileSystem fileSystem;
     private final IdentityExtractor identityReader;

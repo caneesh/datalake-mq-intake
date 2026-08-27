@@ -51,7 +51,10 @@ public class ExponentialBackoffWithJitter implements BackoffPolicy {
 
         // Never shorter than the initial interval: a negative jitter draw on
         // the first attempt would otherwise produce a near-zero wait and
-        // hammer a queue manager that is still coming up.
-        return Duration.ofMillis(Math.max(initialMs, (long) (capped + jitter)));
+        // hammer a queue manager that is still coming up. And never longer
+        // than the cap: jitter was previously applied after capping, so a
+        // high draw waited up to 20% beyond the documented ceiling.
+        long jittered = (long) (capped + jitter);
+        return Duration.ofMillis(Math.min(maxMs, Math.max(initialMs, jittered)));
     }
 }

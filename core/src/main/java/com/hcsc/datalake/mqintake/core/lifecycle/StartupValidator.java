@@ -37,11 +37,11 @@ public class StartupValidator {
      * Creates a validator that also checks each binding's audit destination.
      *
      * <p>Audit is not optional at runtime — {@code IntakeRuntimeManager} always
-     * builds an emitter — and it is written <em>after</em> the MQ commit. So an
-     * unwritable audit path does not stop the service starting, landing data
-     * and acknowledging messages; it surfaces only once the first batch tries
-     * to record what it already did. Validating it at startup turns that into
-     * a refusal to start.
+     * builds an emitter — and under the ABC posture it is written <em>before</em>
+     * the commit and fails the batch when unwritable. An unusable audit path
+     * therefore stalls ingestion at the first batch; validating it at startup
+     * turns that first-batch stall into a refusal to start, with a message
+     * naming the path instead of a rollback loop.
      *
      * @param auditBasePath the configured audit base path; validated per
      *                      binding as {@code {auditBasePath}/{bindingId}}
@@ -114,9 +114,9 @@ public class StartupValidator {
             }
         }
 
-        // The audit destination is the third mandatory location. It is written
-        // after the MQ commit, so a problem here is invisible until the first
-        // batch has already landed and been acknowledged.
+        // The audit destination is the third mandatory location. Audit fails
+        // closed before the commit, so an unusable path here would stall the
+        // very first batch — better refused at startup with a clear message.
         if (auditValidationEnabled) {
             try {
                 validateAuditPath(bindingId);
@@ -142,9 +142,10 @@ public class StartupValidator {
                     bindingId));
         }
 
-        // Matches HdfsAuditRecordEmitter.buildAuditPath, minus the date
-        // component, which changes daily and is created on demand.
-        String bindingAuditPath = auditBasePath + "/" + bindingId;
+        // The date component changes daily and is created on demand; the
+        // binding root is the stable part worth validating.
+        String bindingAuditPath = com.hcsc.datalake.mqintake.core.audit.AuditPaths
+                .bindingDir(auditBasePath, bindingId);
         Path path = new Path(bindingAuditPath);
 
         try {

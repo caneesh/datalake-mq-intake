@@ -2,7 +2,11 @@ version: '3.8'
 
 services:
   ibm-mq:
-    image: icr.io/ibm-messaging/mq:latest
+    # Pinned by digest (MQ 10.0.0.0). This image is what the 11 real-MQ tests
+    # run against — delivery-count semantics, MQRC error codes and channel
+    # behaviour all feed assertions, so an unpinned :latest let a queue-manager
+    # upgrade silently shift the ground under them.
+    image: icr.io/ibm-messaging/mq@sha256:6fb775474f3f45f6dcb3218ee74804be115b1bb90cc65ee7400fdc1f4ffa9dd8
     container_name: mq-intake-ibmmq
     hostname: mq-intake-ibmmq
     environment:

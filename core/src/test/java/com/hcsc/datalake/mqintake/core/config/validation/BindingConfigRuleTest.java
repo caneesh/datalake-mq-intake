@@ -271,6 +271,53 @@ class BindingConfigRuleTest {
     }
 
     @Test
+    void aBackoutQueueThatIsAlsoASourceQueueIsAFeedbackLoop() {
+        BindingConfigRule rule = new QueueCollisionRule();
+
+        BindingConfig a = binding("a");
+        BindingConfig b = binding("b");
+        b.setBackoutQueue(a.getSourceQueue());   // same connection
+
+        assertThat(rule.validate(propertiesWith(a, b)))
+                .singleElement().asString()
+                .contains("feedback loop");
+
+        // On a DIFFERENT connection the same name is a different queue
+        b.setMqConnection("other-qm");
+        assertThat(rule.validate(propertiesWith(a, b))).isEmpty();
+    }
+
+    @Test
+    void twoBindingsSharingATrackerQueueAreRejected() {
+        BindingConfigRule rule = new QueueCollisionRule();
+
+        BindingConfig a = binding("a");
+        a.setMode(BindingMode.TRACKED);
+        a.setTrackerQueue("SHARED.TRACKER");
+        BindingConfig b = binding("b");
+        b.setMode(BindingMode.TRACKED);
+        b.setTrackerQueue("SHARED.TRACKER");
+
+        assertThat(rule.validate(propertiesWith(a, b)))
+                .singleElement().asString()
+                .contains("interleave");
+    }
+
+    @Test
+    void aTrackerQueueThatIsAlsoASourceQueueIsRejected() {
+        BindingConfigRule rule = new QueueCollisionRule();
+
+        BindingConfig a = binding("a");
+        BindingConfig b = binding("b");
+        b.setMode(BindingMode.TRACKED);
+        b.setTrackerQueue(a.getSourceQueue());
+
+        assertThat(rule.validate(propertiesWith(a, b)))
+                .singleElement().asString()
+                .contains("consume its own tracker");
+    }
+
+    @Test
     void theValidatorAcceptsACustomRuleSet() {
         // The seam: policy is replaceable without editing the validator.
         BindingConfigValidator alwaysFails = new BindingConfigValidator(
@@ -287,7 +334,7 @@ class BindingConfigRuleTest {
                 path -> com.hcsc.datalake.mqintake.core.config.HdfsPathValidator
                         .PathValidationResult.success());
 
-        assertThat(validator.rules()).hasSize(10);
+        assertThat(validator.rules()).hasSize(11);
     }
 
     // --- helpers ---

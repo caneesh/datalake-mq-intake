@@ -1,10 +1,15 @@
-* Define queues for RMS binding
-DEFINE QLOCAL(MQ.HPS.MEMBERSHIP.IN) REPLACE
+* Define queues for RMS binding.
+* BOTHRESH/BOQNAME mirror the application thresholds (rms backout-threshold: 5,
+* claims: 14 = ceil(log2(8000))+1). The app reads its own configured threshold,
+* not the queue manager attribute, so these are drill/production parity rather
+* than behaviour — the readiness review mandates them on the real queue
+* managers, and the drill environment should look like what it rehearses.
+DEFINE QLOCAL(MQ.HPS.MEMBERSHIP.IN) BOTHRESH(5) BOQNAME(MQ.HPS.MEMBERSHIP.BACKOUT) REPLACE
 DEFINE QLOCAL(MQ.HPS.MEMBERSHIP.TRACKER) REPLACE
 DEFINE QLOCAL(MQ.HPS.MEMBERSHIP.BACKOUT) REPLACE
 
 * Define queues for Claims binding
-DEFINE QLOCAL(MQ.DMIH.CLAIMS.IN) REPLACE
+DEFINE QLOCAL(MQ.DMIH.CLAIMS.IN) BOTHRESH(14) BOQNAME(MQ.DMIH.CLAIMS.BACKOUT) REPLACE
 DEFINE QLOCAL(MQ.DMIH.CLAIMS.BACKOUT) REPLACE
 
 * Set channel auth rules to allow connections

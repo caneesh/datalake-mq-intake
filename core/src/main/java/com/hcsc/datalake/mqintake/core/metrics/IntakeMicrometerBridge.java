@@ -57,8 +57,17 @@ public class IntakeMicrometerBridge {
      * {@code metricsRegistry.forBinding} while the runtime manager starts,
      * which happens during context refresh, before this event.
      */
+    private final java.util.concurrent.atomic.AtomicBoolean bound =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     @EventListener(ApplicationReadyEvent.class)
     public void bindMetrics() {
+        if (!bound.compareAndSet(false, true)) {
+            // ApplicationReadyEvent can fire more than once in multi-context
+            // setups; re-registering relied on Micrometer's dedup behaviour
+            // rather than stating the intent.
+            return;
+        }
         MetricsRegistry registry = runtimeManager.getMetricsRegistry();
         int bound = 0;
 

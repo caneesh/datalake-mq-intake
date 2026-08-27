@@ -10,7 +10,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -26,7 +25,6 @@ import com.hcsc.datalake.mqintake.core.util.JsonFields;
 public class AuditRecordReader {
 
     private static final Logger log = LoggerFactory.getLogger(AuditRecordReader.class);
-    private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd");
 
 
     private final FileSystem fileSystem;
@@ -42,8 +40,9 @@ public class AuditRecordReader {
      * A missing date directory yields an empty list (no batches committed).
      */
     public List<ParsedAuditRecord> readForDate(String bindingId, LocalDate date) throws IOException {
-        Path dateDir = new Path(String.format("%s/%s/%s",
-                auditBasePath, bindingId, DATE_FORMAT.format(date)));
+        Path dateDir = new Path(
+                com.hcsc.datalake.mqintake.core.audit.AuditPaths.dateDir(
+                        auditBasePath, bindingId, date));
 
         List<ParsedAuditRecord> records = new ArrayList<>();
         if (!fileSystem.exists(dateDir)) {

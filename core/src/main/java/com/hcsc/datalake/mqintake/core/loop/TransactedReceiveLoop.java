@@ -602,7 +602,12 @@ public class TransactedReceiveLoop implements Runnable {
         }
     }
 
-    public Session getSession() {
+    /**
+     * Protected: a fault-injection test subclass overrides this, but a public
+     * accessor handed the thread-confined transacted Session to any caller on
+     * any thread — a standing-constraint violation waiting for a caller.
+     */
+    protected Session getSession() {
         return listenerSession.session();
     }
 
@@ -617,7 +622,32 @@ public class TransactedReceiveLoop implements Runnable {
      * @return true if recovery succeeded, false if recovery failed after max attempts
      *         or was interrupted
      */
+    /**
+     * Iterative on purpose. The previous version retried by recursing, which
+     * was safe only because the budget is a hardcoded 10 — each level's stack
+     * frame stays live for the entire remaining backoff. The moment the
+     * budget becomes configurable (a natural next step), recursion depth
+     * scales with it. Same behaviour, loop instead of stack.
+     */
     private boolean recoverSession() {
+        while (true) {
+            if (!recoverOnce()) {
+                return false;
+            }
+            if (reconnectAttempts.get() == 0) {
+                return true;   // recoverOnce resets the counter on success
+            }
+        }
+    }
+
+    /**
+     * One recovery attempt.
+     *
+     * @return false to stop recovering (budget exhausted, fatal, interrupted);
+     *         true to continue — either success (counter reset to 0) or a
+     *         retryable failure (counter still advancing)
+     */
+    private boolean recoverOnce() {
         int attempts = reconnectAttempts.incrementAndGet();
 
         if (attempts > MAX_RECONNECT_ATTEMPTS) {
@@ -692,8 +722,7 @@ public class TransactedReceiveLoop implements Runnable {
                 return false;
             }
 
-            // Recursive retry (will increment attempt counter)
-            return recoverSession();
+            return true;   // retryable: the outer loop tries again
         }
     }
 

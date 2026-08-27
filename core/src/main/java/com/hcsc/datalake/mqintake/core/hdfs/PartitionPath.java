@@ -25,6 +25,14 @@ public final class PartitionPath {
     /** Length of one partition window: a quarter hour. */
     private static final long WINDOW_MILLIS = 15L * 60L * 1000L;
 
+    /**
+     * The partition window, public because reconciliation must agree with it.
+     * The 15-minute literal previously lived in three files; changing one and
+     * missing another would silently break grace-period timing or window
+     * enumeration with no compile-time signal.
+     */
+    public static final java.time.Duration WINDOW = java.time.Duration.ofMillis(WINDOW_MILLIS);
+
     private PartitionPath() {
         // Static utility class
     }

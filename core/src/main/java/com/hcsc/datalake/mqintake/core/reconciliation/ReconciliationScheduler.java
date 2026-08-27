@@ -195,7 +195,8 @@ public class ReconciliationScheduler implements AutoCloseable {
         List<Instant> windows = new ArrayList<>();
         Instant now = clock.instant();
         for (int i = 1; i <= Math.max(1, count); i++) {
-            windows.add(now.minus(Duration.ofMinutes(15L * i)));
+            windows.add(now.minus(
+                    com.hcsc.datalake.mqintake.core.hdfs.PartitionPath.WINDOW.multipliedBy(i)));
         }
         return windows;
     }

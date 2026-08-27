@@ -27,7 +27,6 @@ public class IntakeProperties {
     private long aggregateMemoryCeilingBytes = 0L;
     private String instanceId;
 
-    private MqProperties mq = new MqProperties();
     private KerberosProperties kerberos = new KerberosProperties();
     private HdfsProperties hdfs = new HdfsProperties();
     private ShutdownProperties shutdown = new ShutdownProperties();
@@ -71,14 +70,6 @@ public class IntakeProperties {
 
     public void setInstanceId(String instanceId) {
         this.instanceId = instanceId;
-    }
-
-    public MqProperties getMq() {
-        return mq;
-    }
-
-    public void setMq(MqProperties mq) {
-        this.mq = mq;
     }
 
     public KerberosProperties getKerberos() {
@@ -170,33 +161,6 @@ public class IntakeProperties {
         public void setQuarantineDuplicates(boolean q) { this.quarantineDuplicates = q; }
     }
 
-    /**
-     * IBM MQ connection properties.
-     */
-    public static class MqProperties {
-        private String host;
-        private int port = 1414;
-        private String queueManager;
-        private String channel;
-        private String user;
-        private String password;
-        private long receiveTimeoutMs = 1000;
-
-        public String getHost() { return host; }
-        public void setHost(String host) { this.host = host; }
-        public int getPort() { return port; }
-        public void setPort(int port) { this.port = port; }
-        public String getQueueManager() { return queueManager; }
-        public void setQueueManager(String queueManager) { this.queueManager = queueManager; }
-        public String getChannel() { return channel; }
-        public void setChannel(String channel) { this.channel = channel; }
-        public String getUser() { return user; }
-        public void setUser(String user) { this.user = user; }
-        public String getPassword() { return password; }
-        public void setPassword(String password) { this.password = password; }
-        public long getReceiveTimeoutMs() { return receiveTimeoutMs; }
-        public void setReceiveTimeoutMs(long receiveTimeoutMs) { this.receiveTimeoutMs = receiveTimeoutMs; }
-    }
 
     /**
      * Kerberos authentication properties.

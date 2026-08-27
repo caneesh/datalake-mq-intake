@@ -38,7 +38,7 @@ public class BindingHealthManager {
         health.status = HealthStatus.HEALTHY;
         health.lastHealthyTime = Instant.now();
         health.lastError = null;
-        health.consecutiveFailures = 0;
+        health.consecutiveFailures.set(0);
     }
 
     /**
@@ -52,10 +52,10 @@ public class BindingHealthManager {
         health.status = HealthStatus.UNHEALTHY;
         health.lastUnhealthyTime = Instant.now();
         health.lastError = error;
-        health.consecutiveFailures++;
+        int failures = health.consecutiveFailures.incrementAndGet();
 
         log.error("Binding '{}' is UNHEALTHY (failure #{}): {}",
-                bindingId, health.consecutiveFailures, error.getMessage());
+                bindingId, failures, error.getMessage());
     }
 
     /**
@@ -126,7 +126,7 @@ public class BindingHealthManager {
                 health.status,
                 health.lastHealthyTime,
                 health.lastUnhealthyTime,
-                health.consecutiveFailures,
+                health.consecutiveFailures.get(),
                 health.lastError,
                 health.degradedReason
         );
@@ -187,7 +187,11 @@ public class BindingHealthManager {
         volatile HealthStatus status = HealthStatus.UNKNOWN;
         volatile Instant lastHealthyTime;
         volatile Instant lastUnhealthyTime;
-        volatile int consecutiveFailures = 0;
+        // Atomic: concurrent recordUnhealthy calls — every listener thread of
+        // a binding failing together when a shared connection dies — raced a
+        // plain ++ and undercounted the streak.
+        final java.util.concurrent.atomic.AtomicInteger consecutiveFailures =
+                new java.util.concurrent.atomic.AtomicInteger();
         volatile Throwable lastError;
         volatile String degradedReason;
     }
