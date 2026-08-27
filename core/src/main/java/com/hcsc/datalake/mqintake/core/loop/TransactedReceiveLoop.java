@@ -155,83 +155,111 @@ public class TransactedReceiveLoop implements Runnable {
                 config.getBatch().getBytes(),
                 config.getBatch().getIntervalMs()
         );
-
         List<Message> batch = new ArrayList<>(config.getBatch().getSize());
 
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
-                int effectiveBatchSize = getEffectiveBatchSize();
-                Message message = listenerSession.consumer().receive(receiveTimeoutMs);
-
-                if (message != null) {
-                    batch.add(message);
-                    flushTrigger.trackMessage(message);
-                    // In-flight batch depth. One atomic store per message,
-                    // negligible beside the JMS receive that produced it.
-                    metrics.setCurrentBatchSize(batch.size());
-
-                    if (batch.size() >= effectiveBatchSize || flushTrigger.shouldFlush()) {
-                        flushBatch(batch, flushTrigger);
-                    }
-                } else {
-                    // Idle poll. shouldFlush() rather than isTimeoutExpired()
-                    // so the partition boundary is noticed here too — otherwise
-                    // a quiet batch would sit until the next message arrived,
-                    // and land in a later partition than the one it belongs to.
-                    if (!batch.isEmpty() && flushTrigger.shouldFlush()) {
-                        flushBatch(batch, flushTrigger);
-                    }
-                }
+                pollOnce(batch, flushTrigger);
             } catch (JMSException e) {
-                if (running.get()) {
-                    log.error("JMS error in receive loop for binding '{}': {}",
-                            config.getId(), e.getMessage(), e);
-                    handleFailure(e);
-                    rollbackQuietly();
-                    batch.clear();
-                    flushTrigger.reset();
-                    // Without this the gauge kept reporting the rolled-back
-                    // batch's size through the whole reconnect backoff —
-                    // a phantom stuck batch on the dashboard.
-                    metrics.setCurrentBatchSize(0);
-
-                    if (faultPolicy.isFatal(e)) {
-                        // Reconnecting cannot fix bad credentials or denied
-                        // access; checking only mid-retry paid for one doomed
-                        // close + backoff + open before giving up.
-                        log.error("Fatal (non-recoverable) JMS fault for binding '{}', "
-                                + "stopping loop: {}", config.getId(), e.getMessage());
-                        running.set(false);
-                        break;
-                    }
-                    if (faultPolicy.requiresRecovery(e)) {
-                        if (!recoverSession()) {
-                            log.error("Session recovery failed for binding '{}', stopping loop",
-                                    config.getId());
-                            running.set(false);
-                            break;
-                        }
-                    } else {
-                        // The fault policy's own documented blind spot: a
-                        // genuinely unhealthy session whose error text matches
-                        // nothing would otherwise spin rollback-and-receive
-                        // with zero pause, burning CPU and log volume. A short
-                        // pause bounds that without slowing real one-off
-                        // faults meaningfully.
-                        pauseAfterUnrecognisedFault();
-                    }
-                } else {
-                    // Shutdown-time: stop() flips running before interrupting,
-                    // so an exception raised by the interrupt lands here. It
-                    // used to vanish without a trace — if the same exception
-                    // had actually signalled a real broker fault coinciding
-                    // with shutdown, there was no forensic record at all.
-                    log.debug("JMS exception during shutdown for binding '{}' (expected if "
-                            + "raised by the stop interrupt): {}", config.getId(), e.getMessage());
+                if (!surviveFault(e, batch, flushTrigger)) {
+                    break;
                 }
             }
         }
 
+        drainOnShutdown(batch);
+    }
+
+    /**
+     * One receive: accumulate the message, if any, and flush when a batch
+     * boundary is hit.
+     */
+    private void pollOnce(List<Message> batch, FlushTrigger flushTrigger) throws JMSException {
+        int effectiveBatchSize = getEffectiveBatchSize();
+        Message message = listenerSession.consumer().receive(receiveTimeoutMs);
+
+        if (message != null) {
+            batch.add(message);
+            flushTrigger.trackMessage(message);
+            // In-flight batch depth. One atomic store per message,
+            // negligible beside the JMS receive that produced it.
+            metrics.setCurrentBatchSize(batch.size());
+
+            if (batch.size() >= effectiveBatchSize || flushTrigger.shouldFlush()) {
+                flushBatch(batch, flushTrigger);
+            }
+        } else if (!batch.isEmpty() && flushTrigger.shouldFlush()) {
+            // Idle poll. shouldFlush() rather than isTimeoutExpired()
+            // so the partition boundary is noticed here too — otherwise
+            // a quiet batch would sit until the next message arrived,
+            // and land in a later partition than the one it belongs to.
+            flushBatch(batch, flushTrigger);
+        }
+    }
+
+    /**
+     * Fault triage after a JMS failure: discard the in-flight batch (a
+     * rollback puts its messages back on the queue for redelivery), then
+     * decide whether the loop can keep running.
+     *
+     * @return true to keep looping; false to stop — a fatal fault, or
+     *         recovery that failed after exhausting its budget
+     */
+    private boolean surviveFault(JMSException e, List<Message> batch, FlushTrigger flushTrigger) {
+        if (!running.get()) {
+            // Shutdown-time: stop() flips running before interrupting,
+            // so an exception raised by the interrupt lands here. It
+            // used to vanish without a trace — if the same exception
+            // had actually signalled a real broker fault coinciding
+            // with shutdown, there was no forensic record at all.
+            log.debug("JMS exception during shutdown for binding '{}' (expected if "
+                    + "raised by the stop interrupt): {}", config.getId(), e.getMessage());
+            return true; // the loop condition sees running=false and exits
+        }
+
+        log.error("JMS error in receive loop for binding '{}': {}",
+                config.getId(), e.getMessage(), e);
+        handleFailure(e);
+        rollbackQuietly();
+        batch.clear();
+        flushTrigger.reset();
+        // Without this the gauge kept reporting the rolled-back
+        // batch's size through the whole reconnect backoff —
+        // a phantom stuck batch on the dashboard.
+        metrics.setCurrentBatchSize(0);
+
+        if (faultPolicy.isFatal(e)) {
+            // Reconnecting cannot fix bad credentials or denied
+            // access; checking only mid-retry paid for one doomed
+            // close + backoff + open before giving up.
+            log.error("Fatal (non-recoverable) JMS fault for binding '{}', "
+                    + "stopping loop: {}", config.getId(), e.getMessage());
+            running.set(false);
+            return false;
+        }
+
+        if (faultPolicy.requiresRecovery(e)) {
+            if (!recoverSession()) {
+                log.error("Session recovery failed for binding '{}', stopping loop",
+                        config.getId());
+                running.set(false);
+                return false;
+            }
+            return true;
+        }
+
+        // The fault policy's own documented blind spot: a
+        // genuinely unhealthy session whose error text matches
+        // nothing would otherwise spin rollback-and-receive
+        // with zero pause, burning CPU and log volume. A short
+        // pause bounds that without slowing real one-off
+        // faults meaningfully.
+        pauseAfterUnrecognisedFault();
+        return true;
+    }
+
+    /** Lands whatever is still accumulated when the loop stops. */
+    private void drainOnShutdown(List<Message> batch) {
         // stop() interrupts this thread to break the blocking receive(). The
         // drain below has to commit, and the IBM MQ client can fail in-flight
         // calls when the calling thread is still marked interrupted — which
@@ -239,16 +267,18 @@ public class TransactedReceiveLoop implements Runnable {
         // landing it. Clear the flag before attempting the commit.
         Thread.interrupted();
 
-        if (!batch.isEmpty()) {
-            log.info("Draining {} messages on shutdown for binding '{}'",
-                    batch.size(), config.getId());
-            try {
-                processBatch(batch);
-            } catch (Exception e) {
-                log.warn("Failed to drain batch on shutdown for binding '{}': {}",
-                        config.getId(), e.getMessage());
-                rollbackQuietly();
-            }
+        if (batch.isEmpty()) {
+            return;
+        }
+
+        log.info("Draining {} messages on shutdown for binding '{}'",
+                batch.size(), config.getId());
+        try {
+            processBatch(batch);
+        } catch (Exception e) {
+            log.warn("Failed to drain batch on shutdown for binding '{}': {}",
+                    config.getId(), e.getMessage());
+            rollbackQuietly();
         }
     }
 
