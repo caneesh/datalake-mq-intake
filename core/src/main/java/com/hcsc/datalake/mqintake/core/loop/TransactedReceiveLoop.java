@@ -359,24 +359,44 @@ public class TransactedReceiveLoop implements Runnable {
             recordCommittedBatch(batchSize, cleanMessages, writeResult, batchMessageIds);
 
         } catch (Exception e) {
+            // "Did the commit happen?" is the pivotal question of the whole
+            // transaction design, so it stays visible here rather than inside
+            // a handler. The committed flag is set in this method, directly
+            // after each commitSession() call, for the same reason: set
+            // anywhere else, a failure in between would send an
+            // already-committed batch down the rollback path below.
             if (committed) {
-                // The unit of work is already durable and acknowledged. Failing
-                // here must not roll back (there is nothing left to undo) and
-                // must not mark the batch suspect: those IDs are off the queue,
-                // so they can never be redelivered, clearSuspects() could never
-                // retire them, and DegradedModeManager would refuse to restore
-                // normal batch size for the life of the process.
-                log.error("Post-commit bookkeeping failed for binding '{}' after committing "
-                                + "{} messages — delivery is unaffected: {}",
-                        config.getId(), cleanMessages.size(), e.getMessage(), e);
-                return;
+                containPostCommitFailure(e, cleanMessages.size());
+            } else {
+                rollBackFailedBatch(e, batchSize, batchMessageIds);
             }
-            log.error("Batch processing failed for binding '{}', rolling back {} messages: {}",
-                    config.getId(), batchSize, e.getMessage(), e);
-            handleFailure(e, batchMessageIds);
-            rollbackQuietly();
-            metrics.recordRollback();
         }
+    }
+
+    /**
+     * A failure after the commit. The unit of work is already durable and
+     * acknowledged, so there is nothing to undo: this must not roll back and
+     * must not mark the batch suspect — those IDs are off the queue, so they
+     * can never be redelivered, clearSuspects() could never retire them, and
+     * DegradedModeManager would refuse to restore normal batch size for the
+     * life of the process.
+     */
+    private void containPostCommitFailure(Exception e, int committedCount) {
+        log.error("Post-commit bookkeeping failed for binding '{}' after committing "
+                        + "{} messages — delivery is unaffected: {}",
+                config.getId(), committedCount, e.getMessage(), e);
+    }
+
+    /**
+     * A failure before the commit. Rolling back puts every message of the
+     * unit of work back on the queue for redelivery; nothing is lost.
+     */
+    private void rollBackFailedBatch(Exception e, int batchSize, List<String> batchMessageIds) {
+        log.error("Batch processing failed for binding '{}', rolling back {} messages: {}",
+                config.getId(), batchSize, e.getMessage(), e);
+        handleFailure(e, batchMessageIds);
+        rollbackQuietly();
+        metrics.recordRollback();
     }
 
     /**
