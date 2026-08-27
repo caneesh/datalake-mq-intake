@@ -16,9 +16,20 @@ import java.util.Map;
  * <p>Reports aggregate health based on all binding statuses:
  * <ul>
  *   <li>UP: all bindings HEALTHY or STOPPED</li>
- *   <li>DOWN: any binding UNHEALTHY</li>
- *   <li>OUT_OF_SERVICE: any binding DEGRADED or RECOVERING (but none UNHEALTHY)</li>
+ *   <li>DOWN: <em>every</em> binding UNHEALTHY — the process genuinely has
+ *       nothing consuming, and a restart is justified</li>
+ *   <li>PARTIAL_OUTAGE: some bindings UNHEALTHY while others still work</li>
+ *   <li>DEGRADED: no binding UNHEALTHY, but some DEGRADED or RECOVERING</li>
  * </ul>
+ *
+ * <p><strong>Why one failed binding must not read as DOWN:</strong> DOWN maps
+ * to HTTP 503, which orchestrators treat as restart-the-pod. Binding isolation
+ * is a core design property — a Claims failure is contained at the processing
+ * layer, and reporting it as a whole-service outage would get the pod
+ * restarted, interrupting the healthy RMS binding to "fix" a problem that was
+ * already isolated. PARTIAL_OUTAGE and DEGRADED are mapped to HTTP 200 in
+ * application.yml; alerting reads the status string and the per-binding
+ * metrics, not the HTTP code.
  *
  * <p>Individual binding status is included in the details.
  *
@@ -26,6 +37,12 @@ import java.util.Map;
  */
 @Component("bindingsHealthIndicator")
 public class BindingsHealthIndicator implements HealthIndicator {
+
+    /** Some bindings are down, others are still consuming. HTTP 200 by mapping. */
+    public static final String PARTIAL_OUTAGE = "PARTIAL_OUTAGE";
+
+    /** Reduced capacity (degraded batch size, lost listener), still consuming. */
+    public static final String DEGRADED = "DEGRADED";
 
     private final BindingHealthManager healthManager;
 
@@ -81,13 +98,21 @@ public class BindingsHealthIndicator implements HealthIndicator {
             }
         }
 
-        // Determine aggregate health
-        if (hasUnhealthy) {
+        // Determine aggregate health. DOWN is reserved for the case where a
+        // restart could actually help: nothing at all is consuming.
+        boolean allUnhealthy = statuses.values().stream()
+                .allMatch(s -> s == HealthStatus.UNHEALTHY);
+
+        if (allUnhealthy) {
             return Health.down()
                     .withDetails(details)
                     .build();
+        } else if (hasUnhealthy) {
+            return Health.status(PARTIAL_OUTAGE)
+                    .withDetails(details)
+                    .build();
         } else if (hasDegradedOrRecovering) {
-            return Health.status("OUT_OF_SERVICE")
+            return Health.status(DEGRADED)
                     .withDetails(details)
                     .build();
         } else {

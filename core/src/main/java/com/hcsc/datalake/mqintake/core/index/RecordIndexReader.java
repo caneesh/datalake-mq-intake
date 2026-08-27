@@ -17,6 +17,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
+import com.hcsc.datalake.mqintake.core.util.JsonFields;
+
 /**
  * Reads a sidecar index back.
  *
@@ -75,18 +77,31 @@ public class RecordIndexReader {
                 return Optional.empty();
             }
 
-            int schema = (int) longField(header, "schema", -1);
+            // The entry lines below are truncation-checked; the header must be
+            // too. A cut-off header parses far too well without this: schema
+            // may still be found, "records" goes missing so declaredCount
+            // becomes -1 and the count check is skipped — a damaged index then
+            // reads as an authoritative claim of ZERO records for a file that
+            // may contain thousands.
+            if (!JsonFields.isCompleteObject(header)
+                    || JsonFields.longField(header, "records", -1) < 0) {
+                log.warn("Record index {} has a truncated or incomplete header — ignoring the "
+                        + "whole index rather than trusting it", indexPath);
+                return Optional.empty();
+            }
+
+            int schema = (int) JsonFields.longField(header, "schema", -1);
             if (schema != HdfsRecordIndexWriter.SCHEMA_VERSION) {
                 log.warn("Record index {} has unsupported schema {} (expected {}) — ignoring",
                         indexPath, schema, HdfsRecordIndexWriter.SCHEMA_VERSION);
                 return Optional.empty();
             }
 
-            String binding = stringField(header, "binding");
-            String file = stringField(header, "file");
-            String partition = stringField(header, "partition");
-            String instance = stringField(header, "instance");
-            long declaredCount = longField(header, "records", -1);
+            String binding = JsonFields.stringField(header, "binding");
+            String file = JsonFields.stringField(header, "file");
+            String partition = JsonFields.stringField(header, "partition");
+            String instance = JsonFields.stringField(header, "instance");
+            long declaredCount = JsonFields.longField(header, "records", -1);
 
             List<RecordIndexEntry> entries = new ArrayList<>();
             String line;
@@ -98,13 +113,14 @@ public class RecordIndexReader {
                 // otherwise parse into an entry with a plausible offset and an
                 // empty identity, which reconciliation would read as a record
                 // that lost its identity rather than as a damaged index.
-                if (!isCompleteLine(line)) {
+                if (!JsonFields.isCompleteObject(line)) {
                     log.warn("Record index {} ends with an incomplete line — ignoring the "
                             + "whole index rather than trusting a partial record", indexPath);
                     return Optional.empty();
                 }
                 entries.add(new RecordIndexEntry(
-                        longField(line, "offset", -1), stringField(line, "identity")));
+                        JsonFields.longField(line, "offset", -1),
+                        JsonFields.stringField(line, "identity")));
             }
 
             // A short index means the writer was interrupted. Treating it as
@@ -141,66 +157,5 @@ public class RecordIndexReader {
         return identities;
     }
 
-    /** A whole JSON object on one line, as the writer emits. */
-    private static boolean isCompleteLine(String line) {
-        String trimmed = line.trim();
-        return trimmed.startsWith("{") && trimmed.endsWith("}");
-    }
-
     // --- minimal field extraction ---
-
-    static String stringField(String line, String field) {
-        String marker = "\"" + field + "\":";
-        int start = line.indexOf(marker);
-        if (start < 0) {
-            return null;
-        }
-        int valueStart = start + marker.length();
-        if (line.startsWith("null", valueStart)) {
-            return null;
-        }
-        if (line.charAt(valueStart) != '"') {
-            return null;
-        }
-        StringBuilder sb = new StringBuilder();
-        for (int i = valueStart + 1; i < line.length(); i++) {
-            char c = line.charAt(i);
-            if (c == '\\' && i + 1 < line.length()) {
-                char next = line.charAt(++i);
-                switch (next) {
-                    case 'n': sb.append('\n'); break;
-                    case 'r': sb.append('\r'); break;
-                    case 't': sb.append('\t'); break;
-                    default:  sb.append(next);
-                }
-            } else if (c == '"') {
-                return sb.toString();
-            } else {
-                sb.append(c);
-            }
-        }
-        return sb.toString();
-    }
-
-    static long longField(String line, String field, long fallback) {
-        String marker = "\"" + field + "\":";
-        int start = line.indexOf(marker);
-        if (start < 0) {
-            return fallback;
-        }
-        int i = start + marker.length();
-        int end = i;
-        while (end < line.length()
-                && (Character.isDigit(line.charAt(end)) || line.charAt(end) == '-')) {
-            end++;
-        }
-        if (end == i) {
-            return fallback;
-        }
-        try {
-            return Long.parseLong(line.substring(i, end));
-        } catch (NumberFormatException e) {
-            return fallback;
-        }
-    }
 }

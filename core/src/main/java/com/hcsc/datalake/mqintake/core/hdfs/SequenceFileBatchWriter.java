@@ -34,12 +34,22 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li>Partition path computed fresh at every flush — NEVER cached</li>
  *   <li>Files written to _tmp/{instance_id}/, then atomically renamed into partition</li>
  *   <li>SequenceFile with RECORD or NONE compression — NEVER BLOCK</li>
- *   <li>Close file (durability barrier), then rename (visibility barrier)</li>
+ *   <li>hsync (durability barrier — see below), close, then rename (visibility barrier)</li>
  * </ul>
  */
 public class SequenceFileBatchWriter implements BatchWriter {
 
     private static final Logger log = LoggerFactory.getLogger(SequenceFileBatchWriter.class);
+
+    /**
+     * True: hsync before close, forcing every DataNode to fsync the block to
+     * disk. False: hflush only, which pushes bytes to the replica pipeline but
+     * can leave them in OS page cache — close() does not fsync either unless
+     * the cluster sets dfs.datanode.synconclose. The distinction is the
+     * difference between "durable against process crash" and "durable against
+     * correlated power loss after the MQ commit has acknowledged the messages".
+     */
+    private final boolean hsyncOnFlush;
 
     private final FileSystem fileSystem;
     private final Configuration conf;
@@ -106,6 +116,23 @@ public class SequenceFileBatchWriter implements BatchWriter {
                                     CompressionType compressionType,
                                     Map<String, String> bindingBasePaths,
                                     RecordIndexWriter recordIndexWriter) {
+        this(fileSystem, conf, serializer, instanceId, clock, compressionType,
+                bindingBasePaths, recordIndexWriter, true);
+    }
+
+    /**
+     * Full constructor including the durability mode; see {@link #hsyncOnFlush}.
+     */
+    public SequenceFileBatchWriter(FileSystem fileSystem,
+                                    Configuration conf,
+                                    RecordSerializer serializer,
+                                    String instanceId,
+                                    Clock clock,
+                                    CompressionType compressionType,
+                                    Map<String, String> bindingBasePaths,
+                                    RecordIndexWriter recordIndexWriter,
+                                    boolean hsyncOnFlush) {
+        this.hsyncOnFlush = hsyncOnFlush;
         this.recordIndexWriter = recordIndexWriter == null
                 ? RecordIndexWriter.disabled() : recordIndexWriter;
         this.fileSystem = fileSystem;
@@ -229,7 +256,17 @@ public class SequenceFileBatchWriter implements BatchWriter {
                 indexEntries.add(new RecordIndexEntry(fileByteOffset, record.getIdentity()));
             }
 
-            writer.hflush();
+            // hsync forces each DataNode to fsync its block file; hflush only
+            // reaches the pipeline. Once the caller commits to MQ the messages
+            // are unrecoverable from the queue, so with hflush alone a
+            // correlated power loss across the replica set could lose
+            // acknowledged data. One sync per batch, not per record — the
+            // legacy MDB paid this per message.
+            if (hsyncOnFlush) {
+                writer.hsync();
+            } else {
+                writer.hflush();
+            }
             endPos = writer.getLength();
         }
 

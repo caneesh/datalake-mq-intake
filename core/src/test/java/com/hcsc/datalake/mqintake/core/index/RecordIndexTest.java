@@ -125,6 +125,39 @@ class RecordIndexTest {
     }
 
     @Test
+    void aTruncatedHeaderIsRejectedNotReadAsAnEmptyIndex() throws Exception {
+        // Without the header guard, a cut-off header still yielded schema=1,
+        // declaredCount=-1 (check skipped), zero entries — a damaged index
+        // reading as an authoritative claim of ZERO records for a full file.
+        Path indexPath = RecordIndexReader.indexPathFor(dataFile());
+        writeRaw(indexPath, "{\"schema\":1,\"binding\":\"rms\",\"file\":\"rms_h1"
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        assertThat(reader.read(dataFile())).isEmpty();
+    }
+
+    @Test
+    void aHeaderMissingTheRecordCountIsRejected() throws Exception {
+        Path indexPath = RecordIndexReader.indexPathFor(dataFile());
+        writeRaw(indexPath, "{\"schema\":1,\"binding\":\"rms\",\"file\":\"f.seq\"}\n"
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        assertThat(reader.read(dataFile())).isEmpty();
+    }
+
+    @Test
+    void controlCharacterIdentitiesSurviveTheRoundTrip() throws Exception {
+        // The old unescape switch dropped the u-escape sequences the writer
+        // emits for control characters, silently corrupting the identity.
+        String identity = "ctl" + (char) 0x01 + "id";
+        writer.write(index(List.of(new RecordIndexEntry(1, identity))));
+
+        RecordIndex read = reader.read(dataFile()).orElseThrow();
+
+        assertThat(read.getEntries().get(0).getIdentity()).isEqualTo(identity);
+    }
+
+    @Test
     void anUnknownSchemaVersionIsIgnored() throws Exception {
         Path indexPath = RecordIndexReader.indexPathFor(dataFile());
         writeRaw(indexPath, "{\"schema\":99,\"binding\":\"rms\",\"records\":0}\n"

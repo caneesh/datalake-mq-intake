@@ -284,6 +284,29 @@ class RealHdfsIntegrationTest {
                 .anySatisfy(e -> assertThat(e).contains("does not exist"));
     }
 
+    @Test
+    void hsyncedBatchLandsOverTheRealBlockProtocol() throws Exception {
+        // hsync is the durability barrier the zero-loss posture depends on:
+        // hflush reaches the replica pipeline, hsync forces DataNode fsync.
+        // This proves the hsync path works against genuine HDFS — the local
+        // filesystem accepts hsync too, but only this exercises the block
+        // layer the production call will traverse.
+        BatchWriter writer = new SequenceFileBatchWriter(
+                fs, conf, new DemoSerializer(), "it-instance",
+                java.time.Clock.systemUTC(),
+                SequenceFile.CompressionType.RECORD,
+                Map.of("hsync", BASE + "/hsync"),
+                null,
+                true);
+
+        BatchWriter.BatchWriteResult result =
+                writer.write("hsync", messages("sync-1", "sync-2"));
+
+        assertThat(readValues(new Path(result.getFilePath())))
+                .containsExactly("<M><MessageID>sync-1</MessageID></M>",
+                        "<M><MessageID>sync-2</MessageID></M>");
+    }
+
     // --- helpers ---
 
     private BatchWriter writer(String binding) {

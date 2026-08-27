@@ -98,8 +98,19 @@ public class RuleBasedFailureClassifier implements FailureClassifier {
 
         // The useful signal is often wrapped: an IOException from HDFS arrives
         // inside a BatchWriteException.
+        //
+        // The walk is guarded by an identity set, not by `cause != throwable`.
+        // That older guard only rejected a cycle back to the ROOT — a legal
+        // two-node cycle deeper in the chain (b.initCause(c); c.initCause(b)
+        // under root a) looped forever. This runs synchronously on the
+        // listener thread inside handleFailure, and a hung thread is invisible
+        // to ListenerSupervisor, which watches for task completion, not
+        // livelock: the binding would wedge with no health signal at all.
+        java.util.Set<Throwable> seen =
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        seen.add(throwable);
         Throwable cause = throwable.getCause();
-        while (cause != null && cause != throwable) {
+        while (cause != null && seen.add(cause)) {
             FailureClass fromCause = classifyOne(cause);
             if (fromCause != FailureClass.UNKNOWN) {
                 return fromCause;

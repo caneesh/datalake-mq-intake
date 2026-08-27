@@ -14,8 +14,8 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+
+import com.hcsc.datalake.mqintake.core.util.JsonFields;
 
 /**
  * Reads immutable audit records written by HdfsAuditRecordEmitter.
@@ -28,9 +28,6 @@ public class AuditRecordReader {
     private static final Logger log = LoggerFactory.getLogger(AuditRecordReader.class);
     private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd");
 
-    private static final Pattern FILENAME_PATTERN = Pattern.compile("\"filename\":\"([^\"]*)\"");
-    private static final Pattern PARTITION_PATTERN = Pattern.compile("\"partition_path\":\"([^\"]*)\"");
-    private static final Pattern RECORD_COUNT_PATTERN = Pattern.compile("\"record_count\":(\\d+)");
 
     private final FileSystem fileSystem;
     private final String auditBasePath;
@@ -62,8 +59,16 @@ public class AuditRecordReader {
                 if (record != null) {
                     records.add(record);
                 }
-            } catch (IOException e) {
-                log.warn("Failed to read audit record {}: {}", status.getPath(), e.getMessage());
+            } catch (IOException | RuntimeException e) {
+                // Catching RuntimeException is deliberate. This used to catch
+                // IOException only, so one corrupt file (an unparseable
+                // record_count, for instance) escaped the loop and aborted the
+                // ENTIRE binding's reconciliation pass — every window, every
+                // run, indefinitely, since the bad file never goes away by
+                // itself. A control must skip the record it cannot read and
+                // keep checking everything else.
+                log.warn("Failed to read audit record {} — skipping it, continuing with the "
+                        + "rest: {}", status.getPath(), e.getMessage());
             }
         }
 
@@ -76,23 +81,23 @@ public class AuditRecordReader {
             json = new String(in.readAllBytes(), StandardCharsets.UTF_8);
         }
 
-        String filename = firstGroup(FILENAME_PATTERN, json);
-        String partitionPath = firstGroup(PARTITION_PATTERN, json);
-        String countStr = firstGroup(RECORD_COUNT_PATTERN, json);
+        // Escape-aware extraction: the emitter escapes quotes/backslashes and
+        // u-escape-encodes control characters. The previous regex readers
+        // ([^"]*) truncated any value at an escaped quote, which misread a
+        // correctly audited file as an unaudited orphan.
+        String filename = JsonFields.stringField(json, "filename");
+        String partitionPath = JsonFields.stringField(json, "partition_path");
+        long count = JsonFields.longField(json, "record_count", -1);
 
-        if (filename == null || countStr == null) {
-            log.warn("Audit record {} is missing filename or record_count — skipping", path);
+        if (filename == null || count < 0 || count > Integer.MAX_VALUE) {
+            log.warn("Audit record {} is missing or has an unusable filename/record_count — "
+                    + "skipping", path);
             return null;
         }
 
-        return new ParsedAuditRecord(filename, partitionPath, Integer.parseInt(countStr),
-                path.toString());
+        return new ParsedAuditRecord(filename, partitionPath, (int) count, path.toString());
     }
 
-    private String firstGroup(Pattern pattern, String input) {
-        Matcher m = pattern.matcher(input);
-        return m.find() ? m.group(1) : null;
-    }
 
     /**
      * The subset of audit record fields reconciliation needs.

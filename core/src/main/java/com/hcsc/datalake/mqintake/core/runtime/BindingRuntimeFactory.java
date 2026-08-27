@@ -183,7 +183,8 @@ public class BindingRuntimeFactory {
                 java.time.Clock.systemUTC(),
                 org.apache.hadoop.io.SequenceFile.CompressionType.RECORD,
                 java.util.Map.of(config.getId(), config.getHdfsBasePath()),
-                createRecordIndexWriter(config));
+                createRecordIndexWriter(config),
+                config.isHsyncOnFlush());
     }
 
     /**

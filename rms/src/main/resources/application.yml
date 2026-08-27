@@ -84,5 +84,31 @@ intake:
       # this off — its per-message key is still an open question, and an index
       # of nulls would read as missing records.
       record-index-enabled: true
+      # Durability: fsync each batch to DataNode disks before close. hflush
+      # alone leaves bytes in OS page cache after the MQ commit has already
+      # acknowledged the messages; the legacy MDB hsync'd per RECORD. One sync
+      # per batch closes the same window at a fraction of that cost.
+      hsync-on-flush: true
       degradation-strategy: BATCH_OF_ONE
       successes-required-to-restore: 10
+
+# Health semantics for an MQ consumer: this service serves no inbound traffic,
+# so the ONLY thing a 503 achieves is a pod restart. DOWN (503) is therefore
+# reserved for "every binding unhealthy"; PARTIAL_OUTAGE and DEGRADED return
+# 200 and are alerted on via their status string and per-binding metrics —
+# restarting the pod over an isolated binding failure would interrupt the
+# healthy bindings to fix one that is already contained.
+management:
+  endpoint:
+    health:
+      show-details: always
+      status:
+        order: DOWN,OUT_OF_SERVICE,PARTIAL_OUTAGE,DEGRADED,UNKNOWN,UP
+        http-mapping:
+          PARTIAL_OUTAGE: 200
+          DEGRADED: 200
+      group:
+        # Liveness = "is the JVM alive", nothing else. Binding state must
+        # never restart the pod.
+        liveness:
+          include: ping

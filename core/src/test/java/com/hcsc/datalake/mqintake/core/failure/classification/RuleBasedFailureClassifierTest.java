@@ -84,6 +84,38 @@ class RuleBasedFailureClassifierTest {
     }
 
     @Test
+    void aNonRootCycleDeeperInTheChainDoesNotLoopForever() {
+        // The old guard (`cause != throwable`) only rejected a cycle back to
+        // the ROOT. A cycle between two deeper causes never equals the root,
+        // so the walk spun forever — hanging the listener thread in a way
+        // supervision cannot see, since the task never completes.
+        RuntimeException root = new RuntimeException("root");
+        RuntimeException b = new RuntimeException("b");
+        RuntimeException c = new RuntimeException("c");
+        b.initCause(c);
+        c.initCause(b);
+        root.initCause(b);
+
+        org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(
+                java.time.Duration.ofSeconds(5),
+                () -> assertThat(classifier.classify(root)).isEqualTo(FailureClass.UNKNOWN));
+    }
+
+    @Test
+    void aRecognisableCauseInsideACycleIsStillClassified() {
+        // The guard must terminate the walk, not blind it: each node is still
+        // visited once, so a real signal inside the cycle is found.
+        RuntimeException root = new RuntimeException("root");
+        RuntimeException b = new RuntimeException("b");
+        java.io.IOException hdfs = new java.io.IOException("NameNode is in safemode");
+        b.initCause(hdfs);
+        hdfs.initCause(b);
+        root.initCause(b);
+
+        assertThat(classifier.classify(root)).isEqualTo(FailureClass.HDFS_INFRASTRUCTURE);
+    }
+
+    @Test
     void cyclicCauseChainDoesNotLoopForever() {
         // Java forbids self-causation, but a two-node cycle is constructible
         // and would spin the cause walk forever without the guard.

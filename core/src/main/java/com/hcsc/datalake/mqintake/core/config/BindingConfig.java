@@ -47,6 +47,22 @@ public class BindingConfig {
     private boolean recordIndexEnabled = false;
 
     /**
+     * Whether the batch is fsynced to DataNode disks (hsync) before close,
+     * rather than only flushed to the replica pipeline (hflush).
+     *
+     * <p>Default true. hflush makes bytes visible to readers; it does not
+     * force them out of the DataNodes' OS page cache, and neither does a
+     * default close(). Without hsync there is a window after the MQ commit in
+     * which correlated power loss across the replica set loses acknowledged
+     * data. The legacy MDB called hsync() per record and had no such window —
+     * one hsync per batch closes it at a fraction of that cost.
+     *
+     * <p>Set false only for a feed where that narrow window is an acceptable
+     * trade for one less DataNode disk round trip per batch.
+     */
+    private boolean hsyncOnFlush = true;
+
+    /**
      * Whether a tracker build/send failure should fail the whole batch.
      *
      * <p>Default false, matching the legacy MDB: it catches and logs tracker
@@ -185,6 +201,14 @@ public class BindingConfig {
 
     public String getBackoutQueue() {
         return backoutQueue;
+    }
+
+    public boolean isHsyncOnFlush() {
+        return hsyncOnFlush;
+    }
+
+    public void setHsyncOnFlush(boolean hsyncOnFlush) {
+        this.hsyncOnFlush = hsyncOnFlush;
     }
 
     public boolean isRecordIndexEnabled() {
