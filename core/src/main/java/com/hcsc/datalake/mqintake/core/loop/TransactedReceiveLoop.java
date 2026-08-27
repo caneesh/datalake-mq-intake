@@ -489,30 +489,33 @@ public class TransactedReceiveLoop implements Runnable {
                 cleanMessages.size(), config.getId());
     }
 
+    /** Failure with no batch context (e.g. a fault in receive() itself). */
     private void handleFailure(Throwable e) {
         handleFailure(e, null);
     }
 
     private void handleFailure(Throwable e, List<String> failedBatchMessageIds) {
         metrics.setHealthy(false);
-        if (degradedModeManager != null) {
-            boolean wasDegraded = degradedModeManager.isInDegradedMode();
+        if (degradedModeManager == null) {
+            return;
+        }
 
-            // Data failures mark the failed batch's message IDs as suspects so
-            // the bisection coordinator can track them across redelivery to
-            // any listener thread (§6.1). Marking is done inside recordFailure
-            // so it cannot be separated from the degraded-mode transition.
-            FailureClass failureClass =
-                    degradedModeManager.recordFailure(e, failedBatchMessageIds);
-            log.debug("Failure classified as {} for binding '{}'", failureClass, config.getId());
-            metrics.setSuspectCount(degradedModeManager.getSuspectCount());
+        boolean wasDegraded = degradedModeManager.isInDegradedMode();
 
-            // Update health if we just entered degraded mode
-            if (!wasDegraded && degradedModeManager.isInDegradedMode() && healthManager != null) {
-                healthManager.recordDegraded(config.getId(),
-                        "Entered degraded mode due to " + failureClass + " failure");
-                metrics.recordDegradedModeEntry();
-            }
+        // Data failures mark the failed batch's message IDs as suspects so
+        // the bisection coordinator can track them across redelivery to
+        // any listener thread (§6.1). Marking is done inside recordFailure
+        // so it cannot be separated from the degraded-mode transition.
+        FailureClass failureClass =
+                degradedModeManager.recordFailure(e, failedBatchMessageIds);
+        log.debug("Failure classified as {} for binding '{}'", failureClass, config.getId());
+        metrics.setSuspectCount(degradedModeManager.getSuspectCount());
+
+        boolean enteredDegradedMode = !wasDegraded && degradedModeManager.isInDegradedMode();
+        if (enteredDegradedMode && healthManager != null) {
+            healthManager.recordDegraded(config.getId(),
+                    "Entered degraded mode due to " + failureClass + " failure");
+            metrics.recordDegradedModeEntry();
         }
     }
 
@@ -536,17 +539,19 @@ public class TransactedReceiveLoop implements Runnable {
 
     private void handleSuccess() {
         metrics.setHealthy(true);
-        if (degradedModeManager != null) {
-            metrics.setSuspectCount(degradedModeManager.getSuspectCount());
+        if (degradedModeManager == null) {
+            return;
+        }
 
-            boolean wasDegraded = degradedModeManager.isInDegradedMode();
-            degradedModeManager.recordSuccess();
+        metrics.setSuspectCount(degradedModeManager.getSuspectCount());
 
-            // Update health if we just exited degraded mode
-            if (wasDegraded && !degradedModeManager.isInDegradedMode() && healthManager != null) {
-                healthManager.recordHealthy(config.getId());
-                metrics.recordDegradedModeExit();
-            }
+        boolean wasDegraded = degradedModeManager.isInDegradedMode();
+        degradedModeManager.recordSuccess();
+
+        boolean exitedDegradedMode = wasDegraded && !degradedModeManager.isInDegradedMode();
+        if (exitedDegradedMode && healthManager != null) {
+            healthManager.recordHealthy(config.getId());
+            metrics.recordDegradedModeExit();
         }
     }
 
