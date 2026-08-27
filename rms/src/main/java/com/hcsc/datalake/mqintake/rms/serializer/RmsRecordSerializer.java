@@ -47,6 +47,19 @@ import java.util.regex.Pattern;
  */
 public class RmsRecordSerializer implements RecordSerializer {
 
+    private static final org.slf4j.Logger log =
+            org.slf4j.LoggerFactory.getLogger(RmsRecordSerializer.class);
+
+    /**
+     * Messages whose payload carried no extractable MessageID. This used to
+     * be completely silent — and one such message poisons the ENTIRE landed
+     * file's sidecar index (isFullyIdentified uses allMatch), after which
+     * reconciliation refuses the whole file. The operator had no signal at
+     * the point of loss, only a reconciliation gap to notice later.
+     */
+    private final java.util.concurrent.atomic.AtomicLong identityMisses =
+            new java.util.concurrent.atomic.AtomicLong();
+
     /**
      * Pattern to extract MessageID (payload GUID) from the XML payload.
      * Handles both raw and common XML structures.
@@ -85,7 +98,18 @@ public class RmsRecordSerializer implements RecordSerializer {
             // Carried alongside the record, never inside it: the file stays
             // byte-comparable with the legacy MDB's output while the sidecar
             // index gains what reconciliation needs to identify a record.
-            return new SerializedRecord(key, value, extractPayloadGuid(payload));
+            String identity = extractPayloadGuid(payload);
+            if (identity == null) {
+                long misses = identityMisses.incrementAndGet();
+                // First miss loudly, then every 1000th — a malformed flood
+                // must not turn the signal into its own log problem.
+                if (misses == 1 || misses % 1000 == 0) {
+                    log.warn("RMS payload carries no extractable <MessageID> ({} so far). "
+                            + "One such record makes the whole file's sidecar index "
+                            + "unusable, so reconciliation will refuse that file.", misses);
+                }
+            }
+            return new SerializedRecord(key, value, identity);
 
         } catch (JMSException e) {
             throw new SerializationException("Failed to read message: " + e.getMessage(), e);
@@ -135,6 +159,11 @@ public class RmsRecordSerializer implements RecordSerializer {
         return null;
     }
 
+
+    /** Payloads seen without an extractable MessageID, for tests and probes. */
+    public long getIdentityMissCount() {
+        return identityMisses.get();
+    }
 
     @Override
     public Class<? extends Writable> getKeyClass() {

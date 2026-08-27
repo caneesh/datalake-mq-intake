@@ -45,4 +45,12 @@ public interface DegradationPolicy {
      * Until every suspect is cleared, the normal batch size is not restored.
      */
     void clearSuspects(Collection<String> messageIds);
+
+    /**
+     * Unresolved suspects. Feeds the {@code mq_intake_suspect_count} gauge:
+     * a policy that tracks none may keep the default zero.
+     */
+    default int getSuspectCount() {
+        return 0;
+    }
 }

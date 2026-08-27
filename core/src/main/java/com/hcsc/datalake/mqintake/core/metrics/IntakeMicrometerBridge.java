@@ -116,6 +116,9 @@ public class IntakeMicrometerBridge {
                 "Messages in the in-flight batch");
         gauge(metrics, tags, "degraded", m -> m.isInDegradedMode() ? 1 : 0,
                 "1 while the binding is in degraded (reduced batch size) mode");
+        gauge(metrics, tags, "suspect_count", BindingMetrics::getSuspectCount,
+                "Unresolved suspect message IDs — non-zero for long means the binding is "
+                        + "pinned at reduced batch size and needs investigation");
         gauge(metrics, tags, "healthy", m -> m.isHealthy() ? 1 : 0,
                 "1 while the last batch outcome was a success");
         gauge(metrics, tags, "flush_latency_seconds",

@@ -434,6 +434,9 @@ public class TransactedReceiveLoop implements Runnable {
             FailureClass failureClass =
                     degradedModeManager.recordFailure(e, failedBatchMessageIds);
             log.debug("Failure classified as {} for binding '{}'", failureClass, config.getId());
+            if (metrics != null) {
+                metrics.setSuspectCount(degradedModeManager.getSuspectCount());
+            }
 
             // Update health if we just entered degraded mode
             if (!wasDegraded && degradedModeManager.isInDegradedMode() && healthManager != null) {
@@ -467,6 +470,9 @@ public class TransactedReceiveLoop implements Runnable {
     private void handleSuccess() {
         if (metrics != null) {
             metrics.setHealthy(true);
+            if (degradedModeManager != null) {
+                metrics.setSuspectCount(degradedModeManager.getSuspectCount());
+            }
         }
         if (degradedModeManager != null) {
             boolean wasDegraded = degradedModeManager.isInDegradedMode();

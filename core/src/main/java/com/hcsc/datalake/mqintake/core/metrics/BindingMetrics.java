@@ -53,9 +53,17 @@ public class BindingMetrics {
     private final LongAdder totalFlushLatencyNanos = new LongAdder();
     private final LongAdder flushCount = new LongAdder();
 
-    // State
-    private volatile boolean inDegradedMode = false;
+    // State. AtomicBoolean rather than volatile: entry/exit used a
+    // check-then-act on a plain volatile, so two threads entering degraded
+    // mode together — the normal case, since MQ redistributes a rolled-back
+    // batch across listener threads — could both pass the check and
+    // double-increment the counters.
+    private final java.util.concurrent.atomic.AtomicBoolean inDegradedMode =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private volatile boolean healthy = true;
+
+    /** Unresolved suspect message IDs; non-zero for long = a limping binding. */
+    private final AtomicLong suspectCount = new AtomicLong(0);
 
     public BindingMetrics(String bindingId) {
         this.bindingId = Objects.requireNonNull(bindingId, "bindingId required");
@@ -85,15 +93,13 @@ public class BindingMetrics {
     }
 
     public void recordDegradedModeEntry() {
-        if (!inDegradedMode) {
-            inDegradedMode = true;
+        if (inDegradedMode.compareAndSet(false, true)) {
             degradedModeEntries.increment();
         }
     }
 
     public void recordDegradedModeExit() {
-        if (inDegradedMode) {
-            inDegradedMode = false;
+        if (inDegradedMode.compareAndSet(true, false)) {
             degradedModeExits.increment();
         }
     }
@@ -142,6 +148,19 @@ public class BindingMetrics {
 
     public void setCurrentBatchSize(long size) {
         currentBatchSize.set(size);
+    }
+
+    /**
+     * Unresolved suspects. Previously collected but wired to nothing: an
+     * orphaned suspect pinned the binding at reduced batch size invisibly
+     * until restart, with no gauge an operator could alert on.
+     */
+    public void setSuspectCount(long count) {
+        suspectCount.set(count);
+    }
+
+    public long getSuspectCount() {
+        return suspectCount.get();
     }
 
     public void setHealthy(boolean healthy) {
@@ -223,7 +242,7 @@ public class BindingMetrics {
     }
 
     public boolean isInDegradedMode() {
-        return inDegradedMode;
+        return inDegradedMode.get();
     }
 
     public boolean isHealthy() {

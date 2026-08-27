@@ -204,4 +204,43 @@ class RmsRecordSerializerTest {
         // \r\n -> two spaces
         assertThat(stored).isEqualTo("<MemberEvent>  <MessageID>guid-1</MessageID>  </MemberEvent>");
     }
+
+    @Test
+    void aPayloadWithoutMessageIdIsCountedNotSilent() throws Exception {
+        // The review finding: identity extraction failed with zero signal,
+        // and one miss poisons the whole file's index for reconciliation.
+        TextMessage message = session.createTextMessage("<Member><Name>anon</Name></Member>");
+
+        RecordSerializer.SerializedRecord record =
+                serializer.serialize(message, metadataAtOffset(129));
+
+        assertThat(record.getIdentity()).isNull();
+        assertThat(serializer.getIdentityMissCount()).isEqualTo(1);
+
+        serializer.serialize(message, metadataAtOffset(200));
+        assertThat(serializer.getIdentityMissCount()).isEqualTo(2);
+    }
+
+    @Test
+    void aPayloadWithMessageIdDoesNotCountAsAMiss() throws Exception {
+        TextMessage message = session.createTextMessage(
+                "<Member><MessageID>guid-1</MessageID></Member>");
+
+        RecordSerializer.SerializedRecord record =
+                serializer.serialize(message, metadataAtOffset(129));
+
+        assertThat(record.getIdentity()).isEqualTo("guid-1");
+        assertThat(serializer.getIdentityMissCount()).isZero();
+    }
+
+    private RecordMetadata metadataAtOffset(long offset) {
+        return RecordMetadata.builder()
+                .bindingId("rms")
+                .sourceFile("f.seq")
+                .recordOffset(0)
+                .fileByteOffset(offset)
+                .consumeTimestamp(java.time.Instant.now())
+                .build();
+    }
+
 }

@@ -417,4 +417,77 @@ class RmsTrackerMessageBuilderTest {
         assertThat(tracker.getText()).isEqualTo("<Test>payload</Test>");
         assertThat(tracker.propertyExists(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS)).isTrue();
     }
+
+    // ------------------------------------------------------------------
+    // Pinned legacy hazards (review finding #10). These tests assert what
+    // the code DOES, not what would be safest: the rewrite is a line-by-line
+    // port of EJBHelper, whose unguarded index arithmetic these paths share.
+    // A guard here would DIVERGE from legacy in exactly these cases, so per
+    // the standing parity decision the behaviour is pinned, not changed. A
+    // hardened mode, if ever wanted, must be a separately-flagged opt-in.
+    // ------------------------------------------------------------------
+
+    @Test
+    void startTagWithoutItsEndTagThrowsExactlyLikeTheLegacy() throws Exception {
+        // lastIndexOf(endTag) is -1, so substring(begin, -1 + endTag.length())
+        // has begin > end whenever the tag does not open within the first few
+        // characters. The RuntimeException is caught by sendTrackerMessages:
+        // the message still lands, only this tracker notification is lost —
+        // the same observable outcome as the legacy crash.
+        RmsTrackerMessageBuilder builder = new RmsTrackerMessageBuilder(
+                RmsTrackerMessageBuilder.TrackerFields.defaultRms());
+
+        TextMessage source = session.createTextMessage("body");
+        source.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS,
+                "<MessageHeaderDetailsType><MesgStatus>open-but-never-closed"
+                        + "</MessageHeaderDetailsType>");
+
+        assertThatThrownBy(() -> builder.build(session, source))
+                .isInstanceOf(StringIndexOutOfBoundsException.class);
+    }
+
+    @Test
+    void startTagAtHeaderStartWithoutEndTagSilentlyRemovesAGarbageSpan() throws Exception {
+        // The nastier sibling: when the tag opens within the end tag's length
+        // of position zero, substring(0, endTag.length()-1) SUCCEEDS with a
+        // nonsense span and replaceAll strips it — no exception, no log. With
+        // "<MesgStatus>x" the span is exactly "<MesgStatus>" (12 chars), so
+        // the opener vanishes and the bare content is what gets sent.
+        RmsTrackerMessageBuilder builder = new RmsTrackerMessageBuilder(
+                RmsTrackerMessageBuilder.TrackerFields.defaultRms());
+
+        TextMessage source = session.createTextMessage("body");
+        source.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS,
+                "<MesgStatus>orphan-content");
+
+        Optional<Message> result = builder.build(session, source);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getStringProperty(
+                RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS))
+                .as("silent mutilation, pinned so a refactor cannot change it unnoticed")
+                .isEqualTo("orphan-content");
+    }
+
+    @Test
+    void knownTagWithoutRootEndTagIsStrippedAndNeverReinjected() throws Exception {
+        // Removal runs whenever a known tag is present; re-injection runs only
+        // when the ROOT end tag is present. A header with the former but not
+        // the latter loses the tag with nothing put back, and the mutilated
+        // header is what the tracker consumer receives.
+        RmsTrackerMessageBuilder builder = new RmsTrackerMessageBuilder(
+                RmsTrackerMessageBuilder.TrackerFields.defaultRms());
+
+        TextMessage source = session.createTextMessage("body");
+        source.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS,
+                "<MesgStatus>OLD</MesgStatus><Other>kept</Other>");
+
+        Optional<Message> result = builder.build(session, source);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().getStringProperty(
+                RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS))
+                .isEqualTo("<Other>kept</Other>");
+    }
+
 }

@@ -76,12 +76,22 @@ public class DegradedModeManager implements DegradationPolicy {
                                 int normalBatchSize,
                                 DegradationStrategy strategy,
                                 int successesRequiredToRestore) {
+        this(bindingId, normalBatchSize, strategy, successesRequiredToRestore,
+                FailureClassifier.defaultClassifier());
+    }
+
+    /** Visible for testing: lets a concurrency test block inside classify(). */
+    DegradedModeManager(String bindingId,
+                        int normalBatchSize,
+                        DegradationStrategy strategy,
+                        int successesRequiredToRestore,
+                        FailureClassifier classifier) {
         this.bindingId = bindingId;
         this.normalBatchSize = normalBatchSize;
         this.strategy = strategy;
         this.successesRequiredToRestore = successesRequiredToRestore;
         this.currentBatchSize = new AtomicInteger(normalBatchSize);
-        this.classifier = FailureClassifier.defaultClassifier();
+        this.classifier = classifier;
     }
 
     /**
@@ -90,7 +100,14 @@ public class DegradedModeManager implements DegradationPolicy {
      * but never while suspect messages remain unresolved.
      */
     @Override
-    public void recordSuccess() {
+    // recordSuccess, recordFailure and clearSuspects are synchronized. Each
+    // individual field is already thread-safe, but the TRANSITIONS were not:
+    // recordSuccess's "suspects empty + enough successes -> restore" could
+    // interleave with a concurrent recordFailure between its classify and its
+    // markBatchSuspect, restoring full batch size in a window the design says
+    // must not exist. Failures and commits are batch-cadence events, not
+    // per-message, so an uncontended lock here costs nanoseconds.
+    public synchronized void recordSuccess() {
         if (!inDegradedMode.get()) {
             return;
         }
@@ -126,7 +143,7 @@ public class DegradedModeManager implements DegradationPolicy {
      * thread the broker redelivered them to.
      */
     @Override
-    public void clearSuspects(java.util.Collection<String> messageIds) {
+    public synchronized void clearSuspects(java.util.Collection<String> messageIds) {
         boolean removed = false;
         for (String id : messageIds) {
             if (id != null && suspectMessageIds.remove(id)) {
@@ -179,7 +196,7 @@ public class DegradedModeManager implements DegradationPolicy {
      * @return the classified failure
      */
     @Override
-    public FailureClass recordFailure(Throwable throwable,
+    public synchronized FailureClass recordFailure(Throwable throwable,
                                       java.util.Collection<String> batchMessageIds) {
         FailureClass failureClass = classifier.classify(throwable);
 
