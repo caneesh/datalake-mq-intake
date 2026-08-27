@@ -124,7 +124,13 @@ public class ClaimsRecordSerializer implements RecordSerializer, PlaceholderSeri
 
             Text value = new Text(payload);
 
-            return new SerializedRecord(key, value);
+            // Identity rides the SerializedRecord, never the file: the
+            // key/value layout above is the contract, and the sidecar index is
+            // the only consumer of identity. Dropping it here (as this class
+            // once did) silently broke the "swap the extractor — nothing else
+            // changes" promise: a confirmed extractor would have produced an
+            // index full of null identities.
+            return new SerializedRecord(key, value, payloadIdentity);
 
         } catch (JMSException e) {
             throw new SerializationException("Failed to read message: " + e.getMessage(), e);

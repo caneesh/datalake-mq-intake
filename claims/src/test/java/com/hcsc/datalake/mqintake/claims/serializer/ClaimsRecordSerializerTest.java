@@ -75,11 +75,9 @@ class ClaimsRecordSerializerTest {
         assertThat(((LongWritable) record.getKey()).get()).isEqualTo(129L);
         assertThat(record.getValue().toString()).isEqualTo(payload);
 
-        // The metadata that used to ride in the key has no home in this layout.
-        // Identity is still extracted — it drives the failOnMissingIdentity
-        // check — but is not written to the file (open item #2).
-        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
-                .isEqualTo("claim-id-12345");
+        // Identity is not written to the file — it rides the SerializedRecord
+        // for the sidecar index, matching the RMS serializer.
+        assertThat(record.getIdentity()).isEqualTo("claim-id-12345");
     }
 
     // --- Default extractor priority (CLM_XMITSN_ID then REC_CTL_NBR) ---
@@ -91,14 +89,12 @@ class ClaimsRecordSerializerTest {
         String payload = "<Claim><CLM_XMITSN_ID>xmit-id</CLM_XMITSN_ID><REC_CTL_NBR>ctl-nbr</REC_CTL_NBR></Claim>";
         TextMessage message = session.createTextMessage(payload);
 
-        RecordMetadata metadata = buildMinimalMetadata();
-        serializer.serialize(message, metadata); // must still serialize
+        RecordSerializer.SerializedRecord record =
+                serializer.serialize(message, buildMinimalMetadata());
 
-        // Identity no longer rides in the key (production uses a LongWritable
-        // positional key). The extraction strategy is still live — it drives
-        // the failOnMissingIdentity check — so assert it directly.
-        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
-                .isEqualTo("xmit-id");
+        // Asserted through the record, not the extractor: the extractor
+        // finding the identity proves nothing unless serialize() carries it.
+        assertThat(record.getIdentity()).isEqualTo("xmit-id");
     }
 
     @Test
@@ -108,14 +104,10 @@ class ClaimsRecordSerializerTest {
         String payload = "<Claim><REC_CTL_NBR>fallback-ctl-123</REC_CTL_NBR></Claim>";
         TextMessage message = session.createTextMessage(payload);
 
-        RecordMetadata metadata = buildMinimalMetadata();
-        serializer.serialize(message, metadata); // must still serialize
+        RecordSerializer.SerializedRecord record =
+                serializer.serialize(message, buildMinimalMetadata());
 
-        // Identity no longer rides in the key (production uses a LongWritable
-        // positional key). The extraction strategy is still live — it drives
-        // the failOnMissingIdentity check — so assert it directly.
-        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
-                .isEqualTo("fallback-ctl-123");
+        assertThat(record.getIdentity()).isEqualTo("fallback-ctl-123");
     }
 
     // --- Pluggable identity extractor ---
@@ -128,14 +120,10 @@ class ClaimsRecordSerializerTest {
         String payload = "<Claim><ANYTHING>ignored</ANYTHING></Claim>";
         TextMessage message = session.createTextMessage(payload);
 
-        RecordMetadata metadata = buildMinimalMetadata();
-        serializer.serialize(message, metadata); // must still serialize
+        RecordSerializer.SerializedRecord record =
+                serializer.serialize(message, buildMinimalMetadata());
 
-        // Identity no longer rides in the key (production uses a LongWritable
-        // positional key). The extraction strategy is still live — it drives
-        // the failOnMissingIdentity check — so assert it directly.
-        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
-                .isEqualTo("custom-extracted-id");
+        assertThat(record.getIdentity()).isEqualTo("custom-extracted-id");
     }
 
     @Test
@@ -146,14 +134,10 @@ class ClaimsRecordSerializerTest {
         String payload = "<Claim><CLM_ADJSTMT_NBR>adjustment-001</CLM_ADJSTMT_NBR></Claim>";
         TextMessage message = session.createTextMessage(payload);
 
-        RecordMetadata metadata = buildMinimalMetadata();
-        serializer.serialize(message, metadata); // must still serialize
+        RecordSerializer.SerializedRecord record =
+                serializer.serialize(message, buildMinimalMetadata());
 
-        // Identity no longer rides in the key (production uses a LongWritable
-        // positional key). The extraction strategy is still live — it drives
-        // the failOnMissingIdentity check — so assert it directly.
-        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
-                .isEqualTo("adjustment-001");
+        assertThat(record.getIdentity()).isEqualTo("adjustment-001");
     }
 
     @Test
@@ -173,14 +157,10 @@ class ClaimsRecordSerializerTest {
         String payload = "&lt;Claim&gt;&lt;CLM_XMITSN_ID&gt;escaped-id-999&lt;/CLM_XMITSN_ID&gt;&lt;/Claim&gt;";
         TextMessage message = session.createTextMessage(payload);
 
-        RecordMetadata metadata = buildMinimalMetadata();
-        serializer.serialize(message, metadata); // must still serialize
+        RecordSerializer.SerializedRecord record =
+                serializer.serialize(message, buildMinimalMetadata());
 
-        // Identity no longer rides in the key (production uses a LongWritable
-        // positional key). The extraction strategy is still live — it drives
-        // the failOnMissingIdentity check — so assert it directly.
-        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
-                .isEqualTo("escaped-id-999");
+        assertThat(record.getIdentity()).isEqualTo("escaped-id-999");
     }
 
     // --- Handles missing identity ---
@@ -197,7 +177,8 @@ class ClaimsRecordSerializerTest {
 
         // No identity in the payload: tolerated here because this serializer
         // was built without failOnMissingIdentity.
-        assertThat(serializer.getIdentityExtractor().extractIdentity(payload)).isNull();
+        assertThat(record.getIdentity()).isNull();
+        assertThat(record.hasIdentity()).isFalse();
         assertThat(record.getValue().toString()).isEqualTo(payload);
     }
 
@@ -331,14 +312,10 @@ class ClaimsRecordSerializerTest {
         String payload = "<Claim><CLM_ADJSTMT_NBR>000042</CLM_ADJSTMT_NBR></Claim>";
         TextMessage message = session.createTextMessage(payload);
 
-        RecordMetadata metadata = buildMinimalMetadata();
-        serializer.serialize(message, metadata); // must still serialize
+        RecordSerializer.SerializedRecord record =
+                serializer.serialize(message, buildMinimalMetadata());
 
-        // Identity no longer rides in the key (production uses a LongWritable
-        // positional key). The extraction strategy is still live — it drives
-        // the failOnMissingIdentity check — so assert it directly.
-        assertThat(serializer.getIdentityExtractor().extractIdentity(payload))
-                .isEqualTo("000042");
+        assertThat(record.getIdentity()).isEqualTo("000042");
     }
 
     private RecordMetadata buildMinimalMetadata() {
@@ -379,7 +356,59 @@ class ClaimsRecordSerializerTest {
 
         // The stored payload carries spaces, so the recoverable identity does too
         assertThat(stored).contains("<CLM_XMITSN_ID> id-2 </CLM_XMITSN_ID>");
-        assertThat(serializer.getIdentityExtractor().extractIdentity(stored))
+        assertThat(serializer.serialize(message, buildMinimalMetadata()).getIdentity())
                 .isEqualTo(" id-2 ");
+    }
+
+    // --- Identity propagation: payload -> serialize -> SerializedRecord ---
+    //
+    // The record's identity feeds RecordIndexEntry in SequenceFileBatchWriter,
+    // which is what the sidecar index stores. These tests pin the complete
+    // flow; asserting only against the extractor would pass even if
+    // serialize() dropped the identity — which it once did.
+
+    @Test
+    void serializedRecordCarriesIdentityForTheSidecarIndex() throws Exception {
+        ClaimsRecordSerializer serializer = new ClaimsRecordSerializer(
+                ClaimsIdentityExtractor.forTag("CLM_XMITSN_ID"), true);
+
+        String payload = "<Claim><CLM_XMITSN_ID>xmit-77</CLM_XMITSN_ID></Claim>";
+        TextMessage message = session.createTextMessage(payload);
+
+        RecordSerializer.SerializedRecord record =
+                serializer.serialize(message, buildMinimalMetadata());
+
+        assertThat(record.getIdentity()).isEqualTo("xmit-77");
+        assertThat(record.hasIdentity()).isTrue();
+        // The SequenceFile contract is untouched: identity appears in neither half
+        assertThat(record.getValue().toString()).isEqualTo(payload);
+        assertThat(((LongWritable) record.getKey()).get()).isEqualTo(0L);
+    }
+
+    @Test
+    void blankIdentityIsNormalisedToNullOnTheRecord() throws Exception {
+        ClaimsIdentityExtractor blankExtractor = payload -> "   ";
+        ClaimsRecordSerializer serializer = new ClaimsRecordSerializer(blankExtractor);
+
+        TextMessage message = session.createTextMessage("<Claim/>");
+        RecordSerializer.SerializedRecord record =
+                serializer.serialize(message, buildMinimalMetadata());
+
+        // Blank and missing must look the same downstream: an index entry of
+        // "   " would be a distinct, unmatchable identity during reconciliation.
+        assertThat(record.getIdentity()).isNull();
+        assertThat(record.hasIdentity()).isFalse();
+    }
+
+    @Test
+    void failOnMissingIdentityRejectsThePayloadBeforeAnyRecordExists() throws Exception {
+        ClaimsRecordSerializer serializer = new ClaimsRecordSerializer(
+                ClaimsIdentityExtractor.forTag("CLM_XMITSN_ID"), true);
+
+        TextMessage message = session.createTextMessage("<Claim><OTHER>x</OTHER></Claim>");
+
+        assertThatThrownBy(() -> serializer.serialize(message, buildMinimalMetadata()))
+                .isInstanceOf(RecordSerializer.SerializationException.class)
+                .hasMessageContaining("identity");
     }
 }
