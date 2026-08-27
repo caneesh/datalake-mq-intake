@@ -48,7 +48,18 @@ public class ListenerSupervisor implements AutoCloseable {
      */
     private final BooleanSupplier supervisionActive;
 
-    private final AtomicInteger reportedTerminations = new AtomicInteger(0);
+    /**
+     * Indices whose termination has already been logged. The previous scalar
+     * (`reported < futures.size()`) stayed true forever in the partial-death
+     * case, so the same ERROR line re-logged every tick for the life of the
+     * process — enough volume over days to bury real diagnostics.
+     */
+    private final java.util.Set<Integer> loggedIndices =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** Last termination count reported to health; report only on change. */
+    private final AtomicInteger lastReportedTerminations = new AtomicInteger(0);
+
     private volatile ScheduledExecutorService scheduler;
 
     public ListenerSupervisor(String bindingId,
@@ -85,6 +96,15 @@ public class ListenerSupervisor implements AutoCloseable {
         ScheduledExecutorService s = scheduler;
         if (s != null) {
             s.shutdownNow();
+            try {
+                // Wait for any in-flight pass. Without this, a pass that read
+                // "still RUNNING" moments before stop() could observe the
+                // loops' just-completed futures and report a clean shutdown as
+                // an unexpected termination.
+                s.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -120,7 +140,7 @@ public class ListenerSupervisor implements AutoCloseable {
             }
             terminated++;
 
-            if (reportedTerminations.get() < futures.size()) {
+            if (loggedIndices.add(i)) {
                 Throwable cause = terminationCause(future);
                 log.error("Receive loop {} of {} for binding '{}' terminated unexpectedly "
                                 + "while the binding is RUNNING: {}",
@@ -133,7 +153,19 @@ public class ListenerSupervisor implements AutoCloseable {
             return;
         }
 
-        reportedTerminations.set(terminated);
+        // Health is reported on TRANSITION, not per tick. recordUnhealthy has
+        // no internal dedup — it logs an ERROR and increments the failure
+        // counter on every call — so calling it every 5 seconds forever made
+        // consecutiveFailures meaningless and flooded the log channel.
+        if (lastReportedTerminations.getAndSet(terminated) == terminated) {
+            return;
+        }
+
+        // Re-check right before reporting: stop() may have raced this pass.
+        if (!supervisionActive.getAsBoolean()) {
+            return;
+        }
+
         reportHealth(terminated);
     }
 

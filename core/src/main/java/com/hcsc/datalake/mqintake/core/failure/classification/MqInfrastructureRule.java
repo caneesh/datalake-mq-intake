@@ -26,6 +26,13 @@ public final class MqInfrastructureRule extends MatcherFailureRule {
                 .or(classNameContains("MQ", "mq.jms"))
                 .or(anyType(ConnectException.class, SocketException.class,
                         SocketTimeoutException.class))
-                .or(messageContains("MAXUMSGS", "syncpoint", "queue manager", "channel")));
+                // Bare "channel" was removed: it is ordinary business prose
+                // (distribution channel, sales channel) and an exception
+                // echoing payload text would have misclassified a data failure
+                // as MQ infrastructure — which never degrades, so the poison
+                // would never be isolated. The survivors are MQ-specific
+                // vocabulary.
+                .or(messageContains("MAXUMSGS", "syncpoint", "queue manager")),
+                true);
     }
 }

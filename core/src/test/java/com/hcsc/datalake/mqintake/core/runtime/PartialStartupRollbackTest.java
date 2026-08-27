@@ -178,6 +178,70 @@ class PartialStartupRollbackTest {
         assertThat(created.get(0).getState()).isEqualTo(BindingRuntime.State.STOPPED);
     }
 
+    @Test
+    void aFailureAfterAllBindingsStartedStillStopsThem() {
+        // The gap the review found: createAndStartRuntimes succeeded, then a
+        // later startup step threw. running stays false so Spring never calls
+        // stop() — without this rollback the bindings were left consuming
+        // inside an application whose startup had failed.
+        List<BindingRuntime> created = new ArrayList<>();
+        IntakeRuntimeManager manager = new FailsAfterBindingsStart(
+                properties("a", "b"), created);
+
+        assertThatThrownBy(manager::start)
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("reconciliation exploded");
+
+        assertThat(created).hasSize(2);
+        assertThat(created).allSatisfy(r ->
+                assertThat(r.getState())
+                        .as("bindings that started must be stopped by the late rollback")
+                        .isEqualTo(BindingRuntime.State.STOPPED));
+        assertThat(manager.isRunning()).isFalse();
+        assertThat(manager.getRuntime("a")).isNull();
+    }
+
+    /** Every binding starts fine; the step after them throws. */
+    private class FailsAfterBindingsStart extends IntakeRuntimeManager {
+        private final List<BindingRuntime> created;
+        private final IntakeProperties props;
+
+        FailsAfterBindingsStart(IntakeProperties props, List<BindingRuntime> created) {
+            super(props, fileSystem, conf, mock(MqConnectionManager.class),
+                    config -> TRIVIAL_SERIALIZER,
+                    new BindingConfigValidator(
+                            path -> com.hcsc.datalake.mqintake.core.config.HdfsPathValidator
+                                    .PathValidationResult.success()),
+                    new BindingHealthManager(),
+                    ProductionMode.disabled(),
+                    com.hcsc.datalake.mqintake.core.config.InstanceId.of("rollback-test"), null);
+            this.props = props;
+            this.created = created;
+        }
+
+        @Override
+        void initializeRuntimeFactory() {
+            setRuntimeFactoryForTest(new BindingRuntimeFactory(
+                    fileSystem, conf, mock(MqConnectionManager.class),
+                    config -> TRIVIAL_SERIALIZER, null,
+                    new com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry(),
+                    new BindingHealthManager(), null, "test") {
+                @Override
+                public BindingRuntime create(BindingConfig binding)
+                        throws BindingRuntimeCreationException {
+                    BindingRuntime runtime = blockingRuntime(binding);
+                    created.add(runtime);
+                    return runtime;
+                }
+            });
+        }
+
+        @Override
+        void startReconciliation() {
+            throw new IllegalStateException("reconciliation exploded");
+        }
+    }
+
     // --- harness ---
 
     private IntakeProperties properties(String... bindingIds) {
@@ -191,6 +255,10 @@ class PartialStartupRollbackTest {
         Map<String, MqConnectionConfig> connections = new LinkedHashMap<>();
         MqConnectionConfig primary = new MqConnectionConfig();
         primary.setId("primary");
+        // MqConnectionSanityRule now validates these at startup
+        primary.setHost("test-host");
+        primary.setQueueManager("QM1");
+        primary.setChannel("TEST.SVRCONN");
         connections.put("primary", primary);
         props.setMqConnections(connections);
 

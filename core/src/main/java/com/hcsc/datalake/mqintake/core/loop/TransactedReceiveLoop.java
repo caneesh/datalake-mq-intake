@@ -196,8 +196,22 @@ public class TransactedReceiveLoop implements Runnable {
                     rollbackQuietly();
                     batch.clear();
                     flushTrigger.reset();
+                    if (metrics != null) {
+                        // Without this the gauge kept reporting the rolled-back
+                        // batch's size through the whole reconnect backoff —
+                        // a phantom stuck batch on the dashboard.
+                        metrics.setCurrentBatchSize(0);
+                    }
 
-                    // Check if session needs recovery
+                    if (faultPolicy.isFatal(e)) {
+                        // Reconnecting cannot fix bad credentials or denied
+                        // access; checking only mid-retry paid for one doomed
+                        // close + backoff + open before giving up.
+                        log.error("Fatal (non-recoverable) JMS fault for binding '{}', "
+                                + "stopping loop: {}", config.getId(), e.getMessage());
+                        running.set(false);
+                        break;
+                    }
                     if (faultPolicy.requiresRecovery(e)) {
                         if (!recoverSession()) {
                             log.error("Session recovery failed for binding '{}', stopping loop",
@@ -205,7 +219,23 @@ public class TransactedReceiveLoop implements Runnable {
                             running.set(false);
                             break;
                         }
+                    } else {
+                        // The fault policy's own documented blind spot: a
+                        // genuinely unhealthy session whose error text matches
+                        // nothing would otherwise spin rollback-and-receive
+                        // with zero pause, burning CPU and log volume. A short
+                        // pause bounds that without slowing real one-off
+                        // faults meaningfully.
+                        pauseAfterUnrecognisedFault();
                     }
+                } else {
+                    // Shutdown-time: stop() flips running before interrupting,
+                    // so an exception raised by the interrupt lands here. It
+                    // used to vanish without a trace — if the same exception
+                    // had actually signalled a real broker fault coinciding
+                    // with shutdown, there was no forensic record at all.
+                    log.debug("JMS exception during shutdown for binding '{}' (expected if "
+                            + "raised by the stop interrupt): {}", config.getId(), e.getMessage());
                 }
             }
         }
@@ -227,6 +257,15 @@ public class TransactedReceiveLoop implements Runnable {
                         config.getId(), e.getMessage());
                 rollbackQuietly();
             }
+        }
+    }
+
+    /** Brief pause after a JMS fault the policy does not classify as broken. */
+    private void pauseAfterUnrecognisedFault() {
+        try {
+            Thread.sleep(Math.min(500, Math.max(50, receiveTimeoutMs / 2)));
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -283,6 +322,14 @@ public class TransactedReceiveLoop implements Runnable {
                     listenerSession.session().commit();
                     committed = true;
                     commitCount.incrementAndGet();
+                    // The shared metrics must advance here too: this branch
+                    // used to update only the loop's internal counter, so
+                    // dashboards undercounted commits and consumption exactly
+                    // when poison was churning.
+                    if (metrics != null) {
+                        metrics.recordCommit();
+                        metrics.recordMessagesConsumed(batchSize);
+                    }
                     if (degradedModeManager != null) {
                         degradedModeManager.clearSuspects(batchMessageIds);
                     }

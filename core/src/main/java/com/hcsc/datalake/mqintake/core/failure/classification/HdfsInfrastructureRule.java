@@ -25,6 +25,10 @@ public final class HdfsInfrastructureRule extends MatcherFailureRule {
                 .or(anyType(IOException.class)
                         .and(messageContains("NameNode", "DataNode", "HDFS", "quota",
                                 "block", "replication", "lease", "safemode")))
-                .or(classNameContains("FileSystem", "RemoteException")));
+                // Qualified with the Hadoop package: bare "FileSystem" and
+                // "RemoteException" also match java.nio.file and java.rmi
+                // types that have nothing to do with HDFS.
+                .or(classNameContains("org.apache.hadoop.fs.", "org.apache.hadoop.ipc.")),
+                true);
     }
 }

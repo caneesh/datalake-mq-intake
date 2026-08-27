@@ -164,6 +164,55 @@ class RuleBasedFailureClassifierTest {
     }
 
     @Test
+    void domainProseInAnExceptionMessageDoesNotClassifyAsInfrastructure() {
+        // The recurrence of the shutdownReason bug class the review flagged:
+        // "channel", "not authorized" and "lease" are ordinary insurance
+        // vocabulary. An exception echoing payload text must not classify as
+        // infrastructure/security — those classes never degrade, so the
+        // poison would never be isolated. UNKNOWN is the safe fall-through.
+        assertThat(classifier.classify(new RuntimeException(
+                "could not process: distribution channel unknown")))
+                .isEqualTo(FailureClass.UNKNOWN);
+        assertThat(classifier.classify(new RuntimeException(
+                "provider not authorized for this procedure")))
+                .isEqualTo(FailureClass.UNKNOWN);
+        assertThat(classifier.classify(new RuntimeException(
+                "invalid credential-type field in claim")))
+                .isEqualTo(FailureClass.UNKNOWN);
+    }
+
+    @Test
+    void mqVocabularyStillClassifiesAsMqInfrastructure() {
+        // The pruning must not blind the rule to genuine MQ prose.
+        assertThat(classifier.classify(new RuntimeException("MAXUMSGS limit exceeded")))
+                .isEqualTo(FailureClass.MQ_INFRASTRUCTURE);
+        assertThat(classifier.classify(new RuntimeException("queue manager unavailable")))
+                .isEqualTo(FailureClass.MQ_INFRASTRUCTURE);
+    }
+
+    @Test
+    void jdkFileSystemTypesNoLongerMatchTheHdfsRule() {
+        // Bare classNameContains("FileSystem","RemoteException") also matched
+        // java.nio.file and java.rmi types unrelated to HDFS.
+        assertThat(classifier.classify(
+                new java.nio.file.FileSystemNotFoundException("local disk")))
+                .isEqualTo(FailureClass.UNKNOWN);
+    }
+
+    @Test
+    void everyTextMatchingRuleSaysSo() {
+        // The flag previously said false on three rules that DO match message
+        // text — a misstatement that also made the ordering guard vacuous for
+        // them. If one of these flips back to false, the guard stops
+        // protecting anything again.
+        assertThat(new ShutdownRule().reliesOnMessageText()).isTrue();
+        assertThat(new SecurityConfigRule().reliesOnMessageText()).isTrue();
+        assertThat(new HdfsInfrastructureRule().reliesOnMessageText()).isTrue();
+        assertThat(new MqInfrastructureRule().reliesOnMessageText()).isTrue();
+        assertThat(new MessageDataRule().reliesOnMessageText()).isFalse();
+    }
+
+    @Test
     void shutdownRuleIsMarkedAsRelyingOnMessageText() {
         // If this ever becomes false the ordering guard stops protecting
         // anything, so it is asserted rather than assumed.

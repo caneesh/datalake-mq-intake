@@ -142,6 +142,51 @@ class ListenerSupervisionTest {
     }
 
     @Test
+    void repeatedPassesDoNotReReportTheSameDeadListener() throws Exception {
+        // The review finding: the same ERROR re-logged and recordUnhealthy
+        // re-fired on every 5s tick, forever, inflating consecutiveFailures
+        // without bound. Health must be reported on transition, not per tick.
+        BindingRuntime runtime = runtimeWith(2, new CountDownLatch(0));
+        healthManager.recordHealthy("test");
+
+        runtime.start();
+        awaitTerminated(runtime, 2, 3000);
+
+        for (int i = 0; i < 5; i++) {
+            runtime.superviseOnce();
+        }
+
+        assertThat(healthManager.getHealthSnapshot("test").getConsecutiveFailures())
+                .as("five passes over the same dead listeners = ONE report")
+                .isEqualTo(1);
+    }
+
+    @Test
+    void aSecondTerminationIsANewTransitionAndIsReported() throws Exception {
+        CountDownLatch second = new CountDownLatch(1);
+        BindingRuntime runtime = runtimeWith(List.of(
+                stub(new CountDownLatch(0)),   // dies immediately
+                stub(second)));                // dies later
+        healthManager.recordHealthy("test");
+
+        runtime.start();
+        awaitTerminated(runtime, 1, 3000);
+        runtime.superviseOnce();
+        assertThat(healthManager.getStatus("test"))
+                .isEqualTo(BindingHealthManager.HealthStatus.DEGRADED);
+
+        second.countDown();
+        awaitTerminated(runtime, 2, 3000);
+        runtime.superviseOnce();
+        runtime.superviseOnce();   // and the repeat is again not re-reported
+
+        assertThat(healthManager.getStatus("test"))
+                .isEqualTo(BindingHealthManager.HealthStatus.UNHEALTHY);
+        assertThat(healthManager.getHealthSnapshot("test").getConsecutiveFailures())
+                .isEqualTo(1);
+    }
+
+    @Test
     void supervisionRunsOnItsOwnScheduleWithoutBeingDrivenByHand() throws Exception {
         BindingRuntime runtime = runtimeWith(1, new CountDownLatch(0));
         runtime.configureSupervision(healthManager, 50);   // fast cadence for the test

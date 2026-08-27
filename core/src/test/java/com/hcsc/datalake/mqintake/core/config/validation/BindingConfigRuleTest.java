@@ -209,6 +209,68 @@ class BindingConfigRuleTest {
     }
 
     @Test
+    void blankMqConnectionFieldsAreCaughtAtStartupNotAtFirstConnect() {
+        // The natural result of an unset env var with an empty default. These
+        // used to pass every check and fail only inside MQConnectionFactory.
+        BindingConfigRule rule = new MqConnectionSanityRule();
+        IntakeProperties properties = propertiesWith(binding("a"));
+
+        com.hcsc.datalake.mqintake.core.config.MqConnectionConfig conn =
+                new com.hcsc.datalake.mqintake.core.config.MqConnectionConfig();
+        conn.setId("primary");
+        conn.setHost("");            // blank host
+        conn.setQueueManager("QM1");
+        conn.setChannel(null);       // missing channel
+        properties.setMqConnections(new java.util.LinkedHashMap<>(
+                java.util.Map.of("primary", conn)));
+
+        assertThat(rule.validate(properties))
+                .anySatisfy(e -> assertThat(e).contains("host"))
+                .anySatisfy(e -> assertThat(e).contains("channel"));
+    }
+
+    @Test
+    void zeroReceiveTimeoutIsRejectedBecauseItBlocksForever() {
+        // receive(0) means wait forever per the JMS spec, not "no wait" —
+        // and the idle branch that flushes at partition boundaries only runs
+        // when receive() returns null, which then never happens.
+        BindingConfigRule rule = new MqConnectionSanityRule();
+        IntakeProperties properties = propertiesWith(binding("a"));
+
+        com.hcsc.datalake.mqintake.core.config.MqConnectionConfig conn =
+                new com.hcsc.datalake.mqintake.core.config.MqConnectionConfig();
+        conn.setId("primary");
+        conn.setHost("mq.host");
+        conn.setQueueManager("QM1");
+        conn.setChannel("APP.SVRCONN");
+        conn.setReceiveTimeoutMs(0);
+        properties.setMqConnections(new java.util.LinkedHashMap<>(
+                java.util.Map.of("primary", conn)));
+
+        assertThat(rule.validate(properties))
+                .singleElement().asString()
+                .contains("receive-timeout-ms")
+                .contains("blocks");
+    }
+
+    @Test
+    void aWellFormedConnectionPasses() {
+        BindingConfigRule rule = new MqConnectionSanityRule();
+        IntakeProperties properties = propertiesWith(binding("a"));
+
+        com.hcsc.datalake.mqintake.core.config.MqConnectionConfig conn =
+                new com.hcsc.datalake.mqintake.core.config.MqConnectionConfig();
+        conn.setId("primary");
+        conn.setHost("mq.host");
+        conn.setQueueManager("QM1");
+        conn.setChannel("APP.SVRCONN");
+        properties.setMqConnections(new java.util.LinkedHashMap<>(
+                java.util.Map.of("primary", conn)));
+
+        assertThat(rule.validate(properties)).isEmpty();
+    }
+
+    @Test
     void theValidatorAcceptsACustomRuleSet() {
         // The seam: policy is replaceable without editing the validator.
         BindingConfigValidator alwaysFails = new BindingConfigValidator(
@@ -225,7 +287,7 @@ class BindingConfigRuleTest {
                 path -> com.hcsc.datalake.mqintake.core.config.HdfsPathValidator
                         .PathValidationResult.success());
 
-        assertThat(validator.rules()).hasSize(9);
+        assertThat(validator.rules()).hasSize(10);
     }
 
     // --- helpers ---

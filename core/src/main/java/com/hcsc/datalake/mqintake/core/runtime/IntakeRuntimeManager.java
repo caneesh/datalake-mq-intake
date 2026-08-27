@@ -123,7 +123,22 @@ public class IntakeRuntimeManager implements SmartLifecycle {
             cleanupTempFiles();
             initializeRuntimeFactory();
             createAndStartRuntimes();
-            startReconciliation();
+            try {
+                startReconciliation();
+            } catch (RuntimeException e) {
+                // createAndStartRuntimes rolls back its OWN failures, but a
+                // failure here — after every binding started — used to escape
+                // with the bindings left consuming and running still false, so
+                // Spring's lifecycle processor would never call stop(): the
+                // half-live-orphan bug class the rollback exists to prevent,
+                // reintroduced one line later. Latent today (nothing in
+                // startReconciliation currently throws), guarded so it stays
+                // latent.
+                log.error("Startup failed after bindings started — stopping them so no "
+                        + "listener outlives a failed startup: {}", e.getMessage());
+                stopAllRuntimesQuietly();
+                throw e;
+            }
             running = true;
 
             log.info("IntakeRuntimeManager started: {} bindings, {} total listener threads",
@@ -233,6 +248,24 @@ public class IntakeRuntimeManager implements SmartLifecycle {
      * disposes when the failed context closes, and they may be shared with
      * anything else in that context.
      */
+    /** Stops every started binding; used when startup fails after they started. */
+    private void stopAllRuntimesQuietly() {
+        long drainTimeout = properties.getShutdown().getDrainTimeoutMs();
+        if (reconciliationScheduler != null) {
+            reconciliationScheduler.close();
+        }
+        for (BindingRuntime runtime : runtimes.values()) {
+            try {
+                runtime.stop(drainTimeout);
+                healthManager.recordStopped(runtime.getBindingId());
+            } catch (Exception e) {
+                log.error("Failed to stop binding '{}' during late-startup rollback: {}",
+                        runtime.getBindingId(), e.getMessage(), e);
+            }
+        }
+        runtimes.clear();
+    }
+
     /**
      * Starts periodic reconciliation — the check half of ABC.
      *
@@ -240,7 +273,13 @@ public class IntakeRuntimeManager implements SmartLifecycle {
      * it holds no JMS session, and every failure inside it is contained. A
      * mechanism that checks ingestion must never be able to stop it.
      */
-    private void startReconciliation() {
+    /**
+     * Package-private and overridable for the same reason as
+     * {@link #initializeRuntimeFactory()}: the late-startup rollback path must
+     * be testable, and nothing in the real method can be made to throw on
+     * demand.
+     */
+    void startReconciliation() {
         var reconciliationConfig = properties.getReconciliation();
 
         var auditReader = new com.hcsc.datalake.mqintake.core.reconciliation.AuditRecordReader(
