@@ -137,6 +137,39 @@ class SessionRecoveryTest {
                 .isEqualTo(1);
     }
 
+    @Test
+    void aRunOfUnrecognisedFaultsForcesRecoveryInsteadOfStallingForever() throws Exception {
+        // The fault policy's documented blind spot: an exception whose text
+        // matches neither BROKEN nor FATAL used to fail-pause-retry forever —
+        // zero throughput, actuator health stale, supervisor blind (the
+        // thread never dies). After a run of unrecognised faults the loop now
+        // presumes the session broken and forces a rebuild.
+        BindingConfig config = config("REC.UNRECOG", 3);
+        UnrecognisedFaultSession session = new UnrecognisedFaultSession(connection, config);
+        CountingWriter writer = new CountingWriter();
+
+        TransactedReceiveLoop loop = loop(config, writer, session);
+        Future<?> future = executor.submit(loop);
+        awaitTrue(2_000, loop::isRunning);
+
+        session.breakUnrecognisably();
+        send(config.getSourceQueue(), "m1", "m2", "m3");
+
+        // 10 unmatched faults, then forced recovery; the reopen heals the
+        // session and consumption resumes.
+        awaitTrue(15_000, () -> loop.getCommitCount() >= 1);
+
+        loop.stop();
+        future.get(2, TimeUnit.SECONDS);
+
+        assertThat(loop.getReconnectCount())
+                .as("the escape hatch is a real recovery cycle").isEqualTo(1);
+        assertThat(writer.written.get()).isEqualTo(3);
+        assertThat(session.faultsThrown.get())
+                .as("escalation happens after the tolerated run, not immediately")
+                .isGreaterThanOrEqualTo(10);
+    }
+
     // --- harness ---
 
     private TransactedReceiveLoop loop(BindingConfig config, BatchWriter writer,
@@ -249,6 +282,45 @@ class SessionRecoveryTest {
         public MessageConsumer consumer() {
             return new FaultingConsumer(super.consumer(), broken::get,
                     "simulated broken session");
+        }
+    }
+
+    /**
+     * While armed, every receive throws a JMSException whose text matches
+     * NONE of the default policy's matchers ("gremlins…" — no MQ reason code,
+     * no connection/session/broken keywords). The forced-recovery reopen
+     * heals it, proving the escalation path ends in a working session.
+     */
+    private static final class UnrecognisedFaultSession extends ListenerSession {
+        private final AtomicBoolean faulting = new AtomicBoolean(false);
+        private final AtomicInteger opens = new AtomicInteger();
+        final AtomicInteger faultsThrown = new AtomicInteger();
+
+        UnrecognisedFaultSession(Connection connection, BindingConfig config) {
+            super(connection, config);
+        }
+
+        void breakUnrecognisably() {
+            faulting.set(true);
+        }
+
+        @Override
+        public void open() throws JMSException {
+            super.open();
+            if (opens.incrementAndGet() > 1) {
+                faulting.set(false); // the recovery reopen fixes the session
+            }
+        }
+
+        @Override
+        public MessageConsumer consumer() {
+            return new FaultingConsumer(super.consumer(), () -> {
+                if (faulting.get()) {
+                    faultsThrown.incrementAndGet();
+                    return true;
+                }
+                return false;
+            }, "gremlins ate the reply");
         }
     }
 

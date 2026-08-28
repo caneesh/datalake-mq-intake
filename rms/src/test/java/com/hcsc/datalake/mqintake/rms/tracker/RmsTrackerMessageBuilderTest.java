@@ -41,6 +41,24 @@ class RmsTrackerMessageBuilderTest {
     // --- Null MessageHeaderDetails guard (§20.3 behaviour #1) ---
 
     @Test
+    void customBodyModeFailsLoudlyInsteadOfSendingEmptyBodies() throws Exception {
+        // body-mode is free-form YAML; a typo selecting CUSTOM used to
+        // silently produce empty-bodied trackers. RMS defines no custom body,
+        // so it must say so at the first build, not ship blanks downstream.
+        RmsTrackerMessageBuilder builder = new RmsTrackerMessageBuilder(
+                com.hcsc.datalake.mqintake.core.config.TrackerBodyMode.CUSTOM,
+                RmsTrackerMessageBuilder.TrackerFields.defaultRms());
+
+        TextMessage sourceMessage = session.createTextMessage("<Test>payload</Test>");
+        sourceMessage.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS,
+                "<MessageHeaderDetails></MessageHeaderDetails>");
+
+        assertThatThrownBy(() -> builder.build(session, sourceMessage))
+                .isInstanceOf(java.lang.IllegalStateException.class)
+                .hasMessageContaining("CUSTOM");
+    }
+
+    @Test
     void returnsEmptyWhenMessageHeaderDetailsIsNull() throws Exception {
         RmsTrackerMessageBuilder builder = new RmsTrackerMessageBuilder(
                 RmsTrackerMessageBuilder.TrackerFields.defaultRms());
@@ -122,22 +140,10 @@ class RmsTrackerMessageBuilderTest {
         assertThat(trackerMessage.getText()).isEmpty();
     }
 
-    @Test
-    void customModeReturnsEmptyBodyByDefault() throws Exception {
-        RmsTrackerMessageBuilder builder = new RmsTrackerMessageBuilder(
-                TrackerBodyMode.CUSTOM,
-                RmsTrackerMessageBuilder.TrackerFields.defaultRms());
-
-        TextMessage sourceMessage = session.createTextMessage("<Test>payload</Test>");
-        sourceMessage.setStringProperty(RmsTrackerMessageBuilder.MESSAGE_HEADER_DETAILS,
-                "<MessageHeaderDetailsType></MessageHeaderDetailsType>");
-
-        Optional<Message> result = builder.build(session, sourceMessage);
-
-        assertThat(result).isPresent();
-        TextMessage trackerMessage = (TextMessage) result.get();
-        assertThat(trackerMessage.getText()).isEmpty();
-    }
+    // customModeReturnsEmptyBodyByDefault was deliberately removed: it pinned
+    // the silent-empty-body behaviour the production-readiness review flagged
+    // as a config-typo hazard. CUSTOM now fails loudly — see
+    // customBodyModeFailsLoudlyInsteadOfSendingEmptyBodies above.
 
     // --- Raw vs escaped tag handling (§20.3 behaviour #2) ---
 
@@ -243,9 +249,6 @@ class RmsTrackerMessageBuilderTest {
         // DestSystem takes destinationStatus — reads odd, but matches the legacy
         assertThat(rewrittenHeader).contains("<DestSystem>DONE</DestSystem>");
     }
-
-    // --- Property preservation ---
-
 
     // --- Edge cases ---
 

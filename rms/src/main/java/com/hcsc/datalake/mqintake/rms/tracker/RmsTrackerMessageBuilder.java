@@ -170,10 +170,20 @@ public class RmsTrackerMessageBuilder implements TrackerMessageBuilder {
     /**
      * Override this method in subclasses to provide custom body content
      * when bodyMode is CUSTOM.
+     *
+     * <p>Throws rather than returning an empty body: {@code body-mode} is a
+     * free-form YAML value, and a config typo selecting CUSTOM for RMS used
+     * to silently produce empty-bodied tracker messages — indistinguishable
+     * from a deliberate HEADER_ONLY choice, invisible until a downstream
+     * consumer noticed the payload was missing. RMS defines no custom body,
+     * so selecting CUSTOM here is always a mistake and says so at the first
+     * tracker build.
      */
     protected String buildCustomBody(Message sourceMessage) throws JMSException {
-        // Default implementation returns empty body
-        return "";
+        throw new java.lang.IllegalStateException(
+                "tracker.body-mode CUSTOM is not supported by RmsTrackerMessageBuilder — "
+                        + "use FULL_COPY (production) or HEADER_ONLY, or subclass and "
+                        + "override buildCustomBody()");
     }
 
     /**
@@ -294,12 +304,12 @@ public class RmsTrackerMessageBuilder implements TrackerMessageBuilder {
          */
         static final boolean GOLDEN_MASTER_AVAILABLE = true;
 
-        /** EJBHelper.getCompleteStartTag — inferred, pending confirmation. */
+        /** EJBHelper.getCompleteStartTag — confirmed against the captured legacy source. */
         static String completeStartTag(String tag, int variant) {
             return LESS_THAN[variant] + tag + GREATER_THAN[variant];
         }
 
-        /** EJBHelper.getCompleteEndTag — inferred, pending confirmation. */
+        /** EJBHelper.getCompleteEndTag — confirmed against the captured legacy source. */
         static String completeEndTag(String tag, int variant) {
             return LESS_THAN[variant] + "/" + tag + GREATER_THAN[variant];
         }

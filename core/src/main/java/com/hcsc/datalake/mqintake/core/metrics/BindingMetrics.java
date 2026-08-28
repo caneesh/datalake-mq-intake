@@ -67,6 +67,14 @@ public class BindingMetrics {
     /** Unresolved suspect message IDs; non-zero for long = a limping binding. */
     private final AtomicLong suspectCount = new AtomicLong(0);
 
+    /**
+     * Supplies the binding serializer's identity-miss count, wired by the
+     * runtime factory when the serializer reports one. A supplier rather than
+     * a counter of our own because the serializer already owns the count;
+     * duplicating it would invite drift.
+     */
+    private volatile java.util.function.LongSupplier identityMissSupplier = () -> 0L;
+
     public BindingMetrics(String bindingId) {
         this.bindingId = Objects.requireNonNull(bindingId, "bindingId required");
     }
@@ -134,6 +142,15 @@ public class BindingMetrics {
     /** A tracker message that could not be built or sent, per message. */
     public void recordTrackerFailure() {
         trackerFailureCount.increment();
+    }
+
+    public void setIdentityMissSupplier(java.util.function.LongSupplier supplier) {
+        this.identityMissSupplier = java.util.Objects.requireNonNull(supplier);
+    }
+
+    /** Payloads whose identity could not be extracted (0 when not wired). */
+    public long getIdentityMisses() {
+        return identityMissSupplier.getAsLong();
     }
 
     public void recordBalanceCheckFailure() {

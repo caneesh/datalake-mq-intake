@@ -46,6 +46,20 @@ public class TransactedReceiveLoop implements Runnable {
 
     private static final int MAX_RECONNECT_ATTEMPTS = 10;
 
+    /**
+     * Consecutive unrecognised JMS faults tolerated before the loop stops
+     * trusting the fault policy's "not broken" verdict and forces a session
+     * rebuild anyway. Guards the policy's documented blind spot: a
+     * permanently broken session whose exception text matches neither the
+     * BROKEN nor the FATAL matchers would otherwise fail-pause-retry forever
+     * — zero throughput, health endpoint stale-healthy, supervisor blind
+     * (the thread never dies), only the metrics gauge and log volume hinting.
+     * Forcing recovery is safe in both directions: a genuinely broken
+     * session gets rebuilt (bounded, alertable, budget-limited); a healthy
+     * session pays one cheap close/reopen every N faults.
+     */
+    private static final int UNRECOGNISED_FAULTS_BEFORE_FORCED_RECOVERY = 10;
+
     private final BindingConfig config;
     private final Connection connection;
     private final BatchWriter batchWriter;
@@ -72,6 +86,9 @@ public class TransactedReceiveLoop implements Runnable {
     /** This thread's JMS resources; see ListenerSession for the invariant. */
     private final ListenerSession listenerSession;
     private volatile Thread loopThread;
+
+    /** Loop-thread-confined; see UNRECOGNISED_FAULTS_BEFORE_FORCED_RECOVERY. */
+    private int consecutiveUnrecognisedFaults = 0;
 
     /**
      * Creates a receive loop for the given binding.
@@ -188,6 +205,7 @@ public class TransactedReceiveLoop implements Runnable {
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 pollOnce(batch, flushTrigger);
+                consecutiveUnrecognisedFaults = 0; // the session demonstrably works
             } catch (JMSException e) {
                 if (!surviveFault(e, batch, flushTrigger)) {
                     break;
@@ -267,6 +285,7 @@ public class TransactedReceiveLoop implements Runnable {
         }
 
         if (faultPolicy.requiresRecovery(e)) {
+            consecutiveUnrecognisedFaults = 0;
             if (!recoverSession()) {
                 log.error("Session recovery failed for binding '{}', stopping loop",
                         config.getId());
@@ -276,12 +295,26 @@ public class TransactedReceiveLoop implements Runnable {
             return true;
         }
 
-        // The fault policy's own documented blind spot: a
-        // genuinely unhealthy session whose error text matches
-        // nothing would otherwise spin rollback-and-receive
-        // with zero pause, burning CPU and log volume. A short
-        // pause bounds that without slowing real one-off
-        // faults meaningfully.
+        // The fault policy's own documented blind spot: a genuinely broken
+        // session whose error text matches nothing. One-off faults get a
+        // short pause and a retry; a RUN of them means the policy's verdict
+        // is wrong, and the loop escalates to a forced session rebuild —
+        // without this bound, an unmatched permanent fault stalled the
+        // listener forever with the health endpoint still reporting healthy.
+        consecutiveUnrecognisedFaults++;
+        if (consecutiveUnrecognisedFaults >= UNRECOGNISED_FAULTS_BEFORE_FORCED_RECOVERY) {
+            log.error("Binding '{}': {} consecutive unrecognised JMS faults — the session is "
+                            + "presumed broken despite the fault policy; forcing recovery",
+                    config.getId(), consecutiveUnrecognisedFaults);
+            consecutiveUnrecognisedFaults = 0;
+            if (!recoverSession()) {
+                log.error("Forced session recovery failed for binding '{}', stopping loop",
+                        config.getId());
+                running.set(false);
+                return false;
+            }
+            return true;
+        }
         pauseAfterUnrecognisedFault();
         return true;
     }
@@ -373,8 +406,13 @@ public class TransactedReceiveLoop implements Runnable {
             // taken off the queue must be observed either in the file (the
             // writer's per-append count) or on the BOQ (the screen's routing
             // count). All three numbers are independent observations — none is
-            // computed from the others — so a message this unit of work lost
-            // shows up as a non-zero delta here instead of being defined away.
+            // computed from the others. Scope honestly stated: the current
+            // SequenceFileBatchWriter is all-or-nothing (any failed append
+            // throws before a result exists), so with today's writer this
+            // check guards loop/wiring bugs, a future writer that can return
+            // partial counts, and screen implementations that break the
+            // clean+routed=batch partition — not a partial write the current
+            // writer already turns into a hard rollback.
             verifyAbcBalance(batchSize, writeResult.getRecordCount(), poisonCount);
 
             if (config.getMode() == BindingMode.TRACKED) {

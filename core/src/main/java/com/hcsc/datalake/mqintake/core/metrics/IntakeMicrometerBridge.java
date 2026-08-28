@@ -112,6 +112,10 @@ public class IntakeMicrometerBridge {
                 BindingMetrics::getBalanceCheckFailures,
                 "Batches rolled back because consumed != written + backout — any increment "
                         + "means the pipeline dropped a message pre-commit and warrants a page");
+        counter(metrics, tags, "identity_misses_total", BindingMetrics::getIdentityMisses,
+                "Payloads landed without an extractable identity — each one removes its whole "
+                        + "file from identity-based reconciliation, so a sustained climb means "
+                        + "an upstream schema regression");
         counter(metrics, tags, "reconnects_total", BindingMetrics::getReconnectSuccessCount,
                 "Successful JMS session recoveries");
         counter(metrics, tags, "reconnect_failures_total", BindingMetrics::getReconnectFailureCount,

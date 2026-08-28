@@ -170,6 +170,12 @@ public class IntakeRuntimeManager implements SmartLifecycle {
     }
 
     private void validateBindingConfigurations() {
+        // Dev-placeholder MQ defaults (localhost/QM1/DEV.APP.SVRCONN) resolve
+        // when the manifest forgets the env vars; they are non-blank, so the
+        // sanity rules alone would pass them and production would quietly
+        // point at a dev queue manager.
+        com.hcsc.datalake.mqintake.core.config.DevDefaultConnectionGate
+                .failOnDevDefaults(productionMode, properties.getMqConnections());
         bindingConfigValidator.validate(properties);
         log.info("Binding configurations validated successfully");
     }

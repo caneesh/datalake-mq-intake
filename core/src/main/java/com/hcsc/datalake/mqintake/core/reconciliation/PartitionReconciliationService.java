@@ -222,9 +222,21 @@ public class PartitionReconciliationService implements PartitionReconciler {
             if (result.getClassification() == FileClassification.DUPLICATE) {
                 String detail = "All identities present in audited files";
                 if (quarantineDuplicates) {
-                    Path quarantined = quarantine(basePath, entry.getValue().getPath());
-                    partitionSnapshot.remove(filePath);
-                    detail += " — quarantined (moved) to " + quarantined;
+                    // Contained like the unreadable-file case above: one failed
+                    // quarantine rename (permission gap, stale target) used to
+                    // escape as an IOException that aborted the whole
+                    // partition's report — discarding every discrepancy
+                    // already found in this pass, including MISSING_FILE and
+                    // COUNT_MISMATCH findings that had nothing to do with it.
+                    try {
+                        Path quarantined = quarantine(basePath, entry.getValue().getPath());
+                        partitionSnapshot.remove(filePath);
+                        detail += " — quarantined (moved) to " + quarantined;
+                    } catch (IOException e) {
+                        detail += " — quarantine FAILED (" + e.getMessage()
+                                + "), file left in place, retrying next pass";
+                        retryLater = true;
+                    }
                 } else {
                     detail += " — quarantine candidate (no action taken)";
                 }

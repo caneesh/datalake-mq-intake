@@ -111,6 +111,14 @@ public class BindingRuntimeFactory {
             TrackerMessageBuilder trackerBuilder = createTrackerBuilder(config);
             PoisonMessageHandler poisonHandler = createPoisonHandler(config);
             BindingMetrics metrics = metricsRegistry.forBinding(bindingId);
+            if (serializer instanceof com.hcsc.datalake.mqintake.core.serializer.ReportsIdentityMisses) {
+                // Publishes the serializer's identity-miss count as a
+                // per-binding counter; log-only visibility let a sustained
+                // upstream identity regression go unalerted.
+                metrics.setIdentityMissSupplier(
+                        ((com.hcsc.datalake.mqintake.core.serializer.ReportsIdentityMisses) serializer)
+                                ::getIdentityMissCount);
+            }
 
             List<TransactedReceiveLoop> loops = createLoops(
                     config, jmsConnection, receiveTimeoutMs, batchWriter, trackerBuilder, poisonHandler, metrics);

@@ -250,6 +250,27 @@ class RmsRecordSerializerTest {
     }
 
     @Test
+    void identityMissesArePublishableThroughBindingMetrics() throws Exception {
+        // The count used to live only on the serializer and in rate-limited
+        // log lines; a sustained upstream MessageID regression had no
+        // alertable signal. The factory wires this supplier when the
+        // serializer implements ReportsIdentityMisses.
+        assertThat(serializer)
+                .isInstanceOf(com.hcsc.datalake.mqintake.core.serializer.ReportsIdentityMisses.class);
+
+        com.hcsc.datalake.mqintake.core.metrics.BindingMetrics metrics =
+                new com.hcsc.datalake.mqintake.core.metrics.BindingMetrics("rms");
+        metrics.setIdentityMissSupplier(serializer::getIdentityMissCount);
+        assertThat(metrics.getIdentityMisses()).isZero();
+
+        serializer.serialize(
+                session.createTextMessage("<Member><Name>anon</Name></Member>"),
+                metadataAtOffset(129));
+
+        assertThat(metrics.getIdentityMisses()).isEqualTo(1);
+    }
+
+    @Test
     void aPayloadWithMessageIdDoesNotCountAsAMiss() throws Exception {
         TextMessage message = session.createTextMessage(
                 "<Member><MessageID>guid-1</MessageID></Member>");

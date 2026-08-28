@@ -18,6 +18,17 @@ public class MqConnectionConfig {
     private String transportType = "CLIENT";
     private String credentialRef;
     private long receiveTimeoutMs = 1000;
+
+    /**
+     * Retry budget for the INITIAL connection attempt at startup
+     * ({@code MqConnectionManager.ManagedConnection.connect()}) — these two
+     * fields do NOT govern session recovery. Once a binding is running, a
+     * broken session is rebuilt by {@code TransactedReceiveLoop}'s own
+     * recovery, which is fixed at 10 attempts with exponential backoff
+     * (1s→60s, jittered) and is not operator-tunable today. Making session
+     * recovery configurable is a deliberate future change, not an oversight
+     * of these fields.
+     */
     private int reconnectAttempts = 3;
     private long reconnectDelayMs = 5000;
 

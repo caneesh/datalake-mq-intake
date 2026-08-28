@@ -45,7 +45,8 @@ import java.util.regex.Pattern;
  * the data files. {@link #extractPayloadGuid} is what supplies the identity to
  * that sidecar.
  */
-public class RmsRecordSerializer implements RecordSerializer {
+public class RmsRecordSerializer
+        implements RecordSerializer, com.hcsc.datalake.mqintake.core.serializer.ReportsIdentityMisses {
 
     private static final org.slf4j.Logger log =
             org.slf4j.LoggerFactory.getLogger(RmsRecordSerializer.class);
@@ -172,7 +173,8 @@ public class RmsRecordSerializer implements RecordSerializer {
     }
 
 
-    /** Payloads seen without an extractable MessageID, for tests and probes. */
+    /** Payloads seen without an extractable MessageID; published as a metric. */
+    @Override
     public long getIdentityMissCount() {
         return identityMisses.get();
     }

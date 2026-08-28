@@ -55,6 +55,13 @@ class RmsProductionProfileSpringBootTest {
     static void overrideProperties(DynamicPropertyRegistry registry) throws Exception {
         dataDir = Files.createTempDirectory("rms-prod-data");
         auditDir = Files.createTempDirectory("rms-prod-audit");
+        // Production mode refuses the yaml's dev-placeholder connection
+        // defaults (DevDefaultConnectionGate), so this prod-profile boot must
+        // carry non-dev values. The connection manager is mocked; the values
+        // are never dialled.
+        registry.add("intake.mq-connections.primary.host", () -> "mq-prod-test.internal");
+        registry.add("intake.mq-connections.primary.queue-manager", () -> "QMTEST");
+        registry.add("intake.mq-connections.primary.channel", () -> "TEST.SVRCONN");
         registry.add("intake.bindings[0].id", () -> "rms");
         registry.add("intake.bindings[0].mq-connection", () -> "primary");
         registry.add("intake.bindings[0].source-queue", () -> SOURCE_QUEUE);

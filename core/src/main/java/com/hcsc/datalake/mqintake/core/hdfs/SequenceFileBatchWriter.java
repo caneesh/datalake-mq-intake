@@ -191,10 +191,13 @@ public class SequenceFileBatchWriter implements BatchWriter {
                     indexEntries.size(), byteCount, finalPath);
 
             // indexEntries gains exactly one entry per successful append, so
-            // its size is the OBSERVED written count — not messages.size(),
-            // which would assume the loop wrote everything it was given. The
-            // ABC balance check compares this against the MQ batch size, and
-            // a count that merely echoed the input could never disagree.
+            // its size is the OBSERVED written count rather than an echo of
+            // messages.size(). With this writer's all-or-nothing contract the
+            // two cannot differ today (any failed append throws before this
+            // line); observing rather than echoing is what keeps the ABC
+            // balance check honest against future edits to this loop or a
+            // BatchWriter implementation that can legitimately return partial
+            // counts.
             return new BatchWriteResult(finalPath.toString(), indexEntries.size(), byteCount);
 
         } catch (IOException e) {

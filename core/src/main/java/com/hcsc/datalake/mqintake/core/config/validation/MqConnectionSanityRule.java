@@ -44,6 +44,9 @@ public class MqConnectionSanityRule implements BindingConfigRule {
                         + "forever per the JMS spec, which starves the partition-boundary "
                         + "flush on a quiet queue");
             }
+            // These two govern only the INITIAL connect at startup; session
+            // recovery has its own fixed budget in TransactedReceiveLoop.
+            // See the field javadoc on MqConnectionConfig.
             if (config.getReconnectAttempts() <= 0) {
                 errors.add(prefix + " reconnect-attempts must be positive");
             }
