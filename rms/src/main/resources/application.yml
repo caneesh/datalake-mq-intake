@@ -93,6 +93,13 @@ intake:
         # pager condition. Sampled by browsing (read-only, does not consume).
         # 0 disables the monitor and with it the alert.
         depth-poll-interval-ms: 30000
+      audit:
+        # Transaction-time ABC: before every MQ commit, the independently
+        # observed batch size must equal the writer's per-append count plus
+        # the poison screen's routing count. An unbalanced batch rolls back
+        # and is redelivered instead of committing with a silently dropped
+        # message. RMS only — this is the no-loss feed.
+        balance-check-enabled: true
       degradation:
         strategy: BATCH_OF_ONE
         successes-required-to-restore: 10

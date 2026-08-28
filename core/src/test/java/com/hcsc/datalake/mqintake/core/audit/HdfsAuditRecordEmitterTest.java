@@ -119,6 +119,57 @@ class HdfsAuditRecordEmitterTest {
     }
 
     @Test
+    void persistedConsumedCountIsTheIndependentObservationNotTheDerivedSum() throws Exception {
+        // consumed_count keeps its name for existing consumers, but the value
+        // is the loop's independently observed batch size. Here 10 were
+        // consumed while only 8 landed and 1 was backed out — a derived count
+        // would have written 9 and balanced perfectly, hiding the loss.
+        AuditRecord record = AuditRecord.builder()
+                .bindingId("rms")
+                .partitionPath("/data/raw/rms/year=2026/month=08/day=27")
+                .filename("rms_inst1_1_1.seq")
+                .recordCount(8)
+                .byteCount(1000)
+                .backoutCount(1)
+                .consumedCount(10)
+                .instanceId("inst1")
+                .commitTimestamp(Instant.parse("2026-08-27T10:00:00Z"))
+                .build();
+
+        emitter.emit(record);
+
+        String json = readLines(testBasePath + "/rms/20260827/audit_rms_inst1_1_1.json").get(0);
+        assertThat(json).contains("\"consumed_count\":10");
+        assertThat(json).contains("\"record_count\":8");
+        assertThat(json).contains("\"backout_count\":1");
+        assertThat(json).contains("\"balance_delta\":1");
+        assertThat(json).contains("\"balance_status\":\"NOT_BALANCED\"");
+    }
+
+    @Test
+    void recordsWithoutAnIndependentObservationStillDeriveAndBalance() throws Exception {
+        // Legacy/retrospective path: no consumedCount supplied — the record
+        // derives it, and its balance is then true by construction.
+        AuditRecord record = AuditRecord.builder()
+                .bindingId("rms")
+                .partitionPath("/data/raw/rms/year=2026/month=08/day=27")
+                .filename("rms_inst1_2_1.seq")
+                .recordCount(5)
+                .byteCount(500)
+                .backoutCount(2)
+                .instanceId("inst1")
+                .commitTimestamp(Instant.parse("2026-08-27T11:00:00Z"))
+                .build();
+
+        emitter.emit(record);
+
+        String json = readLines(testBasePath + "/rms/20260827/audit_rms_inst1_2_1.json").get(0);
+        assertThat(json).contains("\"consumed_count\":7");
+        assertThat(json).contains("\"balance_delta\":0");
+        assertThat(json).contains("\"balance_status\":\"BALANCED\"");
+    }
+
+    @Test
     void emitsAuditRecordAsJson() throws Exception {
         AuditRecord record = AuditRecord.builder()
                 .bindingId("rms")

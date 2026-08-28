@@ -82,6 +82,22 @@ public interface AuditRecordEmitter {
     }
 
     /**
+     * Emits a record additionally carrying the independently observed MQ
+     * batch size, so the persisted {@code consumed_count} is a source-side
+     * observation rather than the {@code written + backout} sum — a derived
+     * value can never disagree with itself, so it can never expose a dropped
+     * message.
+     *
+     * @param consumedCount the batch size as received from MQ, or negative
+     *                      when no source-side observation exists
+     */
+    default void emit(String bindingId, BatchWriter.BatchWriteResult writeResult,
+                      List<Message> messages, int backoutCount, int consumedCount)
+            throws IOException {
+        emit(bindingId, writeResult, messages, backoutCount);
+    }
+
+    /**
      * Emits an audit record for a unit of work that landed nothing.
      *
      * <p>A batch consisting entirely of poison messages commits without
@@ -91,6 +107,17 @@ public interface AuditRecordEmitter {
      */
     void emitBackoutOnly(String bindingId, List<Message> messages, int backoutCount)
             throws IOException;
+
+    /**
+     * Backout-only emission carrying the independently observed MQ batch
+     * size. For a fully-poison unit of work the two should be equal; the
+     * record persists both so a disagreement is visible rather than defined
+     * away.
+     */
+    default void emitBackoutOnly(String bindingId, List<Message> messages, int backoutCount,
+                                 int consumedCount) throws IOException {
+        emitBackoutOnly(bindingId, messages, backoutCount);
+    }
 
     /**
      * Flushes any buffered audit records. Some implementations may buffer

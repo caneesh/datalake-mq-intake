@@ -72,6 +72,21 @@ public class AuditRecordBuilder {
                               BatchWriter.BatchWriteResult writeResult,
                               List<Message> messages,
                               int backoutCount) {
+        return build(bindingId, writeResult, messages, backoutCount, -1);
+    }
+
+    /**
+     * Builds a record carrying an independently observed consumed count.
+     *
+     * @param consumedCount the MQ batch size as seen by the receive loop, or
+     *                      negative when no source-side observation exists
+     *                      (the record then derives it)
+     */
+    public AuditRecord build(String bindingId,
+                              BatchWriter.BatchWriteResult writeResult,
+                              List<Message> messages,
+                              int backoutCount,
+                              int consumedCount) {
         Objects.requireNonNull(bindingId, "bindingId required");
         Objects.requireNonNull(writeResult, "writeResult required");
         Objects.requireNonNull(messages, "messages required");
@@ -90,7 +105,7 @@ public class AuditRecordBuilder {
         String firstIdentity = identityExtractor.apply(messages.get(0));
         String lastIdentity = identityExtractor.apply(messages.get(messages.size() - 1));
 
-        return AuditRecord.builder()
+        AuditRecord.Builder builder = AuditRecord.builder()
                 .bindingId(bindingId)
                 .partitionPath(partitionPath)
                 .filename(filename)
@@ -100,8 +115,11 @@ public class AuditRecordBuilder {
                 .firstIdentity(firstIdentity)
                 .lastIdentity(lastIdentity)
                 .instanceId(instanceId)
-                .commitTimestamp(Instant.now(clock))
-                .build();
+                .commitTimestamp(Instant.now(clock));
+        if (consumedCount >= 0) {
+            builder.consumedCount(consumedCount);
+        }
+        return builder.build();
     }
 
     /**

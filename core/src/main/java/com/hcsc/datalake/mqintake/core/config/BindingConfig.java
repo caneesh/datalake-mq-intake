@@ -228,6 +228,21 @@ public class BindingConfig {
     public static class Audit {
 
         /**
+         * Whether the transaction-time ABC balance check runs before every
+         * MQ commit: {@code mqConsumed == hdfsWritten + backout}, with each
+         * side independently observed (batch size from the receive loop,
+         * written count from the SequenceFile writer's per-append counter,
+         * backout count from the poison screen's routing result).
+         *
+         * <p>Off by default; enabled per binding where an unbalanced batch
+         * must never commit (RMS). When the check fails, the batch rolls back
+         * and MQ redelivers — the same at-least-once path as any other
+         * pre-commit failure. This is the transaction-time half of ABC; the
+         * post-write reconciliation pass is the other half and is unaffected.
+         */
+        private boolean balanceCheckEnabled = false;
+
+        /**
          * Whether a batch must roll back when its audit record cannot be
          * written.
          *
@@ -247,6 +262,14 @@ public class BindingConfig {
          * preferable to a stall.
          */
         private boolean failBatchOnError = true;
+
+        public boolean isBalanceCheckEnabled() {
+            return balanceCheckEnabled;
+        }
+
+        public void setBalanceCheckEnabled(boolean balanceCheckEnabled) {
+            this.balanceCheckEnabled = balanceCheckEnabled;
+        }
 
         public boolean isFailBatchOnError() {
             return failBatchOnError;

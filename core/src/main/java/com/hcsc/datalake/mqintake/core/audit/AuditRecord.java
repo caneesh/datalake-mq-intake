@@ -35,6 +35,18 @@ public final class AuditRecord {
     private final String instanceId;
     private final Instant commitTimestamp;
 
+    /**
+     * Messages taken off the source queue in this unit of work, observed
+     * independently at the receive loop (the MQ batch size) — NOT derived
+     * from {@code recordCount + backoutCount}. A derived value is
+     * mathematically incapable of detecting a dropped message: 3997 written
+     * plus 2 backed out "balances" 3999 even when 4000 were consumed. When a
+     * record is built without a source-side observation (retrospective
+     * audits reconstructed from a landed file, legacy callers) it falls back
+     * to the derived sum, which for those records is the only honest value.
+     */
+    private final int consumedCount;
+
     private AuditRecord(Builder builder) {
         this.bindingId = Objects.requireNonNull(builder.bindingId, "bindingId required");
         this.partitionPath = Objects.requireNonNull(builder.partitionPath, "partitionPath required");
@@ -66,6 +78,12 @@ public final class AuditRecord {
         if (byteCount < 0) {
             throw new IllegalArgumentException("byteCount must be non-negative");
         }
+
+        // Resolved after validation so the derived fallback uses checked
+        // values. Negative sentinel = "no independent observation supplied".
+        this.consumedCount = builder.consumedCount >= 0
+                ? builder.consumedCount
+                : recordCount + backoutCount;
     }
 
     public String getBindingId() {
@@ -117,14 +135,25 @@ public final class AuditRecord {
     }
 
     /**
-     * Messages consumed from the queue in this unit of work.
-     *
-     * <p>The left-hand side of the balance equation: everything taken off the
-     * source queue was either landed or set aside, and this is the total the
-     * control compares against.
+     * Messages consumed from the queue in this unit of work — the left-hand
+     * side of the balance equation, independently observed where the builder
+     * supplied it (see the field javadoc).
      */
     public int getConsumedCount() {
-        return recordCount + backoutCount;
+        return consumedCount;
+    }
+
+    /**
+     * {@code consumed − written − backout}. Zero means every consumed
+     * message is accounted for; positive means messages were consumed that
+     * neither landed nor reached the backout queue.
+     */
+    public int getBalanceDelta() {
+        return consumedCount - recordCount - backoutCount;
+    }
+
+    public boolean isBalanced() {
+        return getBalanceDelta() == 0;
     }
 
     public String getInstanceId() {
@@ -148,6 +177,7 @@ public final class AuditRecord {
                 Objects.equals(firstIdentity, that.firstIdentity) &&
                 Objects.equals(lastIdentity, that.lastIdentity) &&
                 backoutCount == that.backoutCount &&
+                consumedCount == that.consumedCount &&
                 instanceId.equals(that.instanceId) &&
                 commitTimestamp.equals(that.commitTimestamp);
     }
@@ -156,7 +186,7 @@ public final class AuditRecord {
     public int hashCode() {
         return Objects.hash(bindingId, partitionPath, filename, recordCount,
                 byteCount, firstIdentity, lastIdentity, instanceId, commitTimestamp,
-                backoutCount);
+                backoutCount, consumedCount);
     }
 
     @Override
@@ -170,6 +200,8 @@ public final class AuditRecord {
                 ", firstIdentity='" + firstIdentity + '\'' +
                 ", lastIdentity='" + lastIdentity + '\'' +
                 ", backoutCount=" + backoutCount +
+                ", consumedCount=" + consumedCount +
+                ", balanceDelta=" + getBalanceDelta() +
                 ", instanceId='" + instanceId + '\'' +
                 ", commitTimestamp=" + commitTimestamp +
                 '}';
@@ -188,6 +220,7 @@ public final class AuditRecord {
         private String firstIdentity;
         private String lastIdentity;
         private int backoutCount;
+        private int consumedCount = -1; // sentinel: derive when not observed
         private String instanceId;
         private Instant commitTimestamp;
 
@@ -223,6 +256,17 @@ public final class AuditRecord {
 
         public Builder backoutCount(int backoutCount) {
             this.backoutCount = backoutCount;
+            return this;
+        }
+
+        /**
+         * The independently observed MQ batch size. Leave unset only when no
+         * source-side observation exists (retrospective audits, legacy
+         * callers), in which case the record derives it — and its balance is
+         * then true by construction rather than verified.
+         */
+        public Builder consumedCount(int consumedCount) {
+            this.consumedCount = consumedCount;
             return this;
         }
 

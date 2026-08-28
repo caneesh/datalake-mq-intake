@@ -108,6 +108,10 @@ public class IntakeMicrometerBridge {
                 "Tracker notifications that could not be sent");
         counter(metrics, tags, "audit_failures_total", BindingMetrics::getAuditFailureCount,
                 "Audit records that could not be written after a commit");
+        counter(metrics, tags, "balance_check_failures_total",
+                BindingMetrics::getBalanceCheckFailures,
+                "Batches rolled back because consumed != written + backout — any increment "
+                        + "means the pipeline dropped a message pre-commit and warrants a page");
         counter(metrics, tags, "reconnects_total", BindingMetrics::getReconnectSuccessCount,
                 "Successful JMS session recoveries");
         counter(metrics, tags, "reconnect_failures_total", BindingMetrics::getReconnectFailureCount,

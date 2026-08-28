@@ -52,6 +52,8 @@ intake:
       backout:
         queue: MQ.HPS.MEMBERSHIP.BACKOUT
         threshold: 3
+      audit:
+        balance-check-enabled: true   # drill/production parity
       degradation:
         strategy: BATCH_OF_ONE
         successes-required-to-restore: 5

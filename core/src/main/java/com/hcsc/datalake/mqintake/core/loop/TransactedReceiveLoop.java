@@ -358,7 +358,8 @@ public class TransactedReceiveLoop implements Runnable {
                     // Nothing landed, but messages were consumed. Without a
                     // record of its own this unit of work appears in no audit
                     // anywhere and the balance shows those messages as lost.
-                    emitBackoutOnlyAudit(batch, poisonCount);
+                    verifyAbcBalance(batchSize, 0, poisonCount);
+                    emitBackoutOnlyAudit(batch, poisonCount, batchSize);
                     commitSession();
                     committed = true;
                     recordBackoutOnlyCommit(batchSize, batchMessageIds);
@@ -367,6 +368,14 @@ public class TransactedReceiveLoop implements Runnable {
             }
 
             BatchWriter.BatchWriteResult writeResult = writeBatchToHdfs(cleanMessages);
+
+            // ABC balance, before anything is sent or committed: every message
+            // taken off the queue must be observed either in the file (the
+            // writer's per-append count) or on the BOQ (the screen's routing
+            // count). All three numbers are independent observations — none is
+            // computed from the others — so a message this unit of work lost
+            // shows up as a non-zero delta here instead of being defined away.
+            verifyAbcBalance(batchSize, writeResult.getRecordCount(), poisonCount);
 
             if (config.getMode() == BindingMode.TRACKED) {
                 sendTrackerMessages(cleanMessages);
@@ -380,7 +389,7 @@ public class TransactedReceiveLoop implements Runnable {
             // true. Under ABC the audit is a control, so this is also the point
             // at which an unwritable audit stops the batch rather than being
             // logged and forgotten.
-            emitAuditRecord(cleanMessages, writeResult, poisonCount);
+            emitAuditRecord(cleanMessages, writeResult, poisonCount, batchSize);
 
             commitSession();
             committed = true;
@@ -588,6 +597,52 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     /**
+     * The transaction-time ABC balance check: every message consumed must be
+     * observed either written to HDFS or routed to the BOQ, or the batch does
+     * not commit.
+     *
+     * <p>Gated per binding ({@code audit.balance-check-enabled}); RMS runs it,
+     * Claims keeps its existing behaviour. Throwing here lands in
+     * processBatch's catch before the commit, so the whole unit of work rolls
+     * back and MQ redelivers — the standard at-least-once path, no bespoke
+     * retry. The already-landed file (the write precedes this check) becomes a
+     * design-permitted duplicate on redelivery, exactly as for any other
+     * post-write pre-commit failure.
+     *
+     * @param mqConsumedCount  size of the batch as received from MQ
+     * @param hdfsWrittenCount records the writer observed itself append
+     * @param backoutCount     messages the screen observed itself route
+     */
+    private void verifyAbcBalance(int mqConsumedCount, int hdfsWrittenCount, int backoutCount)
+            throws AbcBalanceException {
+        if (!config.getAudit().isBalanceCheckEnabled()) {
+            return;
+        }
+
+        int balanceDelta = mqConsumedCount - hdfsWrittenCount - backoutCount;
+        if (balanceDelta == 0) {
+            return;
+        }
+
+        metrics.recordBalanceCheckFailure();
+        log.error("ABC balance check FAILED for binding '{}': consumed {} != written {} + "
+                        + "backout {} (delta {}). Rolling back — an unbalanced batch must "
+                        + "never be committed. The messages return to the queue for redelivery.",
+                config.getId(), mqConsumedCount, hdfsWrittenCount, backoutCount, balanceDelta);
+        throw new AbcBalanceException(String.format(
+                "ABC balance violated for binding '%s': consumed=%d, hdfsWritten=%d, "
+                        + "backout=%d, delta=%d",
+                config.getId(), mqConsumedCount, hdfsWrittenCount, backoutCount, balanceDelta));
+    }
+
+    /** An unbalanced unit of work; deliberately not a data failure. */
+    public static class AbcBalanceException extends Exception {
+        public AbcBalanceException(String message) {
+            super(message);
+        }
+    }
+
+    /**
      * Writes the batch's audit record, before the commit.
      *
      * <p>Whether a failure here stops the batch is
@@ -597,9 +652,10 @@ public class TransactedReceiveLoop implements Runnable {
      * is lost — ingestion stalls until the audit path recovers.
      */
     private void emitAuditRecord(List<Message> messages, BatchWriter.BatchWriteResult writeResult,
-                                 int backoutCount) throws Exception {
+                                 int backoutCount, int mqConsumedCount) throws Exception {
         try {
-            auditRecordEmitter.emit(config.getId(), writeResult, messages, backoutCount);
+            auditRecordEmitter.emit(config.getId(), writeResult, messages, backoutCount,
+                    mqConsumedCount);
         } catch (Exception e) {
             metrics.recordAuditFailure();
             if (config.getAudit().isFailBatchOnError()) {
@@ -615,13 +671,15 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     /** Audit for a unit of work that landed nothing because every message was poison. */
-    private void emitBackoutOnlyAudit(List<Message> batch, int backoutCount) throws Exception {
+    private void emitBackoutOnlyAudit(List<Message> batch, int backoutCount, int mqConsumedCount)
+            throws Exception {
         if (backoutCount == 0) {
             return;
         }
 
         try {
-            auditRecordEmitter.emitBackoutOnly(config.getId(), batch, backoutCount);
+            auditRecordEmitter.emitBackoutOnly(config.getId(), batch, backoutCount,
+                    mqConsumedCount);
         } catch (Exception e) {
             metrics.recordAuditFailure();
             if (config.getAudit().isFailBatchOnError()) {

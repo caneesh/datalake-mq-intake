@@ -130,11 +130,25 @@ public class HdfsAuditRecordEmitter implements AuditRecordEmitter {
     }
 
     @Override
+    public void emit(String bindingId, BatchWriter.BatchWriteResult writeResult,
+                     List<Message> messages, int backoutCount, int consumedCount)
+            throws IOException {
+        emit(auditRecordBuilder.build(bindingId, writeResult, messages, backoutCount,
+                consumedCount));
+    }
+
+    @Override
     public void emitBackoutOnly(String bindingId, List<Message> messages, int backoutCount)
             throws IOException {
+        emitBackoutOnly(bindingId, messages, backoutCount, -1);
+    }
+
+    @Override
+    public void emitBackoutOnly(String bindingId, List<Message> messages, int backoutCount,
+                                int consumedCount) throws IOException {
         // No data file, so no filename to name the record after. Named for the
         // unit of work instead, so it still lands somewhere a control can find.
-        emit(AuditRecord.builder()
+        AuditRecord.Builder builder = AuditRecord.builder()
                 .bindingId(bindingId)
                 .partitionPath("")
                 .filename("backout-only-" + java.util.UUID.randomUUID())
@@ -142,8 +156,11 @@ public class HdfsAuditRecordEmitter implements AuditRecordEmitter {
                 .byteCount(0)
                 .backoutCount(backoutCount)
                 .instanceId(instanceId)
-                .commitTimestamp(java.time.Instant.now(clock))
-                .build());
+                .commitTimestamp(java.time.Instant.now(clock));
+        if (consumedCount >= 0) {
+            builder.consumedCount(consumedCount);
+        }
+        emit(builder.build());
     }
 
     private String buildAuditPath(AuditRecord record) {
@@ -173,7 +190,14 @@ public class HdfsAuditRecordEmitter implements AuditRecordEmitter {
         sb.append("\"first_identity\":").append(jsonString(record.getFirstIdentity())).append(",");
         sb.append("\"last_identity\":").append(jsonString(record.getLastIdentity())).append(",");
         sb.append("\"backout_count\":").append(record.getBackoutCount()).append(",");
+        // consumed_count keeps its name for existing consumers, but its VALUE
+        // is now the independently observed MQ batch size where the loop
+        // supplied one — no longer always record_count + backout_count. The
+        // two balance fields are additive; old readers ignore them.
         sb.append("\"consumed_count\":").append(record.getConsumedCount()).append(",");
+        sb.append("\"balance_delta\":").append(record.getBalanceDelta()).append(",");
+        sb.append("\"balance_status\":")
+                .append(jsonString(record.isBalanced() ? "BALANCED" : "NOT_BALANCED")).append(",");
         sb.append("\"instance_id\":").append(jsonString(record.getInstanceId())).append(",");
         sb.append("\"commit_timestamp\":").append(jsonString(record.getCommitTimestamp().toString()));
         sb.append("}");

@@ -188,9 +188,14 @@ public class SequenceFileBatchWriter implements BatchWriter {
                     instanceId, indexEntries));
 
             log.debug("Batch written successfully: {} records, {} bytes to {}",
-                    messages.size(), byteCount, finalPath);
+                    indexEntries.size(), byteCount, finalPath);
 
-            return new BatchWriteResult(finalPath.toString(), messages.size(), byteCount);
+            // indexEntries gains exactly one entry per successful append, so
+            // its size is the OBSERVED written count — not messages.size(),
+            // which would assume the loop wrote everything it was given. The
+            // ABC balance check compares this against the MQ batch size, and
+            // a count that merely echoed the input could never disagree.
+            return new BatchWriteResult(finalPath.toString(), indexEntries.size(), byteCount);
 
         } catch (IOException e) {
             throw new BatchWriteException("Failed to write batch to HDFS: " + e.getMessage(), e);
