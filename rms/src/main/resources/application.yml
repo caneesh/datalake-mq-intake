@@ -112,6 +112,16 @@ intake:
 # restarting the pod over an isolated binding failure would interrupt the
 # healthy bindings to fix one that is already contained.
 management:
+  endpoints:
+    web:
+      exposure:
+        # Spring Boot exposes only /actuator/health by default, which would
+        # leave every mq_intake_* counter registered in-process but
+        # unreachable over HTTP — including the balance-check and
+        # backout-depth signals the runbook alerts on. Nothing sensitive is
+        # published here; add "prometheus" (plus the micrometer-registry-
+        # prometheus dependency) if the platform scrapes that format.
+        include: health,info,metrics
   endpoint:
     health:
       show-details: always

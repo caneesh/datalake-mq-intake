@@ -96,6 +96,13 @@ intake:
 # restarting the pod over an isolated binding failure would interrupt the
 # healthy bindings to fix one that is already contained.
 management:
+  endpoints:
+    web:
+      exposure:
+        # See the RMS application.yml for the rationale: without this only
+        # /actuator/health is reachable and the mq_intake_* metrics are
+        # invisible over HTTP.
+        include: health,info,metrics
   endpoint:
     health:
       show-details: always
