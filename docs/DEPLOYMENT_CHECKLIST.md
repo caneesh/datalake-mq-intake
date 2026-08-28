@@ -11,10 +11,16 @@ Conventions: `[ ]` = must be checked off by a named person before cutover. Items
 
 ## 1 — IBM MQ environment
 
-- [ ] Source queue `MQ.HPS.MEMBERSHIP.IN` exists on the production queue manager.
-- [ ] Tracker queue `MQ.HPS.MEMBERSHIP.TRACKER` exists; downstream tracker consumer is attached and drains it.
-- [ ] Backout queue `MQ.HPS.MEMBERSHIP.BACKOUT` exists with adequate `MAXDEPTH`.
-- [ ] `BOTHRESH(5)` and `BOQNAME(MQ.HPS.MEMBERSHIP.BACKOUT)` set **on the source queue**. The application reads its own `backout.threshold: 5` and never asserts the QM attribute — the two must be kept in step manually (same values as the drill environment in `docker/mq-config/20-queues.mqsc`).
+Queue names are environment-specific and are **not** the repo's placeholder values. Override them in the deployment manifest — no code change needed, Spring relaxed binding accepts:
+`INTAKE_BINDINGS_0_SOURCE_QUEUE`, `INTAKE_BINDINGS_0_TRACKER_QUEUE`, `INTAKE_BINDINGS_0_BACKOUT_QUEUE`.
+
+- [ ] Source queue exists on the queue manager the application will connect to.
+- [ ] **Tracker queue exists on that SAME queue manager.** The tracker producer is created from the listener's own transacted session, so a tracker queue on a different QM cannot be reached — the binding fails when the session opens.
+- [ ] **Backout queue exists on that SAME queue manager.** Same reason, worse consequence: the poison screen puts to the BOQ on the consuming session. If the BOQ is only defined on a sibling QM, the first poison message fails to route, the batch rolls back, and the message is redelivered forever — a permanent stall of the binding (nothing lost; nothing progresses either). In a multi-QM pair, verify the definition on **each** QM the app may connect to, not just one.
+- [ ] Downstream tracker consumer attached and draining the tracker queue.
+- [ ] **BOQ `MAXDEPTH` sized against the batch, not against expected poison volume.** Any rollback increments the delivery count of *every* message in the batch, so a prolonged HDFS or audit outage eventually diverts a whole in-flight batch of good messages to the BOQ. With `batch.size: 4000`, a BOQ shallower than ~2× that can fill in a single incident; once full, BOQ puts fail and the binding stalls (safely).
+- [ ] `BOQNAME` set on the source queue and matching the app's `backout.queue`.
+- [ ] `BOTHRESH` on the source queue matches the app's `backout.threshold`. **The application never reads the QM attribute** — its own value is what governs, and the mapping is exact (`deliveryCount = backoutCount + 1`, app routes when `deliveryCount > threshold`, so app threshold *N* reproduces `BOTHRESH(N)`). Keep them equal so the queue attribute does not mislead operators. Prefer the *higher* value when in doubt: a low threshold combined with a large batch turns a brief infrastructure outage into thousands of good messages on the BOQ.
 - [ ] Queue manager `MAXUMSGS ≥ 8000`. A TRACKED batch of 4000 is a unit of work of up to 8000 messages (4000 gets + 4000 tracker puts). The application assumes 10000.
 - [ ] `MAXMSGL` on channel and queues covers the largest real RMS payload. The application enforces no per-message size cap of its own.
 - [ ] **TLS decision confirmed with the MQ team.** Nothing in the repository configures TLS; if the production channel requires it, that is new work and blocks cutover.
@@ -71,7 +77,7 @@ All metrics are per-binding, prefix `mq_intake_`.
 | Signal | Condition | Severity |
 |---|---|---|
 | `balance_check_failures_total` | any increment | **Page.** A pre-commit accounting mismatch; the batch rolled back — investigate before backlog builds. |
-| `backout_queue_depth` | > 0 | **Page** (the design's nominated pager condition — poison messages parked). |
+| `backout_queue_depth` | > 0 | **Page** (the design's nominated pager condition — messages parked). First triage question: *poison or diversion?* A handful of messages alongside data-classified failures is genuine poison. A large jump arriving with a spike in `rollbacks_total` / `audit_failures_total` / HDFS errors is an infrastructure outage pushing **good** messages past the backout threshold — those must be replayed from the BOQ, never discarded. |
 | `reconciliation_discrepancies_total` | any increment | Page/urgent — the balance control found something. |
 | `healthy` gauge | 0 for more than a few minutes | Alert — batches failing or a fault loop. |
 | `reconnect_failures_total` | increments | Alert — a listener exhausted its recovery budget and stopped (binding limps at reduced threads until pod restart; visible as DEGRADED). |
@@ -98,6 +104,7 @@ Health endpoint semantics: `PARTIAL_OUTAGE` and `DEGRADED` return **HTTP 200** (
 ## 9 — Accepted behaviors (do not treat as incidents)
 
 - **Duplicates are design-permitted.** Any crash between HDFS rename and MQ commit yields a duplicate file on redelivery; reconciliation detects and classifies them, quarantine is a move (never a delete).
+- **Good messages on the backout queue after a sustained outage.** Backout routing is delivery-count based, exactly like the legacy MDB — it cannot distinguish "this message is malformed" from "this message was in five batches that rolled back because HDFS was down". The messages are intact on the BOQ and must be replayed once the underlying fault is fixed. Raising `backout.threshold` widens the margin before this happens; it does not eliminate it.
 - **Audit-path outage stalls ingestion.** Fail-closed by design: messages wait on the queue until the audit store recovers. This is the correct trade for a completeness-critical feed.
 - **A listener that exhausts recovery stops and stays stopped** (binding runs at reduced threads, reported DEGRADED) until pod restart. Deliberate: no in-process thread resurrection.
 - **Tracker per-message failures are swallowed** (counted + logged): legacy MDB parity. The landed data is kept; one notification is lost.

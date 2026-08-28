@@ -82,7 +82,18 @@ DISPLAY QLOCAL(MQ.HPS.MEMBERSHIP.IN) BOTHRESH BOQNAME MAXDEPTH MAXMSGL
 DISPLAY QMGR MAXUMSGS
 ```
 
-- [ ] `BOTHRESH(5)` matches the app's `backout.threshold: 5`
+The names above are the repo's placeholders. Real environments use their own — override them in the launch environment rather than editing the jar:
+
+```bash
+export INTAKE_BINDINGS_0_SOURCE_QUEUE=<real source queue>
+export INTAKE_BINDINGS_0_TRACKER_QUEUE=<real tracker queue>
+export INTAKE_BINDINGS_0_BACKOUT_QUEUE=<real backout queue>
+```
+
+- [ ] **Source, tracker and backout queues all exist on the SAME queue manager the app connects to.** Both the tracker producer and the backout producer are created from the listener's own transacted session, so neither can reach a queue on a sibling QM. A backout queue defined only on the other QM of a pair is the worst case: the first poison message fails to route, rolls back, and redelivers forever — the binding stalls permanently. In a multi-QM pair, check every QM the app may connect to.
+- [ ] If the feed arrives on **more than one queue manager**, decide now: one binding per QM, each with its **own `hdfs.base-path`**. Two bindings sharing a base path make reconciliation report each other's files as orphans on every pass.
+- [ ] `BOTHRESH` matches the app's `backout.threshold` (the app never reads the QM attribute; its own value governs. `deliveryCount = backoutCount + 1`, and the app routes when `deliveryCount > threshold`, so app threshold *N* reproduces `BOTHRESH(N)` exactly)
+- [ ] BOQ `MAXDEPTH` comfortably exceeds `batch.size` — an outage can divert a whole in-flight batch of good messages there (see Test 7 and the accepted-behaviours appendix)
 - [ ] `MAXUMSGS ≥ 8000` (a TRACKED batch of 4000 is a unit of work of up to 8000)
 - [ ] `MAXMSGL` covers your largest test payload
 - [ ] Channel and credentials work for the app's service account
@@ -415,6 +426,7 @@ Do not raise these as defects:
 - **Tracker send failures logged and counted while the message still commits.** Legacy MDB parity.
 - **No tracker message for a source message lacking `MessageHeaderDetails`.** The §20.3 null guard.
 - **A warning about a payload with no extractable `<MessageID>`** — counted in `mq_intake_identity_misses_total`; the message still lands.
+- **Good messages on the backout queue after Test 7 or Test 8.** Backout routing is delivery-count based (legacy MDB behaviour): it cannot tell a malformed message from a good one that sat in several batches which rolled back because HDFS or the audit path was down. Expect this when you deliberately break infrastructure with a low `backout.threshold`. The messages are intact and must be replayed from the BOQ — never discarded. Note it in the results log rather than raising a defect.
 
 ## Appendix B — Troubleshooting
 
