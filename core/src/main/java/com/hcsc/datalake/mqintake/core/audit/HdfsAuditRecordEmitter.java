@@ -77,8 +77,16 @@ public class HdfsAuditRecordEmitter implements AuditRecordEmitter {
         // balancing control that can read half a record is not a control — it
         // would report a batch's counts as missing or malformed depending on
         // when it happened to look.
-        Path tempPath = new Path(path.getParent(), "." + path.getName() + ".tmp");
+        //
+        // Staged under the same {base}/_tmp/{instanceId} convention as the
+        // data and index writers, so the startup sweep covers crash debris
+        // here too. The previous dot-prefixed sibling in the live date
+        // directory was swept by nothing and accumulated forever.
+        String tempDir = com.hcsc.datalake.mqintake.core.hdfs.PartitionPath.tempDir(
+                AuditPaths.bindingDir(auditBasePath, record.getBindingId()), instanceId);
+        Path tempPath = new Path(tempDir, path.getName() + ".tmp");
 
+        fileSystem.mkdirs(tempPath.getParent());
         fileSystem.mkdirs(path.getParent());
 
         boolean landed = false;

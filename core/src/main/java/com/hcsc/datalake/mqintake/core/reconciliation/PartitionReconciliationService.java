@@ -59,7 +59,7 @@ import java.util.Set;
 public class PartitionReconciliationService implements PartitionReconciler {
 
     private static final Logger log = LoggerFactory.getLogger(PartitionReconciliationService.class);
-    private static final Duration PARTITION_LENGTH = com.hcsc.datalake.mqintake.core.hdfs.PartitionPath.WINDOW;
+    private static final Duration PARTITION_LENGTH = PartitionPath.WINDOW;
 
     private final FileSystem fileSystem;
     private final IdentityExtractor identityReader;
@@ -176,9 +176,20 @@ public class PartitionReconciliationService implements PartitionReconciler {
             }
         }
 
-        // Files: count check when audited, identity classification when not
+        // Files: count check when audited, identity classification when not.
+        // Sorted iteration plus a snapshot the quarantines update keeps a
+        // multi-orphan pass deterministic: two mutually-duplicate orphans used
+        // to split DUPLICATE/SOLE_COPY by HashMap iteration order racing the
+        // per-call re-listing. Now the first (by name) is quarantined and the
+        // second — its match gone from the snapshot — is kept as SOLE_COPY
+        // with a retrospective audit: exactly one copy survives, always the
+        // same one.
+        List<String> partitionSnapshot = new ArrayList<>();
+        for (FileStatus status : filesByName.values()) {
+            partitionSnapshot.add(status.getPath().toString());
+        }
         long actualRecordSum = 0;
-        for (Map.Entry<String, FileStatus> entry : filesByName.entrySet()) {
+        for (Map.Entry<String, FileStatus> entry : new java.util.TreeMap<>(filesByName).entrySet()) {
             String filename = entry.getKey();
             String filePath = entry.getValue().getPath().toString();
             ParsedAuditRecord audit = auditByFilename.get(filename);
@@ -206,12 +217,13 @@ public class PartitionReconciliationService implements PartitionReconciler {
 
             // File with no audit record: crash window state 3/4 — classify
             OrphanFileClassifier.ClassificationResult result =
-                    orphanClassifier.classify(filePath, partitionPath);
+                    orphanClassifier.classify(filePath, partitionSnapshot);
 
             if (result.getClassification() == FileClassification.DUPLICATE) {
                 String detail = "All identities present in audited files";
                 if (quarantineDuplicates) {
                     Path quarantined = quarantine(basePath, entry.getValue().getPath());
+                    partitionSnapshot.remove(filePath);
                     detail += " — quarantined (moved) to " + quarantined;
                 } else {
                     detail += " — quarantine candidate (no action taken)";
@@ -304,9 +316,13 @@ public class PartitionReconciliationService implements PartitionReconciler {
     }
 
     private Instant partitionCloseInstant(Instant partitionInstant) {
-        long quarterMillis = PARTITION_LENGTH.toMillis();
-        long start = (partitionInstant.toEpochMilli() / quarterMillis) * quarterMillis;
-        return Instant.ofEpochMilli(start).plus(PARTITION_LENGTH);
+        // Boundary via PartitionPath.windowId, not re-derived arithmetic: the
+        // window math was centralised there precisely so grace-period timing
+        // and window enumeration cannot silently disagree.
+        long windowStart = Math.multiplyExact(
+                PartitionPath.windowId(partitionInstant),
+                PARTITION_LENGTH.toMillis());
+        return Instant.ofEpochMilli(windowStart).plus(PARTITION_LENGTH);
     }
 
     private boolean matchesPartition(String auditPartitionPath, String partitionPath) {

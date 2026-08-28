@@ -158,27 +158,12 @@ class SequenceFileBatchWriterTest {
         assertThat(result.getFilePath()).contains("hour=10/quarter=1");
     }
 
-    @Test
-    void fileWrittenToTmpBeforeRename() throws Exception {
-        TestClock clock = new TestClock(Instant.now());
-        String basePath = tempDir.resolve("data").toString();
-
-        // Use a writer that we can inspect mid-write
-        TrackingWriter writer = new TrackingWriter(fileSystem, conf,
-                new TestRecordSerializer(), "instance-1", basePath, clock);
-
-        List<Message> batch = createMessages(3);
-        writer.write("binding", batch);
-
-        // Verify the temp directory path includes instance ID
-        assertThat(writer.tempPathBeforeRename).isNotNull();
-        assertThat(writer.tempPathBeforeRename.toString()).contains("_tmp");
-        assertThat(writer.tempPathBeforeRename.toString()).contains("instance-1");
-
-        // Final file should exist in partition, not in _tmp
-        assertThat(writer.finalPathAfterRename).isNotNull();
-        assertThat(writer.finalPathAfterRename.toString()).doesNotContain("_tmp");
-    }
+    // NOTE: a test named fileWrittenToTmpBeforeRename used to live here. It
+    // recomputed the temp path AFTER the write from PartitionPath's naming
+    // convention and asserted on the string — true by construction whether or
+    // not write() actually staged through temp. The real guarantee is covered
+    // by noFileVisibleInPartitionUntilRenamed (observes the partition DURING
+    // the write) and the failure-path tests that assert _tmp is empty.
 
     @Test
     void noFileVisibleInPartitionUntilRenamed() throws Exception {
@@ -476,31 +461,6 @@ class SequenceFileBatchWriterTest {
         @Override
         public long millis() {
             return currentTime.get();
-        }
-    }
-
-    /**
-     * Writer that tracks temp and final paths.
-     */
-    private class TrackingWriter extends SequenceFileBatchWriter {
-        Path tempPathBeforeRename;
-        Path finalPathAfterRename;
-        private final String basePath;
-
-        TrackingWriter(FileSystem fs, Configuration conf, TestRecordSerializer serializer,
-                       String instanceId, String basePath, Clock clock) {
-            super(fs, conf, serializer, instanceId, clock, CompressionType.RECORD, createBindingMap(basePath));
-            this.basePath = basePath;
-        }
-
-        @Override
-        public BatchWriteResult write(String bindingId, List<Message> messages) throws BatchWriteException {
-            BatchWriteResult result = super.write(bindingId, messages);
-            // After write, deduce what paths were used
-            String tempDir = PartitionPath.tempDir(basePath, getInstanceId());
-            tempPathBeforeRename = new Path(tempDir);
-            finalPathAfterRename = new Path(result.getFilePath());
-            return result;
         }
     }
 

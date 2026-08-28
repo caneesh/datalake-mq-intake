@@ -681,8 +681,12 @@ class TransactedReceiveLoopTest {
 
         Future<?> future = executor.submit(loop);
 
-        // Wait briefly for loop to start
-        Thread.sleep(100);
+        // Poll with a deadline, like every other wait in this file — a fixed
+        // sleep occasionally loses to a slow session open under CI load.
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (!loop.isRunning() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
         assertThat(loop.isRunning()).isTrue();
 
         // Stop should interrupt cleanly

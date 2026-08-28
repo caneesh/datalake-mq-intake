@@ -200,10 +200,11 @@ public class IntakeRuntimeManager implements SmartLifecycle {
     private void cleanupTempFiles() {
         String resolvedInstanceId = this.instanceId.value();
         long maxAge = properties.getHdfs().getTempFileMaxAgeMs();
+        String auditBasePath = properties.getHdfs().getAuditBasePath();
 
         for (BindingConfig binding : properties.getBindings()) {
+            StartupValidator validator = new StartupValidator(fileSystem, resolvedInstanceId);
             try {
-                StartupValidator validator = new StartupValidator(fileSystem, resolvedInstanceId);
                 int deleted = validator.cleanupInstanceTempFiles(binding.getHdfs().getBasePath(), maxAge);
                 if (deleted > 0) {
                     log.info("Cleaned up {} stale temp files for binding '{}'", deleted, binding.getId());
@@ -211,6 +212,25 @@ public class IntakeRuntimeManager implements SmartLifecycle {
             } catch (IOException e) {
                 log.warn("Failed to cleanup temp files for binding '{}': {}",
                         binding.getId(), e.getMessage());
+            }
+
+            // The audit emitter stages under the same _tmp/{instanceId}
+            // convention in its own tree; sweep that too, or a crash between
+            // stage and rename leaves debris nothing ever removes.
+            if (auditBasePath != null && !auditBasePath.isBlank()) {
+                try {
+                    int deleted = validator.cleanupInstanceTempFiles(
+                            com.hcsc.datalake.mqintake.core.audit.AuditPaths
+                                    .bindingDir(auditBasePath, binding.getId()),
+                            maxAge);
+                    if (deleted > 0) {
+                        log.info("Cleaned up {} stale audit temp files for binding '{}'",
+                                deleted, binding.getId());
+                    }
+                } catch (IOException e) {
+                    log.warn("Failed to cleanup audit temp files for binding '{}': {}",
+                            binding.getId(), e.getMessage());
+                }
             }
         }
     }

@@ -57,8 +57,27 @@ public final class OrphanFileClassifier {
      * @throws IOException if file comparison fails
      */
     public ClassificationResult classify(String suspectFilePath, String partitionPath) throws IOException {
+        return classify(suspectFilePath, listSeqFiles(new Path(partitionPath)));
+    }
+
+    /**
+     * Classifies against a caller-supplied snapshot of the partition's files
+     * instead of re-listing HDFS per call.
+     *
+     * <p>This is what makes a multi-orphan reconciliation pass deterministic:
+     * the caller lists the partition once, updates the snapshot itself when it
+     * quarantines a file, and every later classification sees exactly that
+     * state. With per-call re-listing, the outcome for two mutually-duplicate
+     * files depended on map iteration order racing the quarantine renames.
+     *
+     * @param partitionFilePaths paths of the partition's {@code .seq} files;
+     *                           may include the suspect itself (it is excluded
+     *                           from the comparison set here)
+     */
+    public ClassificationResult classify(String suspectFilePath,
+                                         java.util.Collection<String> partitionFilePaths)
+            throws IOException {
         Path suspect = new Path(suspectFilePath);
-        Path partition = new Path(partitionPath);
 
         if (!fileSystem.exists(suspect)) {
             log.warn("Suspect file does not exist: {}", suspectFilePath);
@@ -83,8 +102,8 @@ public final class OrphanFileClassifier {
                     "No identities in file", Set.of(), 0);
         }
 
-        // Collect identities from all OTHER files in the partition
-        Set<String> otherIdentities = collectOtherIdentities(partition, suspect);
+        // Collect identities from all OTHER files in the snapshot
+        Set<String> otherIdentities = collectOtherIdentities(partitionFilePaths, suspect);
 
         // Compare: check which suspect identities appear elsewhere
         Set<String> foundElsewhere = new HashSet<>();
@@ -124,37 +143,18 @@ public final class OrphanFileClassifier {
     }
 
     /**
-     * Collects all identities from files in the partition EXCEPT the suspect file.
+     * Collects all identities from the snapshot's files EXCEPT the suspect.
      */
-    private Set<String> collectOtherIdentities(Path partitionPath, Path excludeFile)
-            throws IOException {
-
+    private Set<String> collectOtherIdentities(java.util.Collection<String> partitionFilePaths,
+                                               Path excludeFile) {
         Set<String> identities = new HashSet<>();
-
-        if (!fileSystem.exists(partitionPath)) {
-            return identities;
-        }
 
         // Normalize exclude path for comparison (remove file: prefix and extra slashes)
         String excludeNormalized = normalizePath(excludeFile.toString());
 
-        FileStatus[] files = fileSystem.listStatus(partitionPath);
-
-        for (FileStatus file : files) {
-            if (!file.isFile()) {
-                continue;
-            }
-
-            String filePath = file.getPath().toString();
-            String filePathNormalized = normalizePath(filePath);
-
+        for (String filePath : partitionFilePaths) {
             // Skip the suspect file by comparing normalized paths
-            if (filePathNormalized.equals(excludeNormalized)) {
-                continue;
-            }
-
-            // Only process .seq files
-            if (!filePath.endsWith(".seq")) {
+            if (normalizePath(filePath).equals(excludeNormalized)) {
                 continue;
             }
 
@@ -163,12 +163,26 @@ public final class OrphanFileClassifier {
                 identities.addAll(fileIdentities);
             } catch (IOException e) {
                 log.warn("Failed to extract identities from {}: {}",
-                        file.getPath(), e.getMessage());
+                        filePath, e.getMessage());
                 // Continue with other files — don't fail the whole classification
             }
         }
 
         return identities;
+    }
+
+    /** The 2-arg convenience path: one fresh listing of the partition. */
+    private java.util.List<String> listSeqFiles(Path partitionPath) throws IOException {
+        java.util.List<String> paths = new java.util.ArrayList<>();
+        if (!fileSystem.exists(partitionPath)) {
+            return paths;
+        }
+        for (FileStatus file : fileSystem.listStatus(partitionPath)) {
+            if (file.isFile() && file.getPath().toString().endsWith(".seq")) {
+                paths.add(file.getPath().toString());
+            }
+        }
+        return paths;
     }
 
     /**

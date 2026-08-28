@@ -119,6 +119,45 @@ class HdfsAuditRecordEmitterTest {
     }
 
     @Test
+    void crashDebrisFromAFailedAuditWriteIsSweptByTheStartupCleanup() throws Exception {
+        // The emitter stages under {auditBase}/{binding}/_tmp/{instanceId},
+        // the same convention the data and index writers use — so the
+        // existing instance-scoped startup sweep covers its debris. The old
+        // dot-prefixed sibling in the live date directory was swept by
+        // nothing and accumulated forever.
+        FileSystem renameRefuses = new FilterFileSystem(fileSystem) {
+            @Override
+            public boolean rename(Path src, Path dst) throws IOException {
+                if (src.toString().contains("/_tmp/")) {
+                    return false; // simulate dying between stage and rename
+                }
+                return super.rename(src, dst);
+            }
+        };
+        HdfsAuditRecordEmitter failingEmitter = new HdfsAuditRecordEmitter(
+                renameRefuses, testBasePath, "inst-sweep", java.time.Clock.systemUTC());
+
+        assertThatThrownBy(() -> failingEmitter.emitBackoutOnly("rms", List.of(), 1))
+                .isInstanceOf(IOException.class);
+
+        // The emitter's own finally already tries to delete; simulate even
+        // that failing by planting a stale file directly, then prove the
+        // startup sweep removes it.
+        Path tmpDir = new Path(testBasePath + "/rms/_tmp/inst-sweep");
+        fileSystem.mkdirs(tmpDir);
+        Path stale = new Path(tmpDir, "audit_stale.json.tmp");
+        fileSystem.create(stale, true).close();
+
+        com.hcsc.datalake.mqintake.core.lifecycle.StartupValidator validator =
+                new com.hcsc.datalake.mqintake.core.lifecycle.StartupValidator(
+                        fileSystem, "inst-sweep");
+        int deleted = validator.cleanupInstanceTempFiles(testBasePath + "/rms", 0);
+
+        assertThat(deleted).isGreaterThanOrEqualTo(1);
+        assertThat(fileSystem.exists(stale)).isFalse();
+    }
+
+    @Test
     void persistedConsumedCountIsTheIndependentObservationNotTheDerivedSum() throws Exception {
         // consumed_count keeps its name for existing consumers, but the value
         // is the loop's independently observed batch size. Here 10 were
