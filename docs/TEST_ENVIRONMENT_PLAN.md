@@ -1,7 +1,7 @@
 # RMS Test-Environment Validation — Step by Step
 
 **Application:** `datalake-mq-intake` — RMS binding
-**Baseline:** commit `1bc1655` or later · full suite 804 green · 11 real-MQ drill tests green
+**Baseline:** commit `e7423fe` or later · full suite 814 green · 11 real-MQ drill tests green
 **Purpose:** prove, in a test environment against real IBM MQ and real HDFS, everything unit tests and the Docker drill cannot: real connectivity, real Kerberos, real partition behaviour, real recovery, real throughput.
 **Audience:** whoever runs the test cycle. Follow the parts in order — later parts assume earlier ones passed.
 
@@ -52,11 +52,11 @@ intake:
   bindings:
     - id: rms
       batch:
-        size: 10           # production 4000 — small batches so tests flush promptly
+        size: 10           # production 1000 — small batches so tests flush promptly
         interval-ms: 5000  # production 0 — a timer so a partial batch lands in 5s
 ```
 
-Everything else stays at production values — especially `hsync-on-flush: true`, `record-index-enabled: true`, `audit.balance-check-enabled: true`, `backout.threshold: 5`.
+Everything else stays at production values — especially `hsync-on-flush: true`, `record-index-enabled: true`, `audit.balance-check-enabled: true`, `backout.threshold: 5`, and `backout.route-only-on-data-failures: true`.
 
 Record here what you actually ran with:
 
@@ -64,7 +64,8 @@ Record here what you actually ran with:
 |---|---|---|---|---|
 | `batch.size` | | | `listener-threads` | |
 | `batch.interval-ms` | | | `backout.threshold` (app) | |
-| QM `BOTHRESH` | | | Landing path | |
+| QM `BOTHRESH` | | | `route-only-on-data-failures` | |
+| BOQ `MAXDEPTH` | | | Landing path | |
 
 ---
 
@@ -258,8 +259,10 @@ This proves `consumed_count` is a real source-side observation, not `record_coun
 **Steps**
 
 1. Put 8 good messages and 1 poison message.
-2. Watch the log: repeated rollbacks for the batch containing the poison, batch size shrinking (`BATCH_OF_ONE`), then the poison routed to the BOQ once its backout count exceeds `BOTHRESH(5)`.
+2. Watch the log: repeated rollbacks for the batch containing the poison, batch size shrinking (`BATCH_OF_ONE`), then the poison routed to the BOQ once its backout count exceeds the app's `backout.threshold`.
 3. Wait until the source queue drains.
+
+**Note on the routing gate.** With `route-only-on-data-failures: true` the poison's *own* failure classifies as message data, which opens the gate — so isolation proceeds exactly as it always did, at most one redelivery later than with the gate off. If you see the poison message reach the BOQ, the gate is behaving correctly; Test 8 covers the other half (an infrastructure failure must divert nothing).
 
 **Pass criteria**
 
@@ -271,9 +274,9 @@ This proves `consumed_count` is a real source-side observation, not `record_coun
 - [ ] Health shows `DEGRADED` (HTTP **200**) while isolating, returning to `UP` after 10 clean batches
 - [ ] `mq_intake_degraded_entries_total` ≥ 1, `mq_intake_suspect_count` returns to 0
 
-### Test 8 — Rollback leaves nothing behind
+### Test 8 — Rollback leaves nothing behind, and diverts nothing
 
-**Steps:** make HDFS unwritable mid-run (revoke write on the landing path, or put the NameNode in safemode: `hdfs dfsadmin -safemode enter`), then put 10 messages. Restore afterwards (`-safemode leave`).
+**Steps:** make HDFS unwritable mid-run (revoke write on the landing path, or put the NameNode in safemode: `hdfs dfsadmin -safemode enter`), then put 10 messages. **Leave the fault in place long enough for the messages to be redelivered well past `backout.threshold`** — with `receive-timeout-ms: 1000` that is under a minute; watch `mq_intake_rollbacks_total` climb past 6 before restoring (`-safemode leave`).
 
 **Pass criteria**
 
@@ -281,7 +284,13 @@ This proves `consumed_count` is a real source-side observation, not `record_coun
 - [ ] **All 10 messages remain on the source queue** (nothing acknowledged)
 - [ ] No `.seq` file in the partition, and **no leftover file under `_tmp/`**
 - [ ] `mq_intake_rollbacks_total` increased; no audit record was written
+- [ ] **The backout queue stays EMPTY** even though every message is now past the backout threshold — this is the routing gate doing its job (see below)
+- [ ] The log carries the suppression notice once: *"…routing to '…' is suppressed: the last failure was infrastructure-classified…"*
 - [ ] After restoring HDFS, the same 10 messages land normally — no loss
+
+**Why this matters.** Backout routing is delivery-count based, so without the gate this test would push all 10 messages onto the backout queue — and at production batch sizes that means thousands of healthy messages needing manual replay, on a queue sized for poison. With `route-only-on-data-failures: true`, the screen passes the batch through untouched while failures are infrastructure-classified. **A non-empty BOQ in this test is a FAIL** — capture the log and the audit records and report it.
+
+**Variant worth running once (optional):** set `route-only-on-data-failures: false`, repeat, and confirm the messages *do* land on the BOQ. That proves the gate is what's protecting them rather than some accident of timing, and it shows the team exactly what the old behaviour looked like. Restore `true` afterwards.
 
 ### Test 9 — Audit is fail-closed
 
@@ -426,7 +435,7 @@ Do not raise these as defects:
 - **Tracker send failures logged and counted while the message still commits.** Legacy MDB parity.
 - **No tracker message for a source message lacking `MessageHeaderDetails`.** The §20.3 null guard.
 - **A warning about a payload with no extractable `<MessageID>`** — counted in `mq_intake_identity_misses_total`; the message still lands.
-- **Good messages on the backout queue after Test 7 or Test 8.** Backout routing is delivery-count based (legacy MDB behaviour): it cannot tell a malformed message from a good one that sat in several batches which rolled back because HDFS or the audit path was down. Expect this when you deliberately break infrastructure with a low `backout.threshold`. The messages are intact and must be replayed from the BOQ — never discarded. Note it in the results log rather than raising a defect.
+- **Good messages on the backout queue if `route-only-on-data-failures` is off.** Backout routing is delivery-count based (legacy MDB behaviour): it cannot tell a malformed message from a good one that sat in several batches which rolled back because HDFS or the audit path was down. With the gate **on** (the RMS default) this should not happen, and Test 8 checks for it explicitly. With the gate off — the Test 8 variant, or any binding that hasn't enabled it — the messages are intact and must be replayed from the BOQ, never discarded.
 
 ## Appendix B — Troubleshooting
 
@@ -437,7 +446,8 @@ Do not raise these as defects:
 | Nothing lands, no errors | fewer than `batch.size` messages and the partition boundary hasn't passed — apply the test overlay (0.4) |
 | No tracker messages | source messages lack the `MessageHeaderDetails` property (0.3) |
 | `/actuator/metrics` returns 404 | build predates the actuator-exposure fix; use `1bc1655` or later |
-| Messages redelivering forever, batch size 1 | a poison message is being isolated; it reaches the BOQ once its backout count exceeds `BOTHRESH` |
+| Messages redelivering forever, batch size 1 | a poison message is being isolated; it reaches the BOQ once its delivery count exceeds the app's `backout.threshold` |
+| Messages redelivering past the threshold but **not** reaching the BOQ | the routing gate is suppressing diversion because failures are infrastructure-classified — look for the suppression notice, then fix the underlying fault (this is correct behaviour, not a stuck queue) |
 | Files land but reconciliation says NOT READY | reconciliation is disabled or identity unapproved for that binding (expected for Claims, not RMS) |
 
 ## Appendix C — Claims (if deployed alongside)

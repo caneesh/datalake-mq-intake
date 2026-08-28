@@ -1,7 +1,7 @@
 # RMS Production Deployment Checklist
 
 **Application:** `datalake-mq-intake` — RMS binding (`rms` module, separate Spring Boot app)
-**Release baseline:** commit `1bc1655` — full suite 804 green (0 skipped), 11 real-MQ drill tests green with the ABC balance check active.
+**Release baseline:** commit `e7423fe` — full suite 814 green (0 skipped), 11 real-MQ drill tests green with the ABC balance check active.
 **Review verdict:** `RMS GO WITH CONDITIONS` — no confirmed code defect blocks promotion; the conditions are the environment checks and pre-cutover tests below.
 **Claims:** ships as a **separate application** with deliberately limited scope this release. Its checklist is a short appendix at the end; nothing Claims does can affect the RMS process.
 
@@ -18,10 +18,10 @@ Queue names are environment-specific and are **not** the repo's placeholder valu
 - [ ] **Tracker queue exists on that SAME queue manager.** The tracker producer is created from the listener's own transacted session, so a tracker queue on a different QM cannot be reached — the binding fails when the session opens.
 - [ ] **Backout queue exists on that SAME queue manager.** Same reason, worse consequence: the poison screen puts to the BOQ on the consuming session. If the BOQ is only defined on a sibling QM, the first poison message fails to route, the batch rolls back, and the message is redelivered forever — a permanent stall of the binding (nothing lost; nothing progresses either). In a multi-QM pair, verify the definition on **each** QM the app may connect to, not just one.
 - [ ] Downstream tracker consumer attached and draining the tracker queue.
-- [ ] **BOQ `MAXDEPTH` sized against the batch, not against expected poison volume.** Any rollback increments the delivery count of *every* message in the batch, so a prolonged HDFS or audit outage eventually diverts a whole in-flight batch of good messages to the BOQ. With `batch.size: 4000`, a BOQ shallower than ~2× that can fill in a single incident; once full, BOQ puts fail and the binding stalls (safely).
+- [ ] **BOQ `MAXDEPTH` sized against the batch, not against expected poison volume.** Any rollback increments the delivery count of *every* message in the batch, so without the routing gate a prolonged outage diverts a whole in-flight batch of good messages to the BOQ. `backout.route-only-on-data-failures: true` is the primary defence and `batch.size: 1000` bounds the residue, but a BOQ shallower than a couple of batches is still the wrong shape: once full, BOQ puts fail and the binding stalls (safely).
 - [ ] `BOQNAME` set on the source queue and matching the app's `backout.queue`.
 - [ ] `BOTHRESH` on the source queue matches the app's `backout.threshold`. **The application never reads the QM attribute** — its own value is what governs, and the mapping is exact (`deliveryCount = backoutCount + 1`, app routes when `deliveryCount > threshold`, so app threshold *N* reproduces `BOTHRESH(N)`). Keep them equal so the queue attribute does not mislead operators. Prefer the *higher* value when in doubt: a low threshold combined with a large batch turns a brief infrastructure outage into thousands of good messages on the BOQ.
-- [ ] Queue manager `MAXUMSGS ≥ 8000`. A TRACKED batch of 4000 is a unit of work of up to 8000 messages (4000 gets + 4000 tracker puts). The application assumes 10000.
+- [ ] Queue manager `MAXUMSGS ≥ 2 × batch.size`. A TRACKED batch is a unit of work of up to 2N messages (N gets + N tracker puts); at `batch.size: 1000` that is 2000. The application assumes 10000 and validates the batch against MAXUMSGS/2.
 - [ ] `MAXMSGL` on channel and queues covers the largest real RMS payload. The application enforces no per-message size cap of its own.
 - [ ] **TLS decision confirmed with the MQ team.** Nothing in the repository configures TLS; if the production channel requires it, that is new work and blocks cutover.
 - [ ] Channel auth / CHLAUTH rules permit the service account; credential delivered via `MQ_CREDENTIAL_REF` (never in a file, never in YAML).
@@ -48,7 +48,7 @@ Queue names are environment-specific and are **not** the repo's placeholder valu
 
 | Setting | Required value | Why |
 |---|---|---|
-| `batch.size` | 4000 | ≤ MAXUMSGS/2 for TRACKED mode |
+| `batch.size` | 1000 | ≤ MAXUMSGS/2 for TRACKED mode, and small relative to BOQ depth |
 | `listener-threads` | 4 | one transacted session per thread |
 | `hdfs.hsync-on-flush` | `true` | durability floor; closes the post-commit power-loss window |
 | `hdfs.record-index-enabled` | `true` (RMS only) | sidecar index feeds identity reconciliation |
@@ -56,7 +56,8 @@ Queue names are environment-specific and are **not** the repo's placeholder valu
 | `audit.fail-batch-on-error` | `true` (default) | audit is a control; no unaudited commits |
 | `tracker.body-mode` | `FULL_COPY` | `CUSTOM` now fails loudly; `HEADER_ONLY` would drop payloads |
 | `tracker.fail-batch-on-error` | `false` (default) | legacy MDB parity — tracker failure never rolls back the message |
-| `backout.threshold` | 5 | must match QM `BOTHRESH` |
+| `backout.threshold` | 5 | keep in step with QM `BOTHRESH` (see §1) |
+| `backout.route-only-on-data-failures` | `true` (RMS only) | an infrastructure outage must not divert healthy messages to the BOQ |
 | `reconciliation.enabled` | `true` | the post-write half of ABC |
 | `mq-connections.*.receive-timeout-ms` | positive (1000) | `receive(0)` waits forever and starves partition flush (**GATE**) |
 
@@ -104,7 +105,7 @@ Health endpoint semantics: `PARTIAL_OUTAGE` and `DEGRADED` return **HTTP 200** (
 ## 9 — Accepted behaviors (do not treat as incidents)
 
 - **Duplicates are design-permitted.** Any crash between HDFS rename and MQ commit yields a duplicate file on redelivery; reconciliation detects and classifies them, quarantine is a move (never a delete).
-- **Good messages on the backout queue after a sustained outage.** Backout routing is delivery-count based, exactly like the legacy MDB — it cannot distinguish "this message is malformed" from "this message was in five batches that rolled back because HDFS was down". The messages are intact on the BOQ and must be replayed once the underlying fault is fixed. Raising `backout.threshold` widens the margin before this happens; it does not eliminate it.
+- **A suppression notice in the log during an outage** (*"routing … is suppressed: the last failure was infrastructure-classified"*). Delivery-count routing cannot tell a malformed message from a healthy one that sat in batches which rolled back because HDFS was down, so with `route-only-on-data-failures: true` the diversion is withheld while failures look like infrastructure. Messages are retried, not diverted; a genuine poison message still reaches the BOQ, because its own failure classifies as message data. If the gate is ever turned off, expect the old behaviour instead: good messages on the BOQ after an outage, intact and requiring manual replay.
 - **Audit-path outage stalls ingestion.** Fail-closed by design: messages wait on the queue until the audit store recovers. This is the correct trade for a completeness-critical feed.
 - **A listener that exhausts recovery stops and stays stopped** (binding runs at reduced threads, reported DEGRADED) until pod restart. Deliberate: no in-process thread resurrection.
 - **Tracker per-message failures are swallowed** (counted + logged): legacy MDB parity. The landed data is kept; one notification is lost.
