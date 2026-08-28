@@ -40,6 +40,25 @@ public class PoisonMessageHandler implements PoisonScreen {
     private final String backoutQueueName;
 
     /**
+     * Whether routing to the backout queue is permitted right now.
+     *
+     * <p>Always-true by default, which is the legacy MDB's behaviour: route
+     * on delivery count alone. A binding may supply a gate that closes while
+     * failures are infrastructure-classified, because delivery count cannot
+     * distinguish a malformed message from a good one that sat in several
+     * batches which rolled back for a reason that had nothing to do with it.
+     * Without the gate, a landing-path outage lasting a few retry cycles
+     * diverts an entire in-flight batch of healthy messages onto the backout
+     * queue — where they are safe, but require manual replay, and can fill a
+     * queue sized for poison rather than for whole batches.
+     */
+    private final java.util.function.BooleanSupplier routingGate;
+
+    /** Guards the suppression notice so it is logged once per handler. */
+    private final java.util.concurrent.atomic.AtomicBoolean warnedRoutingSuppressed =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /**
      * Guards the missing-property warning so it is logged once per handler
      * rather than once per message.
      */
@@ -53,6 +72,19 @@ public class PoisonMessageHandler implements PoisonScreen {
      * @param backoutQueueName  the backout queue name (BOQNAME)
      */
     public PoisonMessageHandler(int backoutThreshold, String backoutQueueName) {
+        this(backoutThreshold, backoutQueueName, () -> true);
+    }
+
+    /**
+     * Creates a handler whose backout routing is gated.
+     *
+     * @param routingGate consulted once per screen; when it returns false the
+     *                    batch passes through untouched and messages over the
+     *                    threshold are retried instead of routed
+     */
+    public PoisonMessageHandler(int backoutThreshold, String backoutQueueName,
+                                java.util.function.BooleanSupplier routingGate) {
+        this.routingGate = java.util.Objects.requireNonNull(routingGate, "routingGate required");
         if (backoutThreshold <= 0) {
             throw new IllegalArgumentException("backoutThreshold must be positive");
         }
@@ -160,6 +192,30 @@ public class PoisonMessageHandler implements PoisonScreen {
             throws BackoutFailureException {
         java.util.List<BackoutResult> routed = new java.util.ArrayList<>();
         java.util.List<Message> clean = new java.util.ArrayList<>();
+
+        // Asked once per batch, not per message: the answer must not change
+        // midway through screening or a batch could be split between routed
+        // and retried on the same criterion.
+        if (!routingGate.getAsBoolean()) {
+            int overThreshold = 0;
+            for (Message message : messages) {
+                if (isPoisonMessage(message)) {
+                    overThreshold++;
+                }
+            }
+            if (overThreshold > 0 && warnedRoutingSuppressed.compareAndSet(false, true)) {
+                log.warn("{} message(s) are over the backout threshold of {} but routing to '{}' "
+                                + "is suppressed: the last failure was infrastructure-classified, "
+                                + "so these are being retried rather than diverted. They will be "
+                                + "routed once a failure indicates the message data itself.",
+                        overThreshold, backoutThreshold, backoutQueueName);
+            } else if (overThreshold > 0) {
+                log.debug("Backout routing suppressed for {} message(s) over threshold",
+                        overThreshold);
+            }
+            return new BatchPoisonCheckResult(new java.util.ArrayList<>(messages),
+                    java.util.List.of());
+        }
 
         for (Message message : messages) {
             if (isPoisonMessage(message)) {

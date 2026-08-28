@@ -57,7 +57,13 @@ intake:
       mode: TRACKED
       listener-threads: 4
       batch:
-        size: 4000              # ≤ MAXUMSGS/2 for TRACKED mode (unit of work is 2N)
+        # Sized against the BACKOUT queue's depth, not just MAXUMSGS. Backout
+        # routing is delivery-count based, so a landing-path outage lasting a
+        # few retry cycles can divert a whole in-flight batch of healthy
+        # messages onto the BOQ. Keeping the batch well under the BOQ's depth
+        # bounds that blast radius; route-only-on-data-failures below is the
+        # primary defence, this is the belt to its braces.
+        size: 1000              # ≤ MAXUMSGS/2 for TRACKED mode (unit of work is 2N)
         bytes: 134217728        # 128 MB
         # 0 = no fixed timer. Flushes on batch size, batch bytes, or the partition
         # boundary. This matches the legacy writer, which rolls a file only when
@@ -89,6 +95,14 @@ intake:
       backout:
         queue: MQ.HPS.MEMBERSHIP.BACKOUT
         threshold: 5
+        # Suppress backout routing while failures are infrastructure-classified.
+        # Delivery count cannot tell a malformed message from a healthy one
+        # that sat in batches which rolled back because the landing path was
+        # unwritable; without this, such an outage diverts good messages to a
+        # queue that must then be replayed by hand. A genuine poison message
+        # still reaches the BOQ — its own failure classifies as message data,
+        # which opens the gate on the next redelivery.
+        route-only-on-data-failures: true
         # Feeds the backout-depth gauge, which DESIGN §14 nominates as the
         # pager condition. Sampled by browsing (read-only, does not consume).
         # 0 disables the monitor and with it the alert.

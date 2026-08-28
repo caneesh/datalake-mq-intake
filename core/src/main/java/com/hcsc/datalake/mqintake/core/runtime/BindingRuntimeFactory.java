@@ -109,7 +109,18 @@ public class BindingRuntimeFactory {
             RecordSerializer serializer = createSerializer(config);
             BatchWriter batchWriter = createBatchWriter(config, serializer);
             TrackerMessageBuilder trackerBuilder = createTrackerBuilder(config);
-            PoisonMessageHandler poisonHandler = createPoisonHandler(config);
+            // One DegradedModeManager per binding, shared by ALL loops: when
+            // any thread hits a MESSAGE_DATA failure, every thread switches to
+            // degraded batch sizes until the binding recovers. Built here
+            // rather than inside createLoops because the poison screen's
+            // routing gate reads its failure classification.
+            DegradedModeManager degradedModeManager = new DegradedModeManager(
+                    config.getId(),
+                    config.getBatch().getSize(),
+                    config.getDegradation().getStrategy(),
+                    config.getDegradation().getSuccessesRequiredToRestore());
+
+            PoisonMessageHandler poisonHandler = createPoisonHandler(config, degradedModeManager);
             BindingMetrics metrics = metricsRegistry.forBinding(bindingId);
             if (serializer instanceof com.hcsc.datalake.mqintake.core.serializer.ReportsIdentityMisses) {
                 // Publishes the serializer's identity-miss count as a
@@ -121,7 +132,8 @@ public class BindingRuntimeFactory {
             }
 
             List<TransactedReceiveLoop> loops = createLoops(
-                    config, jmsConnection, receiveTimeoutMs, batchWriter, trackerBuilder, poisonHandler, metrics);
+                    config, jmsConnection, receiveTimeoutMs, batchWriter, trackerBuilder,
+                    poisonHandler, metrics, degradedModeManager);
 
             ExecutorService executor = createExecutor(config);
             BackoutQueueDepthMonitor depthMonitor =
@@ -220,9 +232,21 @@ public class BindingRuntimeFactory {
         return trackerBuilderFactory.create(config);
     }
 
-    private PoisonMessageHandler createPoisonHandler(BindingConfig config) {
+    private PoisonMessageHandler createPoisonHandler(BindingConfig config,
+                                                     DegradedModeManager degradedModeManager) {
         if (config.getBackout().getQueue() == null || config.getBackout().getQueue().isBlank()) {
             return null;
+        }
+        if (config.getBackout().isRouteOnlyOnDataFailures()) {
+            // Gate open before any failure, so a message already over the
+            // threshold when the process starts is still routable.
+            return new PoisonMessageHandler(
+                    config.getBackout().getThreshold(),
+                    config.getBackout().getQueue(),
+                    () -> {
+                        var last = degradedModeManager.getLastFailureClass();
+                        return last == null || last.permitsBackoutRouting();
+                    });
         }
         return new PoisonMessageHandler(
                 config.getBackout().getThreshold(),
@@ -253,17 +277,9 @@ public class BindingRuntimeFactory {
                                                      BatchWriter batchWriter,
                                                      TrackerMessageBuilder trackerBuilder,
                                                      PoisonMessageHandler poisonHandler,
-                                                     BindingMetrics metrics) {
+                                                     BindingMetrics metrics,
+                                                     DegradedModeManager degradedModeManager) {
         List<TransactedReceiveLoop> loops = new ArrayList<>();
-
-        // CRITICAL: One DegradedModeManager per binding, shared by ALL loops.
-        // When any thread hits a MESSAGE_DATA failure, ALL threads switch to
-        // degraded batch sizes until the binding recovers.
-        DegradedModeManager degradedModeManager = new DegradedModeManager(
-                config.getId(),
-                config.getBatch().getSize(),
-                config.getDegradation().getStrategy(),
-                config.getDegradation().getSuccessesRequiredToRestore());
 
         for (int i = 0; i < config.getListenerThreads(); i++) {
             TransactedReceiveLoop loop = new TransactedReceiveLoop(

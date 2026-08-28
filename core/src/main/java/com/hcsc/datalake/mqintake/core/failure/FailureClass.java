@@ -70,6 +70,25 @@ public enum FailureClass {
     }
 
     /**
+     * Whether delivery-count-based backout routing should be allowed while
+     * this is the most recent failure — see
+     * {@code backout.route-only-on-data-failures}.
+     *
+     * <p>Backout routing cannot tell a malformed message from a good one that
+     * sat in several batches which rolled back for an infrastructure reason.
+     * Under an infrastructure failure the honest answer is "retry", not
+     * "divert": the messages are fine and the fault is elsewhere.
+     *
+     * <p>{@link #UNKNOWN} deliberately permits routing. An unclassified
+     * failure may well be a malformed message, and suppressing routing for it
+     * would leave a genuine poison message redelivering forever with no
+     * escape — the failure mode this gate must not create.
+     */
+    public boolean permitsBackoutRouting() {
+        return this == MESSAGE_DATA || this == UNKNOWN;
+    }
+
+    /**
      * Alert severity levels.
      */
     public enum AlertLevel {

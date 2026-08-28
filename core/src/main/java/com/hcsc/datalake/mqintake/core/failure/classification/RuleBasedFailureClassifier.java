@@ -118,9 +118,42 @@ public class RuleBasedFailureClassifier implements FailureClassifier {
             cause = cause.getCause();
         }
 
+        // Last resort, applied only because nothing in the chain matched any
+        // rule: a failure raised by the write path is a storage failure.
+        //
+        // It has to sit HERE rather than in the rule chain. The walk above is
+        // throwable-major — every rule is tried against one throwable before
+        // moving to its cause — so a rule matching BatchWriteException would
+        // fire at the outer level and shadow a serializer failure wrapped
+        // inside it, turning poison into "infrastructure" and disabling
+        // isolation entirely. As a fallback it can only ever claim failures
+        // MessageDataRule already declined.
+        //
+        // Worth having because a rename that returns false throws
+        // BatchWriteException with no cause at all: nothing for the walk to
+        // find, so it landed in UNKNOWN — and UNKNOWN permits backout
+        // routing, meaning a landing-path permissions fault could divert
+        // healthy messages to the backout queue.
+        if (chainContainsWritePathFailure(throwable)) {
+            log.warn("Unclassified write-path failure treated as storage infrastructure: {} - {}",
+                    throwable.getClass().getName(), throwable.getMessage());
+            return FailureClass.HDFS_INFRASTRUCTURE;
+        }
+
         log.warn("Unclassified exception: {} - {}",
                 throwable.getClass().getName(), throwable.getMessage());
         return FailureClass.UNKNOWN;
+    }
+
+    private boolean chainContainsWritePathFailure(Throwable throwable) {
+        java.util.Set<Throwable> seen =
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for (Throwable t = throwable; t != null && seen.add(t); t = t.getCause()) {
+            if (t.getClass().getName().contains("BatchWriteException")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private FailureClass classifyOne(Throwable throwable) {

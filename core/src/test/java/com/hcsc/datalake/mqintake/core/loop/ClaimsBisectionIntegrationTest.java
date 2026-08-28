@@ -205,6 +205,93 @@ class ClaimsBisectionIntegrationTest {
         assertThat(writer.writtenBodies).isEmpty();
     }
 
+    @Test
+    void anInfrastructureOutageDoesNotDivertHealthyMessagesToTheBackoutQueue() throws Exception {
+        // Delivery-count routing cannot tell a malformed message from a
+        // healthy one that sat in batches which rolled back because HDFS was
+        // unwritable. Without the gate, an outage lasting a few retry cycles
+        // pushes every message past the threshold and diverts the whole batch
+        // onto a queue that then needs manual replay.
+        for (int i = 0; i < 4; i++) {
+            producer.send(producerSession.createTextMessage("CLEAN-" + i));
+        }
+
+        BindingConfig config = claimsConfig(4);
+        config.getBackout().setThreshold(1);              // divert almost immediately
+        config.getBackout().setRouteOnlyOnDataFailures(true);
+
+        DegradedModeManager shared = new DegradedModeManager(
+                "claims", 4, DegradationStrategy.BISECT, 2);
+        PoisonMessageHandler poisonHandler = new PoisonMessageHandler(
+                1, BACKOUT_QUEUE,
+                () -> {
+                    var last = shared.getLastFailureClass();
+                    return last == null || last.permitsBackoutRouting();
+                });
+
+        // Every write fails the way a landing-path outage does.
+        BatchWriter unwritable = (bindingId, messages) -> {
+            throw new BatchWriter.BatchWriteException(
+                    "Failed to write batch to HDFS: NameNode in safemode");
+        };
+
+        TransactedReceiveLoop loop = newLoop(config, unwritable, shared, poisonHandler);
+        executor.submit(loop);
+
+        // Let delivery counts climb well past the threshold.
+        awaitCondition(10_000, () -> loop.getRollbackCount() >= 5);
+        loop.stop();
+        awaitCondition(5_000, () -> countOnQueue(SOURCE_QUEUE) == 4);
+
+        assertThat(shared.getLastFailureClass().permitsBackoutRouting())
+                .as("a write-path failure must not read as 'the message is bad'")
+                .isFalse();
+        assertThat(countOnQueue(BACKOUT_QUEUE))
+                .as("healthy messages must not be diverted by an infrastructure outage")
+                .isZero();
+        assertThat(countOnQueue(SOURCE_QUEUE))
+                .as("they stay on the source queue, waiting for the fault to clear")
+                .isEqualTo(4);
+    }
+
+    @Test
+    void agenuinePoisonMessageStillReachesTheBackoutQueueThroughTheGate() throws Exception {
+        // The gate must not strand real poison: the message's own failure
+        // classifies as message data, which opens the gate for the next
+        // redelivery.
+        producer.send(producerSession.createTextMessage("CLEAN-0"));
+        producer.send(producerSession.createTextMessage("POISON-A"));
+
+        // Threshold 2, not 1: with a batch of 2 that bisects to 1, the clean
+        // message reaches delivery count 2 before it commits alone. A
+        // threshold of 1 would route it too — correct behaviour for a
+        // mis-sized threshold, but not what this test is about.
+        BindingConfig config = claimsConfig(2);
+        config.getBackout().setThreshold(2);
+        config.getBackout().setRouteOnlyOnDataFailures(true);
+
+        DegradedModeManager shared = new DegradedModeManager(
+                "claims", 2, DegradationStrategy.BISECT, 2);
+        PoisonMessageHandler poisonHandler = new PoisonMessageHandler(
+                2, BACKOUT_QUEUE,
+                () -> {
+                    var last = shared.getLastFailureClass();
+                    return last == null || last.permitsBackoutRouting();
+                });
+
+        PoisonSensitiveBatchWriter writer = new PoisonSensitiveBatchWriter();
+        TransactedReceiveLoop loop = newLoop(config, writer, shared, poisonHandler);
+        executor.submit(loop);
+
+        awaitCondition(20_000, () ->
+                writer.writtenBodies.size() == 1 && countOnQueue(BACKOUT_QUEUE) == 1);
+        loop.stop();
+
+        assertThat(drainQueue(BACKOUT_QUEUE)).containsExactly("POISON-A");
+        assertThat(writer.writtenBodies).containsExactly("CLEAN-0");
+        assertThat(countOnQueue(SOURCE_QUEUE)).isZero();
+    }
+
     // --- Suspect-gated restore ---
 
     @Test

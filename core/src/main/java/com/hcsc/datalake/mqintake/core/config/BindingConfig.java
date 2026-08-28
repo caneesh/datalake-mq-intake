@@ -199,6 +199,35 @@ public class BindingConfig {
          */
         private long depthPollIntervalMs = 30_000;
 
+        /**
+         * Whether backout routing is suppressed while failures are
+         * infrastructure-classified.
+         *
+         * <p>Off by default: routing on delivery count alone is the legacy
+         * MDB's behaviour. Turn it on where diverting healthy messages is
+         * worse than isolating a poison message one cycle later.
+         *
+         * <p>Delivery count cannot distinguish a malformed message from a
+         * good one that sat in several batches which rolled back for an
+         * unrelated reason. With a large batch and a backout queue sized for
+         * poison rather than for whole batches, a landing-path outage lasting
+         * a few retry cycles can divert thousands of healthy messages — safe,
+         * but requiring manual replay, and capable of filling the queue.
+         *
+         * <p>With this on, a genuine poison message still reaches the backout
+         * queue: its own failure classifies as message data (or UNKNOWN, which
+         * also permits routing), which opens the gate on the next redelivery.
+         */
+        private boolean routeOnlyOnDataFailures = false;
+
+        public boolean isRouteOnlyOnDataFailures() {
+            return routeOnlyOnDataFailures;
+        }
+
+        public void setRouteOnlyOnDataFailures(boolean routeOnlyOnDataFailures) {
+            this.routeOnlyOnDataFailures = routeOnlyOnDataFailures;
+        }
+
         public String getQueue() {
             return queue;
         }

@@ -51,6 +51,13 @@ public class DegradedModeManager implements DegradationPolicy {
     private final int successesRequiredToRestore;
     private final FailureClassifier classifier;
 
+    /**
+     * How the most recent failure was classified, or null before any failure.
+     * Read by the poison screen's routing gate: routing good messages to the
+     * backout queue is only sane while failures look like message data.
+     */
+    private volatile FailureClass lastFailureClass;
+
     private final AtomicBoolean inDegradedMode = new AtomicBoolean(false);
     private final AtomicInteger currentBatchSize;
     private final AtomicInteger consecutiveSuccesses = new AtomicInteger(0);
@@ -161,6 +168,11 @@ public class DegradedModeManager implements DegradationPolicy {
         }
     }
 
+    /** How the most recent failure was classified, or null before any failure. */
+    public FailureClass getLastFailureClass() {
+        return lastFailureClass;
+    }
+
     /**
      * Returns the number of unresolved suspect messages.
      */
@@ -206,6 +218,7 @@ public class DegradedModeManager implements DegradationPolicy {
     public synchronized FailureResult recordFailure(Throwable throwable,
                                       java.util.Collection<String> batchMessageIds) {
         FailureClass failureClass = classifier.classify(throwable);
+        lastFailureClass = failureClass;
         boolean entered = false;
 
         if (failureClass.triggersDegradedMode()) {
