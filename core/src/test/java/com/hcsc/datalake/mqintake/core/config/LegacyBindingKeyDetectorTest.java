@@ -92,6 +92,19 @@ class LegacyBindingKeyDetectorTest {
     }
 
     @Test
+    void lowercaseLegacyEnvVarFormIsCaughtToo() {
+        // Spring's env binding matches names case-insensitively, so a
+        // lowercase legacy variable fails to bind exactly like its uppercase
+        // form — and some templating tools lowercase keys. The detector must
+        // not be stricter about case than the binder it stands in for.
+        var env = environmentWith(Map.of(
+                "intake_bindings_0_record_index_enabled", "true"));
+
+        assertThatThrownBy(() -> LegacyBindingKeyDetector.failOnLegacyKeys(env))
+                .hasMessageContaining("HDFS_RECORD_INDEX_ENABLED");
+    }
+
+    @Test
     void newGroupedKeysPass() {
         var env = environmentWith(Map.of(
                 "intake.bindings[0].batch.size", "4000",

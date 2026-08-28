@@ -1,15 +1,23 @@
 package com.hcsc.datalake.mqintake.core.audit;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FilterFileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.Syncable;
+import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.util.Progressable;
 import org.junit.jupiter.api.*;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -39,6 +47,74 @@ class HdfsAuditRecordEmitterTest {
     void tearDown() throws Exception {
         if (fileSystem != null && testBasePath != null) {
             fileSystem.delete(new Path(testBasePath), true);
+        }
+    }
+
+    @Test
+    void auditWriteIsHsyncedNotJustFlushed() throws Exception {
+        // An audit record certifies a commit, so it must not be less durable
+        // than the data it accounts for. Backout-only records especially:
+        // they have no data file to reconstruct a lost record from, so an
+        // hflush-only write left a correlated-crash window in which a unit of
+        // work vanished from the balance undetectably.
+        AtomicBoolean hsynced = new AtomicBoolean(false);
+        FileSystem recording = new FilterFileSystem(fileSystem) {
+            @Override
+            public FSDataOutputStream create(Path f, FsPermission permission, boolean overwrite,
+                                             int bufferSize, short replication, long blockSize,
+                                             Progressable progress) throws IOException {
+                FSDataOutputStream real = super.create(f, permission, overwrite, bufferSize,
+                        replication, blockSize, progress);
+                return new FSDataOutputStream(new HsyncRecordingStream(real, hsynced), null);
+            }
+        };
+        HdfsAuditRecordEmitter recordingEmitter =
+                new HdfsAuditRecordEmitter(recording, testBasePath);
+
+        recordingEmitter.emitBackoutOnly("rms", List.of(), 3);
+
+        assertThat(hsynced).as("audit write must reach hsync, not stop at hflush").isTrue();
+    }
+
+    /** Delegates to the real stream, recording whether hsync was requested. */
+    private static final class HsyncRecordingStream extends OutputStream implements Syncable {
+        private final FSDataOutputStream delegate;
+        private final AtomicBoolean hsynced;
+
+        HsyncRecordingStream(FSDataOutputStream delegate, AtomicBoolean hsynced) {
+            this.delegate = delegate;
+            this.hsynced = hsynced;
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            delegate.write(b);
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            delegate.write(b, off, len);
+        }
+
+        @Override
+        public void flush() throws IOException {
+            delegate.flush();
+        }
+
+        @Override
+        public void close() throws IOException {
+            delegate.close();
+        }
+
+        @Override
+        public void hflush() throws IOException {
+            delegate.hflush();
+        }
+
+        @Override
+        public void hsync() throws IOException {
+            hsynced.set(true);
+            delegate.hsync();
         }
     }
 

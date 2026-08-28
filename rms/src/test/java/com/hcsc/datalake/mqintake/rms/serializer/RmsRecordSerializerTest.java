@@ -222,6 +222,34 @@ class RmsRecordSerializerTest {
     }
 
     @Test
+    void aPresentButBlankMessageIdIsAMissNotAnEmptyIdentity() throws Exception {
+        // Regression: <MessageID>   </MessageID> used to come back as "" after
+        // trim, which bypassed the null-gated miss counter and warning — the
+        // operator alarm never fired while the file's index was still refused.
+        TextMessage message = session.createTextMessage(
+                "<Member><MessageID>   </MessageID></Member>");
+
+        RecordSerializer.SerializedRecord record =
+                serializer.serialize(message, metadataAtOffset(129));
+
+        assertThat(record.getIdentity()).isNull();
+        assertThat(record.hasIdentity()).isFalse();
+        assertThat(serializer.getIdentityMissCount()).isEqualTo(1);
+    }
+
+    @Test
+    void aBlankEscapedMessageIdIsAlsoAMiss() throws Exception {
+        TextMessage message = session.createTextMessage(
+                "&lt;Member&gt;&lt;MessageID&gt; &lt;/MessageID&gt;&lt;/Member&gt;");
+
+        RecordSerializer.SerializedRecord record =
+                serializer.serialize(message, metadataAtOffset(129));
+
+        assertThat(record.getIdentity()).isNull();
+        assertThat(serializer.getIdentityMissCount()).isEqualTo(1);
+    }
+
+    @Test
     void aPayloadWithMessageIdDoesNotCountAsAMiss() throws Exception {
         TextMessage message = session.createTextMessage(
                 "<Member><MessageID>guid-1</MessageID></Member>");

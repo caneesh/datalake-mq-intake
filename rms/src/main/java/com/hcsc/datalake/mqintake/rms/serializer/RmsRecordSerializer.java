@@ -147,16 +147,28 @@ public class RmsRecordSerializer implements RecordSerializer {
         // Try raw tag format first: <MessageID>...</MessageID>
         Matcher matcher = MESSAGE_ID_PATTERN.matcher(payload);
         if (matcher.find()) {
-            return matcher.group(1).trim();
+            return blankToNull(matcher.group(1).trim());
         }
 
         // Try escaped tag format: &lt;MessageID&gt;...&lt;/MessageID&gt;
         Matcher escapedMatcher = MESSAGE_ID_ESCAPED_PATTERN.matcher(payload);
         if (escapedMatcher.find()) {
-            return escapedMatcher.group(1).trim();
+            return blankToNull(escapedMatcher.group(1).trim());
         }
 
         return null;
+    }
+
+    /**
+     * A present-but-blank {@code <MessageID>} is a miss, not an identity.
+     * Returning {@code ""} here bypassed the miss counter and warning in
+     * {@code serialize()} (both gated on null), silently disabling the very
+     * alarm this class documents — the sidecar index already treated the
+     * empty string as unidentified, so the file was refused by reconciliation
+     * with zero operator signal at the point of loss.
+     */
+    private static String blankToNull(String value) {
+        return value.isEmpty() ? null : value;
     }
 
 

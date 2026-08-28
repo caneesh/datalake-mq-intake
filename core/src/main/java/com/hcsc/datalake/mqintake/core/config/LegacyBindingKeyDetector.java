@@ -74,8 +74,12 @@ public final class LegacyBindingKeyDetector {
             "FAIL_BATCH_ON_AUDIT_ERROR", "AUDIT_FAIL_BATCH_ON_ERROR",
             "SUCCESSES_REQUIRED_TO_RESTORE", "DEGRADATION_SUCCESSES_REQUIRED_TO_RESTORE");
 
+    // CASE_INSENSITIVE: Spring's environment binding matches env-var names
+    // case-insensitively, so a lowercase legacy variable binds nowhere just
+    // like its uppercase form — and must be flagged just like it.
     private static final Pattern ENV = Pattern.compile(
-            "^INTAKE_BINDINGS_(\\d+)_(" + String.join("|", ENV_REPLACEMENTS.keySet()) + ")$");
+            "^INTAKE_BINDINGS_(\\d+)_(" + String.join("|", ENV_REPLACEMENTS.keySet()) + ")$",
+            Pattern.CASE_INSENSITIVE);
 
     private static Pattern buildDottedPattern() {
         StringBuilder alternatives = new StringBuilder();
@@ -117,9 +121,11 @@ public final class LegacyBindingKeyDetector {
                 }
                 Matcher env = ENV.matcher(name);
                 if (env.matches()) {
+                    // Uppercased before lookup: the pattern matches
+                    // case-insensitively, the replacement map's keys do not.
                     offenders.add(String.format("%s (in %s) -> INTAKE_BINDINGS_%s_%s",
                             name, source.getName(), env.group(1),
-                            ENV_REPLACEMENTS.get(env.group(2))));
+                            ENV_REPLACEMENTS.get(env.group(2).toUpperCase(java.util.Locale.ROOT))));
                 }
             }
         }

@@ -441,14 +441,20 @@ public class TransactedReceiveLoop implements Runnable {
     /**
      * The acknowledgement to MQ. Everything before this call can roll back;
      * nothing after it can.
+     *
+     * <p>Deliberately contains ONLY the commit: the caller flips its
+     * {@code committed} flag on the very next statement, and any code that
+     * ran here between the commit and the return would execute before that
+     * flip — if it could throw, an already-committed batch would take the
+     * rollback path and poison the suspect set.
      */
     private void commitSession() throws JMSException {
         listenerSession.session().commit();
-        commitCount.incrementAndGet();
     }
 
     /** Post-commit bookkeeping for a unit of work that landed nothing. */
     private void recordBackoutOnlyCommit(int batchSize, List<String> batchMessageIds) {
+        commitCount.incrementAndGet();
         // The shared metrics must advance here too: this branch used to update
         // only the loop's internal counter, so dashboards undercounted commits
         // and consumption exactly when poison was churning.
@@ -464,6 +470,7 @@ public class TransactedReceiveLoop implements Runnable {
     private void recordCommittedBatch(int batchSize, List<Message> cleanMessages,
                                       BatchWriter.BatchWriteResult writeResult,
                                       List<String> batchMessageIds) {
+        commitCount.incrementAndGet();
         messageCount.addAndGet(cleanMessages.size());
 
         // Counted at commit, not at receive. A rolled-back batch is

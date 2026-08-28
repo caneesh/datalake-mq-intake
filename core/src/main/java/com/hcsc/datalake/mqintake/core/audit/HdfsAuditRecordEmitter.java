@@ -85,7 +85,13 @@ public class HdfsAuditRecordEmitter implements AuditRecordEmitter {
         try {
             try (FSDataOutputStream out = fileSystem.create(tempPath, true)) {
                 out.write(content);
-                out.hflush();
+                // hsync, not hflush: an audit record certifies a commit, so it
+                // must not be less durable than the data it accounts for. For
+                // batch records a lost audit is reconstructable from the landed
+                // file (retrospective audit); a BACKOUT-ONLY record has no data
+                // file to reconstruct from — losing it to a correlated crash
+                // erases that unit of work from the balance undetectably.
+                out.hsync();
             }
             if (!fileSystem.rename(tempPath, path)) {
                 throw new IOException(
