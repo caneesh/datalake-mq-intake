@@ -99,6 +99,32 @@ public class TransactedReceiveLoop implements Runnable {
                                   BindingMetrics metrics,
                                   String instanceId,
                                   long receiveTimeoutMs) {
+        this(config, connection, batchWriter, trackerMessageBuilder, poisonMessageHandler,
+                degradedModeManager, healthManager, auditRecordEmitter, metrics,
+                instanceId, receiveTimeoutMs, null, null, null);
+    }
+
+    /**
+     * Visible for testing: lets a test inject a fault-injecting session, a
+     * fault policy with known classifications, and a fast backoff — the only
+     * way to drive the recovery state machine (RETRY→RECOVERED, budget
+     * exhaustion, fatal-mid-recovery) without a real queue-manager outage.
+     * Null means the production default.
+     */
+    TransactedReceiveLoop(BindingConfig config,
+                          Connection connection,
+                          BatchWriter batchWriter,
+                          TrackerMessageBuilder trackerMessageBuilder,
+                          PoisonScreen poisonMessageHandler,
+                          DegradationPolicy degradedModeManager,
+                          BindingHealthManager healthManager,
+                          AuditRecordEmitter auditRecordEmitter,
+                          BindingMetrics metrics,
+                          String instanceId,
+                          long receiveTimeoutMs,
+                          ListenerSession listenerSession,
+                          SessionFaultPolicy faultPolicy,
+                          BackoffPolicy backoffPolicy) {
         this.config = config;
         this.connection = connection;
         this.batchWriter = batchWriter;
@@ -115,9 +141,12 @@ public class TransactedReceiveLoop implements Runnable {
         this.metrics = metrics != null ? metrics : BindingMetrics.noop();
         this.instanceId = instanceId;
         this.receiveTimeoutMs = receiveTimeoutMs;
-        this.listenerSession = new ListenerSession(connection, config);
-        this.faultPolicy = SessionFaultPolicy.defaultPolicy();
-        this.backoffPolicy = BackoffPolicy.exponentialWithJitter();
+        this.listenerSession = listenerSession != null
+                ? listenerSession : new ListenerSession(connection, config);
+        this.faultPolicy = faultPolicy != null
+                ? faultPolicy : SessionFaultPolicy.defaultPolicy();
+        this.backoffPolicy = backoffPolicy != null
+                ? backoffPolicy : BackoffPolicy.exponentialWithJitter();
 
         if (config.getMode() == BindingMode.TRACKED && trackerMessageBuilder == null) {
             throw new IllegalArgumentException(

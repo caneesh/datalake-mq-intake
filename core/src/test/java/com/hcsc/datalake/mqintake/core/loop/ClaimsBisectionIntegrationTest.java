@@ -159,6 +159,52 @@ class ClaimsBisectionIntegrationTest {
         assertThat(shared.getSuspectCount()).isZero();
     }
 
+    @Test
+    void anAllPoisonBatchAdvancesTheSharedCommitAndConsumptionMetrics() throws Exception {
+        // The backout-only commit path once updated only the loop's internal
+        // counter, so dashboards undercounted commits and consumption exactly
+        // while poison was churning. The fix's own comment records that — but
+        // until now no test asserted it: the path was driven end-to-end with
+        // null metrics, so the regression could return with zero failures.
+        producer.send(producerSession.createTextMessage("POISON-ONLY"));
+
+        BindingConfig config = claimsConfig(1);
+        // Threshold semantics mirror MQ BOTHRESH: poison once deliveryCount
+        // EXCEEDS the threshold. With 1, the first delivery fails in the
+        // writer and rolls back; the redelivery (count 2) screens to the BOQ.
+        config.getBackout().setThreshold(1);
+        DegradedModeManager shared = new DegradedModeManager(
+                "claims", 1, DegradationStrategy.BISECT, 2);
+        PoisonMessageHandler poisonHandler = new PoisonMessageHandler(1, BACKOUT_QUEUE);
+        com.hcsc.datalake.mqintake.core.metrics.BindingMetrics metrics =
+                new com.hcsc.datalake.mqintake.core.metrics.BindingMetrics("claims");
+        PoisonSensitiveBatchWriter writer = new PoisonSensitiveBatchWriter();
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, writer, null,
+                poisonHandler, shared, null, null, metrics,
+                "test-instance", RECEIVE_TIMEOUT_MS);
+        executor.submit(loop);
+
+        awaitCondition(10_000, () -> metrics.getCommitCount() >= 1);
+        loop.stop();
+
+        // The committed unit of work is backout-only: consumed 1, committed 1,
+        // routed 1, landed 0. The failed first delivery shows as exactly one
+        // rollback — and rolled-back consumption is deliberately NOT counted,
+        // so consumed stays 1 despite two deliveries.
+        assertThat(metrics.getCommitCount()).isEqualTo(1);
+        assertThat(metrics.getMessagesConsumed()).isEqualTo(1);
+        assertThat(metrics.getPoisonMessagesRouted()).isEqualTo(1);
+        assertThat(metrics.getMessagesWritten()).isZero();
+        assertThat(metrics.getRollbackCount()).isEqualTo(1);
+
+        assertThat(drainQueue(BACKOUT_QUEUE)).containsExactly("POISON-ONLY");
+        assertThat(countOnQueue(SOURCE_QUEUE)).isZero();
+        assertThat(shared.getSuspectCount()).isZero();
+        assertThat(writer.writtenBodies).isEmpty();
+    }
+
     // --- Suspect-gated restore ---
 
     @Test
