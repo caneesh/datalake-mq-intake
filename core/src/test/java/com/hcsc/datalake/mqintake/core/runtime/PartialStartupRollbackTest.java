@@ -201,6 +201,81 @@ class PartialStartupRollbackTest {
         assertThat(manager.getRuntime("a")).isNull();
     }
 
+    @Test
+    void aStartLevelFailureRollsBackAndLeavesNoFailedRuntimeInTheMap() {
+        // The other rollback tests fail at factory-create time. This one fails
+        // INSIDE BindingRuntime.start() — the case the review found uncovered:
+        // the runtime used to be registered in the map before start(), so a
+        // start-level failure left a FAILED runtime in the map that stop()'s
+        // RUNNING→STOPPING guard could never reach.
+        List<BindingRuntime> created = new ArrayList<>();
+        IntakeRuntimeManager manager = managerWithStartFailure(properties("a", "b"), "b", created);
+
+        assertThatThrownBy(manager::start).isInstanceOf(RuntimeException.class);
+
+        assertThat(manager.getRuntime("b"))
+                .as("a runtime whose start() failed must not linger in the map")
+                .isNull();
+        assertThat(manager.getRuntimes()).isEmpty();
+        assertThat(created).hasSize(1); // only "a" got a real runtime
+        assertThat(created.get(0).getState())
+                .as("the binding that DID start must be rolled back")
+                .isEqualTo(BindingRuntime.State.STOPPED);
+        assertThat(manager.isRunning()).isFalse();
+    }
+
+    /** Like {@link #manager}, but the chosen binding fails inside start(). */
+    private IntakeRuntimeManager managerWithStartFailure(IntakeProperties props,
+                                                         String failingBindingId,
+                                                         List<BindingRuntime> created) {
+        return new IntakeRuntimeManager(
+                props, fileSystem, conf, mock(MqConnectionManager.class),
+                config -> TRIVIAL_SERIALIZER,
+                new BindingConfigValidator(
+                        path -> com.hcsc.datalake.mqintake.core.config.HdfsPathValidator
+                                .PathValidationResult.success()),
+                new BindingHealthManager(),
+                ProductionMode.disabled(),
+                com.hcsc.datalake.mqintake.core.config.InstanceId.of("rollback-test"), null) {
+            @Override
+            void initializeRuntimeFactory() {
+                setRuntimeFactoryForTest(new BindingRuntimeFactory(
+                        fileSystem, conf, mock(MqConnectionManager.class),
+                        config -> TRIVIAL_SERIALIZER, null,
+                        new com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry(),
+                        new BindingHealthManager(), null, "test") {
+                    @Override
+                    public BindingRuntime create(BindingConfig binding)
+                            throws BindingRuntimeCreationException {
+                        if (binding.getId().equals(failingBindingId)) {
+                            return failsOnStartRuntime(binding);
+                        }
+                        BindingRuntime runtime = blockingRuntime(binding);
+                        created.add(runtime);
+                        return runtime;
+                    }
+                });
+            }
+        };
+    }
+
+    /** A runtime whose start() throws, as if task submission had been refused. */
+    private BindingRuntime failsOnStartRuntime(BindingConfig binding) {
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        executors.add(executor);
+        List<TransactedReceiveLoop> loops = List.of(new TransactedReceiveLoop(
+                binding, mock(javax.jms.Connection.class), null, null, null, null,
+                null, null, null, "test", 100));
+        return new BindingRuntime(binding, loops, executor, false, null) {
+            @Override
+            public void start() throws BindingStartupException {
+                throw new BindingStartupException(
+                        "simulated start failure for '" + binding.getId() + "'",
+                        new java.util.concurrent.RejectedExecutionException("no threads left"));
+            }
+        };
+    }
+
     /** Every binding starts fine; the step after them throws. */
     private class FailsAfterBindingsStart extends IntakeRuntimeManager {
         private final List<BindingRuntime> created;

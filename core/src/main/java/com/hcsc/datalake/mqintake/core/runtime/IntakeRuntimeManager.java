@@ -314,8 +314,15 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         for (BindingConfig binding : properties.getBindings()) {
             try {
                 BindingRuntime runtime = runtimeFactory.create(binding);
-                runtimes.put(binding.getId(), runtime);
                 runtime.start();
+                // In the map only once RUNNING. Registered before start(), a
+                // runtime whose start() failed stayed in the map in FAILED
+                // state — unreachable by stop()'s RUNNING→STOPPING guard and
+                // invisible to the rollback list, which only holds successful
+                // starts. (The runtime also cleans itself up on a failed
+                // start; this ordering keeps the map an inventory of running
+                // bindings rather than attempts.)
+                runtimes.put(binding.getId(), runtime);
                 startedThisAttempt.add(runtime);
                 healthManager.recordHealthy(binding.getId());
 

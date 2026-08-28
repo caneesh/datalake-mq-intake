@@ -121,9 +121,39 @@ public class BindingRuntime {
         } catch (Exception e) {
             state.set(State.FAILED);
             failureCause = e;
+            abortAfterFailedStart();
             throw new BindingStartupException(
                     "Failed to start binding '" + config.getId() + "': " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Cleanup for a {@code start()} that failed after some work had begun.
+     *
+     * <p>The listener tasks are submitted before the depth monitor and the
+     * supervisor start, so a failure in either leaves live, consuming,
+     * non-daemon threads behind — and {@link #stop(long)}'s RUNNING→STOPPING
+     * guard (correctly) refuses a FAILED runtime, which would make those
+     * threads permanent: consumers committing inside an application whose
+     * startup failed, with no owner and no way to reach them. A failed start
+     * must therefore leave nothing running without depending on the caller.
+     * Signalling the loops before interrupting drains them through their
+     * normal path; anything uncommitted rolls back, so nothing is lost.
+     */
+    private void abortAfterFailedStart() {
+        if (supervisor != null) {
+            supervisor.close();
+        }
+        if (backoutDepthMonitor != null) {
+            backoutDepthMonitor.stop(); // no-op if it never started
+        }
+        for (TransactedReceiveLoop loop : loops) {
+            loop.stop();
+        }
+        for (Future<?> f : loopFutures) {
+            f.cancel(true);
+        }
+        executor.shutdownNow();
     }
 
     /**
