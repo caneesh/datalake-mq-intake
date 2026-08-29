@@ -87,7 +87,9 @@ cmd_preflight() {
     require_java
     local group="${1:-}"
     local args=(--intake.preflight.enabled=true)
-    [[ -n "$group" ]] && args+=(--preflight="$group")
+    # Must be intake.preflight.only: a bare --preflight= binds to nothing, so
+    # the filter would be ignored and every group would run regardless.
+    [[ -n "$group" ]] && args+=(--intake.preflight.only="$group")
     echo "Preflight — probing dependencies. Nothing is consumed and nothing is started."
     # Exit status propagates: 0 clean, 1 if any check failed.
     java $JAVA_OPTS -jar "$JAR" "${CONFIG_ARG[@]}" "${args[@]}" --logging.level.root=WARN

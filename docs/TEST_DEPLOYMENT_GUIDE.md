@@ -129,6 +129,8 @@ Two things to get right:
 
 **Arm production mode** (`MQ_INTAKE_PRODUCTION=true`) in any environment standing in for production. It is what makes the startup gates refuse dev-default connection values, placeholder serializers and an incomplete tracker contract. A test that runs without it is testing a more permissive service than the one you will promote.
 
+**Point `HDFS_CONFIG_RESOURCES` at the cluster configuration** — normally `/etc/hadoop/conf`, or the `core-site.xml` and `hdfs-site.xml` files themselves. Hadoop looks for those files on the *classpath*, and a jar started with `java -jar` has only itself on the classpath, so without this the service never finds the cluster: `fs.defaultFS` falls back to `file:///` and every batch lands on **this server's local disk**, successfully and silently. Production mode now refuses to start in that state, and preflight fails `filesystem.connect` rather than certifying the wrong destination — but the value still has to be right.
+
 ### When you need more than environment variables
 
 `env.sh` covers the environment-specific values. To change **behaviour** — batch size, thresholds, listener threads — drop a YAML file in `config/`, which the control script passes to Spring automatically:
@@ -152,6 +154,25 @@ Preflight connects to the real dependencies, checks one fact at a time, prints a
 - [ ] `production-mode` reports **ARMED**
 
 Fix everything it reports before starting. A failure found here is a failure found with no messages in flight.
+
+### Connectivity only, while the legacy consumer is live
+
+`preflight mq` is the smallest useful run and the one to reach for first, before HDFS paths or Kerberos are settled:
+
+```bash
+./current/intake.sh preflight mq
+```
+
+It opens a transacted session, opens the source queue for input, browses the backout queue for its depth, and opens the tracker and backout queues for output. **No message moves.** The consumer is opened and closed without a single `receive()`, the producers without a `send()`, and the session is never committed — so this is safe to run against a queue the legacy application is actively draining. What it proves is exactly the set of things that are painful to discover later: host and port reachable, channel accepted, credentials accepted, and every queue name resolvable *on the queue manager you actually connected to*.
+
+Two failures here are worth recognising on sight:
+
+| Symptom | What it means |
+|---|---|
+| `MQRC 2085` unknown object name | The queue exists, but on a **different queue manager**. The tracker and backout producers are created from the listener's own transacted session, so all three queues must live on the one it connects to. |
+| `MQRC 2042` object in use | The source queue is defined `NOSHARE` and the legacy consumer holds it exclusively. Nothing was disturbed; the queue must be `SHARE` before the two can ever run side by side. |
+
+Add `hdfs` once the cluster paths are known. That group writes and deletes a probe file inside `_tmp/{instanceId}` — never in a data partition, so it cannot be mistaken for landed data or picked up by reconciliation.
 
 ## 6 — Start, watch, stop
 
