@@ -228,10 +228,43 @@ public class IntakeProperties {
         private String auditBasePath = "/data/audit";
         private long tempFileMaxAgeMs = 3600000; // 1 hour
 
+        /**
+         * Cluster configuration to load: {@code core-site.xml} /
+         * {@code hdfs-site.xml} files, or directories containing them
+         * (typically {@code /etc/hadoop/conf}).
+         *
+         * <p>Required to reach a real cluster. Hadoop finds these on the
+         * classpath, and a Spring Boot fat jar started with {@code java -jar}
+         * has only itself on the classpath — so without this the service falls
+         * back to Hadoop's default {@code fs.defaultFS=file:///} and writes to
+         * the <em>local disk of the server</em>, silently and successfully.
+         * That is the worst kind of misconfiguration: everything reports
+         * healthy while the data is nowhere anyone will look for it.
+         */
+        private java.util.List<String> configResources = new java.util.ArrayList<>();
+
+        /**
+         * Permits a local (non-distributed) filesystem in production mode.
+         *
+         * <p>Off by default, which makes production mode refuse to start on
+         * {@code file:///} — see {@link #configResources}. Tests that
+         * deliberately run the production profile against a temporary
+         * directory set this true.
+         */
+        private boolean allowLocalFilesystem = false;
+
         public String getAuditBasePath() { return auditBasePath; }
         public void setAuditBasePath(String auditBasePath) { this.auditBasePath = auditBasePath; }
         public long getTempFileMaxAgeMs() { return tempFileMaxAgeMs; }
         public void setTempFileMaxAgeMs(long tempFileMaxAgeMs) { this.tempFileMaxAgeMs = tempFileMaxAgeMs; }
+        public java.util.List<String> getConfigResources() { return configResources; }
+        public void setConfigResources(java.util.List<String> configResources) {
+            this.configResources = configResources;
+        }
+        public boolean isAllowLocalFilesystem() { return allowLocalFilesystem; }
+        public void setAllowLocalFilesystem(boolean allowLocalFilesystem) {
+            this.allowLocalFilesystem = allowLocalFilesystem;
+        }
     }
 
     /**

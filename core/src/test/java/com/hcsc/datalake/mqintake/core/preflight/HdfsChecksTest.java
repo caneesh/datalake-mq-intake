@@ -61,6 +61,9 @@ class HdfsChecksTest {
         properties = new IntakeProperties();
         properties.setBindings(List.of(binding));
         properties.getHdfs().setAuditBasePath(auditPath);
+        // These probes run against a local filesystem on purpose; the service
+        // itself demands the same explicit acknowledgement in production mode.
+        properties.getHdfs().setAllowLocalFilesystem(true);
     }
 
     @AfterEach
@@ -188,6 +191,20 @@ class HdfsChecksTest {
         assertThat(outcome.getStatus()).isEqualTo(CheckOutcome.Status.PASS);
         assertThat(outcome.getDetail()).contains("created and writable");
         assertThat(fileSystem.exists(new Path(auditPath + "/rms"))).isTrue();
+    }
+
+    @Test
+    void anUnacknowledgedLocalFilesystemIsAFailure() {
+        // A fat jar with no cluster config resolves to file:/// and lands data
+        // on the server's own disk, successfully and silently. A connectivity
+        // check that called that a pass would certify the wrong destination.
+        properties.getHdfs().setAllowLocalFilesystem(false);
+
+        CheckOutcome outcome = outcomeOf(run(fileSystem), "filesystem.connect");
+
+        assertThat(outcome.isFailure()).isTrue();
+        assertThat(outcome.getDetail()).contains("LOCAL filesystem");
+        assertThat(outcome.getRemedy()).contains("intake.hdfs.config-resources");
     }
 
     @Test

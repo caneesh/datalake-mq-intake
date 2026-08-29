@@ -36,7 +36,8 @@ public final class HdfsChecks {
                                                       FileSystem fileSystem,
                                                       String instanceId) {
         List<PreflightCheck> checks = new ArrayList<>();
-        checks.add(filesystemReachable(fileSystem));
+        checks.add(filesystemReachable(fileSystem,
+                properties.getHdfs().isAllowLocalFilesystem()));
         for (BindingConfig binding : properties.getBindings()) {
             String basePath = binding.getHdfs().getBasePath();
             checks.add(pathWritable("hdfs", binding.getId() + ".landing-path", basePath,
@@ -48,7 +49,8 @@ public final class HdfsChecks {
         return checks;
     }
 
-    private static PreflightCheck filesystemReachable(FileSystem fileSystem) {
+    private static PreflightCheck filesystemReachable(FileSystem fileSystem,
+                                                      boolean allowLocalFilesystem) {
         return new MqChecks.AbstractCheck("hdfs", "filesystem.connect",
                 "the configured filesystem answers, under the identity the service will use") {
             @Override
@@ -58,6 +60,23 @@ public final class HdfsChecks {
                     String user = org.apache.hadoop.security.UserGroupInformation
                             .getCurrentUser().getUserName();
                     fileSystem.getStatus();   // a real round trip, not just a handle
+                    if ("file".equals(fileSystem.getUri().getScheme()) && !allowLocalFilesystem) {
+                        // Reachable, yes — but this is the server's own disk.
+                        // Saying "pass" without saying that would let a
+                        // connectivity test certify the wrong destination.
+                        return CheckOutcome.fail(
+                                "resolved to the LOCAL filesystem (" + uri + "), not HDFS",
+                                "A fat jar started with java -jar has no cluster configuration on "
+                                        + "its classpath, so Hadoop falls back to file:///. Set "
+                                        + "intake.hdfs.config-resources (HDFS_CONFIG_RESOURCES) to "
+                                        + "/etc/hadoop/conf or the core-site.xml/hdfs-site.xml "
+                                        + "files. If local disk is genuinely intended, set "
+                                        + "intake.hdfs.allow-local-filesystem=true.");
+                    }
+                    if ("file".equals(fileSystem.getUri().getScheme())) {
+                        return CheckOutcome.pass(uri + " reachable as '" + user
+                                + "' — LOCAL filesystem, explicitly allowed");
+                    }
                     return CheckOutcome.pass(uri + " reachable as '" + user + "'");
                 } catch (Exception e) {
                     return CheckOutcome.fail("filesystem unreachable", e,

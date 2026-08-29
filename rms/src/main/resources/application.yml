@@ -34,6 +34,11 @@ intake:
     relogin-interval-ms: 3600000  # 1 hour
 
   hdfs:
+    # Cluster configuration. REQUIRED to reach a real cluster: a fat jar has
+    # only itself on the classpath, so without this Hadoop resolves
+    # fs.defaultFS to file:/// and lands data on the server's own disk.
+    # Point at /etc/hadoop/conf, or list the XML files directly.
+    config-resources: ${HDFS_CONFIG_RESOURCES:}
     audit-base-path: ${HDFS_AUDIT_BASE_PATH:/data/audit}
     temp-file-max-age-ms: 3600000  # 1 hour
 

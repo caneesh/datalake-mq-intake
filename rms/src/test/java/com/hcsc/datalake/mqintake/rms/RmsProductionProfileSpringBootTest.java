@@ -77,6 +77,11 @@ class RmsProductionProfileSpringBootTest {
         registry.add("intake.bindings[0].backout.threshold", () -> 5);
         registry.add("intake.bindings[0].degradation.strategy", () -> "BATCH_OF_ONE");
         registry.add("intake.hdfs.audit-base-path", () -> auditDir.toString());
+        // This test lands in a temp directory, which is the local filesystem —
+        // exactly what production mode refuses by default, since on a real
+        // server it means the cluster config was never found. The acknowledgement
+        // belongs here rather than in the guard; see LocalFilesystemGateTest.
+        registry.add("intake.hdfs.allow-local-filesystem", () -> true);
         registry.add("intake.instance-id", () -> "rms-prod-sbt");
     }
 
