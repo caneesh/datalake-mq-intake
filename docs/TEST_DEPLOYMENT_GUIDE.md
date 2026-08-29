@@ -129,6 +129,8 @@ Two things to get right:
 
 **Arm production mode** (`MQ_INTAKE_PRODUCTION=true`) in any environment standing in for production. It is what makes the startup gates refuse dev-default connection values, placeholder serializers and an incomplete tracker contract. A test that runs without it is testing a more permissive service than the one you will promote.
 
+**Set `HDFS_EXPECTED_NAMESERVICE`** to the target cluster's nameservice whenever the host carries more than one Hadoop client configuration. `fs.defaultFS` is checked against it before anything connects. It is the only check that can tell the two clusters apart — connection, permissions, durability and audit all pass against either one. See [Deploying alongside another Hadoop client](WEBSPHERE_HOST_DEPLOYMENT.md).
+
 **Point `HDFS_CONFIG_RESOURCES` at the cluster configuration** — normally `/etc/hadoop/conf`, or the `core-site.xml` and `hdfs-site.xml` files themselves. Hadoop looks for those files on the *classpath*, and a jar started with `java -jar` has only itself on the classpath, so without this the service never finds the cluster: `fs.defaultFS` falls back to `file:///` and every batch lands on **this server's local disk**, successfully and silently. Production mode now refuses to start in that state, and preflight fails `filesystem.connect` rather than certifying the wrong destination — but the value still has to be right.
 
 ### When you need more than environment variables
