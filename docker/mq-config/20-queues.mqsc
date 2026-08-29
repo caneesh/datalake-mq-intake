@@ -1,3 +1,10 @@
+* NOTE: this script runs when the queue manager's data volume is CREATED, not
+* on every container start. After editing it, recreate the volume or the
+* changes will not be present:
+*     docker compose down -v && docker compose up -d
+* (Symptom of skipping that: DISPLAY QLOCAL(...) BOTHRESH shows 0 rather than
+* the values below.)
+*
 * Define queues for RMS binding.
 * BOTHRESH/BOQNAME mirror the application thresholds (rms backout-threshold: 5,
 * claims: 14 = ceil(log2(8000))+1). The app reads its own configured threshold,
@@ -16,10 +23,18 @@ DEFINE QLOCAL(MQ.DMIH.CLAIMS.BACKOUT) REPLACE
 SET CHLAUTH('DEV.APP.SVRCONN') TYPE(BLOCKUSER) USERLIST('nobody') ACTION(REPLACE)
 SET CHLAUTH('DEV.APP.SVRCONN') TYPE(ADDRESSMAP) ADDRESS('*') USERSRC(CHANNEL) ACTION(REPLACE)
 
-* Grant permissions to app user
+* Grant permissions to app user.
+*
+* The profiles use ** rather than *, and the difference is not cosmetic: in an
+* MQ authority profile a single * matches ONE qualifier, so 'MQ.DMIH.*' matches
+* MQ.DMIH.CLAIMS but not MQ.DMIH.CLAIMS.IN, and every real queue name here has
+* four qualifiers. With * these grants matched nothing at all. Preflight caught
+* it: the claims queues failed to open with MQRC 2035 while the RMS queues
+* worked only because they had picked up explicit per-queue records from
+* elsewhere — an accident that hid a broken grant for both feeds.
 SET AUTHREC PRINCIPAL('app') OBJTYPE(QMGR) AUTHADD(CONNECT,INQ)
-SET AUTHREC PROFILE('MQ.HPS.*') PRINCIPAL('app') OBJTYPE(QUEUE) AUTHADD(BROWSE,GET,INQ,PUT)
-SET AUTHREC PROFILE('MQ.DMIH.*') PRINCIPAL('app') OBJTYPE(QUEUE) AUTHADD(BROWSE,GET,INQ,PUT)
+SET AUTHREC PROFILE('MQ.HPS.**') PRINCIPAL('app') OBJTYPE(QUEUE) AUTHADD(BROWSE,GET,INQ,PUT)
+SET AUTHREC PROFILE('MQ.DMIH.**') PRINCIPAL('app') OBJTYPE(QUEUE) AUTHADD(BROWSE,GET,INQ,PUT)
 
 * Refresh security
 REFRESH SECURITY
