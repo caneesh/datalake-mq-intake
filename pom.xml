@@ -20,8 +20,15 @@
 
     <properties>
         <java.version>11</java.version>
-        <maven.compiler.source>${java.version}</maven.compiler.source>
-        <maven.compiler.target>${java.version}</maven.compiler.target>
+        <!--
+          release, not source/target. source/target produce Java 11 bytecode
+          but still compile against the BUILD JDK's class library, so a build
+          on a newer JDK yields a jar that loads on the Java 11 host and then
+          throws NoSuchMethodError the first time it reaches an API that did
+          not exist in 11. release pins the API surface as well as the
+          bytecode, which is what makes a newer build JDK safe.
+        -->
+        <maven.compiler.release>${java.version}</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
         <!-- Spring Boot for config/lifecycle/health only -->
@@ -131,8 +138,7 @@
                     <artifactId>maven-compiler-plugin</artifactId>
                     <version>3.12.1</version>
                     <configuration>
-                        <source>${java.version}</source>
-                        <target>${java.version}</target>
+                        <release>${java.version}</release>
                     </configuration>
                 </plugin>
                 <plugin>

@@ -90,6 +90,33 @@ JAR=$(ls "${MODULE}"/target/datalake-mq-intake-"${MODULE}"-*.jar 2>/dev/null | h
 [[ -n "$JAR" ]] || { echo "no jar produced for ${MODULE}" >&2; exit 1; }
 JAR_SHA=$(sha256_of "$JAR")
 
+BUILD_JDK=$(java -version 2>&1 | head -1 | sed 's/.*version "\([^"]*\)".*/\1/')
+
+# The servers run Java 11. Verify what we are about to ship actually targets
+# it, rather than trusting the build machine's JDK to have been the right one:
+# a class-file major above 55 loads nowhere on the host and the failure
+# (UnsupportedClassVersionError at startup) is far from its cause.
+if command -v unzip > /dev/null 2>&1; then
+    CLASS_CHECK_DIR=$(mktemp -d)
+    if unzip -o -q "$JAR" "BOOT-INF/classes/com/hcsc/*" -d "$CLASS_CHECK_DIR" 2>/dev/null; then
+        MAX_MAJOR=$(find "$CLASS_CHECK_DIR" -name '*.class' -print0 \
+            | xargs -0 -I{} sh -c 'od -An -t u1 -j 6 -N 2 "$1" | awk "{print \$1*256+\$2}"' _ {} \
+            | sort -n | tail -1)
+        rm -rf "$CLASS_CHECK_DIR"
+        if [[ -n "$MAX_MAJOR" ]]; then
+            if [[ "$MAX_MAJOR" -gt 55 ]]; then
+                echo "REFUSING TO BUNDLE: class-file major ${MAX_MAJOR} needs Java $((MAX_MAJOR - 44))," >&2
+                echo "but the target hosts run Java 11 (major 55). Build with a Java 11 JDK, or" >&2
+                echo "check that maven.compiler.release is still 11 in pom.xml." >&2
+                exit 1
+            fi
+            echo "    bytecode major ${MAX_MAJOR} (Java $((MAX_MAJOR - 44))) — runs on the Java 11 hosts"
+        fi
+    else
+        rm -rf "$CLASS_CHECK_DIR"
+    fi
+fi
+
 NAME="mq-intake-${MODULE}-${STAMP}"
 STAGE="$(mktemp -d)/${NAME}"
 mkdir -p "$STAGE"
@@ -109,6 +136,7 @@ jar=$(basename "$JAR")
 jar_sha256=${JAR_SHA}
 built_by=$(whoami)@$(hostname)
 built_at=${STAMP}
+built_with_jdk=${BUILD_JDK}
 tests=$($FAST && echo skipped || echo run)
 EOF
 

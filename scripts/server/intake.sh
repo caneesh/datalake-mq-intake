@@ -41,6 +41,25 @@ else
 fi
 
 JAVA_OPTS="${JAVA_OPTS:--Xmx4g}"
+
+# The jar targets Java 11. An older JVM fails with UnsupportedClassVersionError
+# — a message that names a class-file version rather than the actual problem —
+# so say it plainly here instead. A newer JVM is fine and is not blocked.
+require_java() {
+    command -v java > /dev/null 2>&1 || {
+        echo "java is not on PATH. This service needs a Java 11 runtime." >&2
+        exit 1
+    }
+    local raw major
+    raw=$(java -version 2>&1 | head -1 | sed 's/.*version "\([^"]*\)".*/\1/')
+    major=${raw%%.*}
+    [[ "$major" == "1" ]] && major=$(echo "$raw" | cut -d. -f2)   # 1.8.0_x style
+    if [[ "$major" =~ ^[0-9]+$ ]] && (( major < 11 )); then
+        echo "Java ${raw} found; this service needs Java 11 or newer." >&2
+        echo "Point PATH (or JAVA_HOME/bin) at the Java 11 runtime and retry." >&2
+        exit 1
+    fi
+}
 HEALTH_URL="${HEALTH_URL:-http://localhost:8080/actuator/health}"
 METRICS_URL="${METRICS_URL:-http://localhost:8080/actuator/metrics}"
 
@@ -65,6 +84,7 @@ cmd_is_running() {
 }
 
 cmd_preflight() {
+    require_java
     local group="${1:-}"
     local args=(--intake.preflight.enabled=true)
     [[ -n "$group" ]] && args+=(--preflight="$group")
@@ -74,6 +94,7 @@ cmd_preflight() {
 }
 
 cmd_start() {
+    require_java
     if pid=$(running_pid); then
         echo "Already running (pid ${pid}). Use 'stop' first." >&2
         exit 1
@@ -189,6 +210,7 @@ cmd_config() {
     echo "env file  : ${ENV_FILE}"
     echo "config dir: ${CONFIG_DIR} $([[ ${#CONFIG_ARG[@]} -gt 0 ]] && echo '(in use)' || echo '(empty — using built-in defaults)')"
     echo "java opts : ${JAVA_OPTS}"
+    echo "java      : $(command -v java > /dev/null 2>&1 && java -version 2>&1 | head -1 || echo '<not on PATH>')"
     echo
     for var in MQ_HOST MQ_PORT MQ_QUEUE_MANAGER MQ_CHANNEL MQ_SOURCE_QUEUE \
                MQ_TRACKER_QUEUE MQ_BACKOUT_QUEUE HDFS_BASE_PATH HDFS_AUDIT_BASE_PATH \

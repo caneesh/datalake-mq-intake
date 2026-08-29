@@ -26,13 +26,15 @@ Companions: `docs/TEST_ENVIRONMENT_PLAN.md` (what to test once it runs) and `doc
 
 ## 1 — What the server needs
 
-- **Java 11** on `PATH` (`java -version`)
+- **Java 11** on `PATH` (`java -version`). Newer is fine; older is not, and `intake.sh` refuses to start on it with a plain message rather than letting the JVM report `UnsupportedClassVersionError`.
 - Network reach to the queue manager (default port 1414) and to HDFS
 - The **service account**'s Kerberos keytab, if the cluster is kerberised
 - A writable home or install directory
 - `curl` (optional — `status` uses it for health and metrics)
 
-Nothing else on the **server**: no Maven, no git, no repository clone, no MQ client install — the jar is self-contained. The **build machine** needs Java 11 and Maven; git is optional (see §2).
+Nothing else on the **server**: no Maven, no git, no repository clone, no MQ client install — the jar is self-contained. The **build machine** needs a JDK and Maven; git is optional (see §2).
+
+**On build-JDK versions.** The project compiles with `maven.compiler.release=11`, which pins the API surface as well as the bytecode — so a newer build JDK cannot accidentally link against methods your Java 11 hosts do not have. (`source`/`target` alone would not: they produce Java 11 bytecode that still compiles against the build JDK's library, and the failure surfaces as a `NoSuchMethodError` in production, far from its cause.) `bundle.sh` additionally refuses to package anything whose class-file version exceeds Java 11, and records the build JDK in the release metadata.
 
 ## 2 — If the build machine has no git
 
@@ -244,3 +246,5 @@ ln -sfn releases/<previous-stamp> current
 | Release shows `source=no-vcs` | expected on a build machine without git; add a `VERSION` file (§2) if you want a human-readable stamp |
 | Offline build fails on a missing artifact | `~/.m2` is incomplete for `-o`; re-prime it from a connected machine |
 | `CHECKSUM MISMATCH` from `install.sh` | the bundle lost bytes in transit; nothing was installed — copy it again |
+| `UnsupportedClassVersionError` | a jar built for a newer Java than the host runs; `bundle.sh` should have refused it — check `maven.compiler.release` |
+| `this service needs Java 11 or newer` | the host's `PATH` java is older; point `PATH` or `JAVA_HOME/bin` at the Java 11 runtime |
