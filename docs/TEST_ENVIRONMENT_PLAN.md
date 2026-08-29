@@ -1,7 +1,7 @@
 # RMS Test-Environment Validation — Step by Step
 
 **Application:** `datalake-mq-intake` — RMS binding
-**Baseline:** commit `e7423fe` or later · full suite 814 green · 11 real-MQ drill tests green
+**Baseline:** commit `e61bbf8` or later · 835 unit/integration green · 11 real-MQ drill tests green
 **Purpose:** prove, in a test environment against real IBM MQ and real HDFS, everything unit tests and the Docker drill cannot: real connectivity, real Kerberos, real partition behaviour, real recovery, real throughput.
 **Audience:** whoever runs the test cycle. Follow the parts in order — later parts assume earlier ones passed.
 
@@ -23,7 +23,7 @@ Companion document: `docs/DEPLOYMENT_CHECKLIST.md` (production cutover). This do
 
 ### 0.2 Two facts that will otherwise cost you an afternoon
 
-**A single test message will not land immediately.** Production config is `batch.size: 4000` and `batch.interval-ms: 0`, meaning a batch flushes on size, on bytes, or at the **quarter-hour partition boundary** — so one message sent at 10:07 lands at 10:15. For functional testing, use the test overlay in 0.4; switch back to production values for the load test (Part 6).
+**A single test message will not land immediately.** Production config is `batch.size: 1000` and `batch.interval-ms: 0`, meaning a batch flushes on size, on bytes, or at the **quarter-hour partition boundary** — so one message sent at 10:07 lands at 10:15. For functional testing, use the test overlay in 0.4; switch back to production values for the load test (Part 6).
 
 **A message without the `MessageHeaderDetails` property produces no tracker message.** That is the deliberate §20.3 null guard, not a bug. Every functional test message must set it or the tracker checks in Test 5 will "fail" for the wrong reason.
 
@@ -95,7 +95,7 @@ export INTAKE_BINDINGS_0_BACKOUT_QUEUE=<real backout queue>
 - [ ] If the feed arrives on **more than one queue manager**, decide now: one binding per QM, each with its **own `hdfs.base-path`**. Two bindings sharing a base path make reconciliation report each other's files as orphans on every pass.
 - [ ] `BOTHRESH` matches the app's `backout.threshold` (the app never reads the QM attribute; its own value governs. `deliveryCount = backoutCount + 1`, and the app routes when `deliveryCount > threshold`, so app threshold *N* reproduces `BOTHRESH(N)` exactly)
 - [ ] BOQ `MAXDEPTH` comfortably exceeds `batch.size` — an outage can divert a whole in-flight batch of good messages there (see Test 7 and the accepted-behaviours appendix)
-- [ ] `MAXUMSGS ≥ 8000` (a TRACKED batch of 4000 is a unit of work of up to 8000)
+- [ ] `MAXUMSGS ≥ 2 × batch.size` (a TRACKED batch is a unit of work of up to 2N — at `batch.size: 1000`, 2000)
 - [ ] `MAXMSGL` covers your largest test payload
 - [ ] Channel and credentials work for the app's service account
 
@@ -130,19 +130,19 @@ export MQ_INTAKE_PRODUCTION=true       # or run with --spring.profiles.active=pr
 
 ---
 
-## Part 2 — Build and start
+## Part 2 — Build
 
 ```bash
-mvn clean install                                   # expect: BUILD SUCCESS, 0 failures
-java -jar rms/target/datalake-mq-intake-rms-*.jar    # add --spring.profiles.active=prod if used
+mvn clean install    # expect: BUILD SUCCESS, 0 failures
 ```
 
 - [ ] Build succeeded
-- [ ] Process started
+
+Do **not** start the service yet. Preflight comes next, and the point of it is to prove the environment before anything consumes a message — a failure found by a listener is a failure found with real messages in flight.
 
 ---
 
-## Part 2.5 — Preflight: probe each component before running anything
+## Part 2.5 — Preflight: probe each component before starting anything
 
 Preflight connects to the real dependencies, checks one fact at a time, prints a report and exits. **It starts no listener, consumes no message, sends nothing to a queue another system reads, and writes only inside `_tmp/{instanceId}` (probe files are removed).** Safe against an environment carrying live data.
 
@@ -167,6 +167,35 @@ Run it first, and after **any** environment change. It answers most of Part 1 in
 
 **Pass:** `PREFLIGHT PASSED`, exit status 0.
 
+**Reading the skips.** `[skip]` is information, not a gap. A LAND_ONLY binding skips the tracker builder and tracker queue because it has neither; Claims additionally skips its serializer check with *"is a placeholder … allowed outside production mode"* — which under `MQ_INTAKE_PRODUCTION=true` becomes a **FAIL**, the production gate correctly refusing to promote Claims this release. A skip you cannot explain is worth a question; a skip that matches the binding's configuration is the tool being precise.
+
+**What it cannot settle**, so you still do these by hand: queue-manager attributes (`BOTHRESH`, `MAXDEPTH`, `MAXUMSGS`, `MAXMSGL`), the TLS question, whether the legacy credential was rotated, and whether a downstream consumer is draining the tracker queue.
+
+**Use it as the first triage step, not only at the start.** When any later test behaves oddly, re-run preflight before debugging the application: it distinguishes "the environment moved under me" from "the code is wrong" in a second. Re-run it after every environment change — a permissions edit, a queue redefinition, a credential rotation.
+
+### Two things that will trip you up when running it
+
+**Do not override binding properties on the command line.** Spring replaces collections across property sources rather than merging them, so `--intake.bindings[0].source-queue=X` silently discards the rest of the binding and you get `Binding 'null' must specify mq-connection`. Point preflight at a config file instead — `--spring.config.additional-location=file:/path/to/dir/` with a complete `application.yml` — or use the `${MQ_HOST}`-style environment variables, which substitute cleanly.
+
+**Credentials come from `credential-ref`, not from bare environment variables.** The connection check fails with `MQRC 2035` if the reference is empty. Use the `env:` form:
+
+```yaml
+intake:
+  mq-connections:
+    primary:
+      credential-ref: "env:MQ_USER,MQ_PASSWORD"
+```
+
+### Test 0b — Claims preflight
+
+Claims is a separate application; run its preflight too, so the shared queue manager and storage are proven for both before either is started.
+
+```bash
+./preflight.sh claims
+```
+
+**Pass:** `PREFLIGHT PASSED`, exit 0, with three expected skips (placeholder serializer, tracker builder, tracker queue).
+
 **The check to watch:** all three queue probes run on **one session of the connection the app will actually use**. That is what proves the tracker and backout queues live on the same queue manager as the source — the failure mode where a backout queue defined on a sibling QM stalls the binding on its first poison message, which no console inspection reveals. An `MQRC 2085` from `backout-queue.output` is exactly that, and the report says so.
 
 Run it once more with the real production-mode flag (`MQ_INTAKE_PRODUCTION=true`) to confirm the gates report as ARMED.
@@ -175,7 +204,11 @@ Run it once more with the real production-mode flag (`MQ_INTAKE_PRODUCTION=true`
 
 ### Test 1 — Clean startup
 
-**Steps:** start the app, read the log from the top.
+**Steps:** start the service and read the log from the top.
+
+```bash
+java -jar rms/target/datalake-mq-intake-rms-*.jar    # add --spring.profiles.active=prod if used
+```
 
 **Expected log sequence:**
 
@@ -428,6 +461,9 @@ If Test 14 produced a duplicate file, the pass covering that partition should re
 
 | # | Test | Run by | Date | Result | Evidence / notes |
 |---|---|---|---|---|---|
+| 0 | Preflight clean (rms) | | | | attach the report |
+| 0a | Preflight with production mode armed | | | | `production-mode` = ARMED |
+| 0b | Preflight clean (claims) | | | | 3 expected skips |
 | 1 | Clean startup | | | | |
 | 2 | Health endpoint | | | | |
 | 3 | Metrics endpoint | | | | |
