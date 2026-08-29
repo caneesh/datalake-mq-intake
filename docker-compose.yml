@@ -19,7 +19,15 @@ services:
       - "9443:9443"   # MQ Console (HTTPS)
     volumes:
       - mq-data:/mnt/mqm
-      - ./docker/mq-config:/etc/mqm/config
+      # Mounted into /etc/mqm, NOT a subdirectory: the image auto-runs *.mqsc
+      # found directly in /etc/mqm when the queue manager is created, and
+      # ignores anything nested. Mounted at /etc/mqm/config it was never
+      # executed — the drill queues had been bootstrapped by hand at some
+      # point, so `docker-compose up` on a clean machine produced a queue
+      # manager with no application queues, and the BOTHRESH/BOQNAME parity
+      # this file documents was absent from the environment it was supposed
+      # to rehearse. Preflight surfaced it.
+      - ./docker/mq-config/20-queues.mqsc:/etc/mqm/20-queues.mqsc:ro
     healthcheck:
       test: ["CMD", "dspmq", "-m", "QM1"]
       interval: 10s
