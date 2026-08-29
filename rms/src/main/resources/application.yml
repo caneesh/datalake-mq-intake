@@ -34,7 +34,7 @@ intake:
     relogin-interval-ms: 3600000  # 1 hour
 
   hdfs:
-    audit-base-path: /data/audit
+    audit-base-path: ${HDFS_AUDIT_BASE_PATH:/data/audit}
     temp-file-max-age-ms: 3600000  # 1 hour
 
   # RMS is ABC-controlled: reconciliation checks landed data against the
@@ -53,7 +53,7 @@ intake:
   bindings:
     - id: rms
       mq-connection: primary
-      source-queue: MQ.HPS.MEMBERSHIP.IN
+      source-queue: ${MQ_SOURCE_QUEUE:MQ.HPS.MEMBERSHIP.IN}
       mode: TRACKED
       listener-threads: 4
       batch:
@@ -73,7 +73,7 @@ intake:
         # value here if a freshness SLA requires it.
         interval-ms: 0
       hdfs:
-        base-path: /data/raw/membership/hps
+        base-path: ${HDFS_BASE_PATH:/data/raw/membership/hps}
         # Sidecar index: RMS payloads carry <MessageID>, a per-message UUID, so
         # an index of identities is meaningful here. Claims deliberately leaves
         # this off — its per-message key is still an open question, and an index
@@ -85,7 +85,7 @@ intake:
         # per batch closes the same window at a fraction of that cost.
         hsync-on-flush: true
       tracker:
-        queue: MQ.HPS.MEMBERSHIP.TRACKER
+        queue: ${MQ_TRACKER_QUEUE:MQ.HPS.MEMBERSHIP.TRACKER}
         body-mode: FULL_COPY
         fields:
           reporting-system: DMIH/DL
@@ -93,7 +93,7 @@ intake:
           message-status: RCVD
           destination-status: ""
       backout:
-        queue: MQ.HPS.MEMBERSHIP.BACKOUT
+        queue: ${MQ_BACKOUT_QUEUE:MQ.HPS.MEMBERSHIP.BACKOUT}
         threshold: 5
         # Suppress backout routing while failures are infrastructure-classified.
         # Delivery count cannot tell a malformed message from a healthy one

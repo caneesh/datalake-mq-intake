@@ -34,7 +34,7 @@ intake:
     relogin-interval-ms: 3600000  # 1 hour
 
   hdfs:
-    audit-base-path: /data/audit
+    audit-base-path: ${HDFS_AUDIT_BASE_PATH:/data/audit}
     temp-file-max-age-ms: 3600000  # 1 hour
 
   # Off for claims: reconciliation compares record identities, and claims
@@ -53,7 +53,7 @@ intake:
   bindings:
     - id: claims
       mq-connection: primary
-      source-queue: MQ.DMIH.CLAIMS.IN
+      source-queue: ${MQ_SOURCE_QUEUE:MQ.DMIH.CLAIMS.IN}
       mode: LAND_ONLY           # no tracker group for LAND_ONLY mode
       listener-threads: 4
       batch:
@@ -67,14 +67,14 @@ intake:
         # value here if a freshness SLA requires it.
         interval-ms: 0
       hdfs:
-        base-path: /data/raw/claims/dmih
+        base-path: ${HDFS_BASE_PATH:/data/raw/claims/dmih}
         # Durability: fsync each batch to DataNode disks before close. hflush
         # alone leaves bytes in OS page cache after the MQ commit has already
         # acknowledged the messages; the legacy MDB hsync'd per RECORD. One sync
         # per batch closes the same window at a fraction of that cost.
         hsync-on-flush: true
       backout:
-        queue: MQ.DMIH.CLAIMS.BACKOUT
+        queue: ${MQ_BACKOUT_QUEUE:MQ.DMIH.CLAIMS.BACKOUT}
         # BISECT requires threshold >= ceil(log2(batch size)) + 1 = 14:
         # while a poison bisects toward isolation, adjacent clean messages
         # accumulate backout count too; a lower threshold would misroute them.

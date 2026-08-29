@@ -26,6 +26,21 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <!--
+          Serves the actuator endpoints over HTTP. Without it the app runs as a
+          non-web application: health and metrics are registered in-process and
+          reachable by nothing — no liveness probe, no scrape, no curl. The
+          whole monitoring plan (PARTIAL_OUTAGE mapped to 200, the
+          backout-depth pager, the balance-check counter) assumes an HTTP
+          endpoint, so this is required rather than optional.
+
+          It is the ONLY inbound surface this service has; it accepts no
+          application traffic. Port comes from SERVER_PORT (default 8080).
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-configuration-processor</artifactId>

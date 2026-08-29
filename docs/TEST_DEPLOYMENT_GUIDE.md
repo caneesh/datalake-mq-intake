@@ -1,0 +1,180 @@
+# Test Deployment Guide — build locally, run on the server
+
+How to get the intake service onto a test server and running against real IBM MQ and real HDFS.
+
+**The shape of it:** the code is built on your machine, the jar is copied to the server, and the service runs there — close to MQ and HDFS, under the service account, with the environment's own Kerberos identity. Nothing about the build happens on the server.
+
+```
+  your machine                         test server
+  ────────────                         ───────────
+  mvn clean install                    releases/<stamp>/app.jar
+        │                              current ──► releases/<stamp>
+        │  scripts/deploy.sh           config/     your overrides
+        └────── scp/ssh ──────────►    env.sh      environment + secrets (chmod 600)
+                                       logs/  run/
+                                             │
+                                             ├── preflight  → proves MQ + HDFS
+                                             ├── start      → consumes, lands, tracks
+                                             └── stop       → drains in flight
+```
+
+Companions: `docs/TEST_ENVIRONMENT_PLAN.md` (what to test once it runs) and `docs/DEPLOYMENT_CHECKLIST.md` (production cutover).
+
+---
+
+## 1 — What the server needs
+
+- **Java 11** on `PATH` (`java -version`)
+- Network reach to the queue manager (default port 1414) and to HDFS
+- The **service account**'s Kerberos keytab, if the cluster is kerberised
+- A writable home or install directory
+- `curl` (optional — `status` uses it for health and metrics)
+
+Nothing else: no Maven, no repository clone, no MQ client install. The jar is self-contained.
+
+## 2 — Deploy
+
+From the repository root on your machine:
+
+```bash
+./scripts/deploy.sh rms user@testhost                  # default base: ~/mq-intake
+./scripts/deploy.sh rms user@testhost /opt/mq-intake   # custom base
+./scripts/deploy.sh claims user@testhost               # the other application
+```
+
+It builds (running the full test suite), uploads the jar and the control script into a timestamped release directory, repoints `current`, and keeps the last five releases. It prints what to do next.
+
+**What deploy deliberately does not do:** start anything, stop anything, or overwrite `config/` and `env.sh`. A deploy must never restart a live consumer by surprise, and must never clobber the file holding credentials. If a service is already running from the previous release, deploy says so and leaves it alone.
+
+Use `--fast` to skip the test suite while iterating. Never for a deployment you intend to test against.
+
+## 3 — Configure the server (first deploy only)
+
+The first deploy seeds `env.sh` from a template and chmods it 600. Edit it:
+
+```bash
+ssh user@testhost
+cd ~/mq-intake
+vi env.sh
+```
+
+Everything the environment needs is there: MQ host/port/queue-manager/channel, the three queue names, the credential reference, HDFS paths, Kerberos, heap, and `MQ_INTAKE_PRODUCTION`.
+
+Two things to get right:
+
+**Credentials are referenced, not embedded in configuration.** `MQ_CREDENTIAL_REF="env:MQ_USER,MQ_PASSWORD"` tells the service to read those two variables. The password is never logged and never printed by `intake.sh config`, which shows secrets only as `<set>` or `<unset>`.
+
+**Arm production mode** (`MQ_INTAKE_PRODUCTION=true`) in any environment standing in for production. It is what makes the startup gates refuse dev-default connection values, placeholder serializers and an incomplete tracker contract. A test that runs without it is testing a more permissive service than the one you will promote.
+
+### When you need more than environment variables
+
+`env.sh` covers the environment-specific values. To change **behaviour** — batch size, thresholds, listener threads — drop a YAML file in `config/`, which the control script passes to Spring automatically:
+
+```bash
+vi ~/mq-intake/config/application.yml
+```
+
+> **Copy the whole `bindings:` block when you do this.** Spring does not merge collections across configuration sources: whichever source mentions `intake.bindings` supplies the entire list. A file containing only `intake.bindings[0].batch.size` produces a binding with *nothing else set*, and the service fails with `Binding 'null' must specify mq-connection`. The same is true of `--intake.bindings[0].x=y` on the command line and of `INTAKE_BINDINGS_0_X` in the environment. Scalar values outside the list (`intake.hdfs.audit-base-path`, `intake.mq-connections.primary.host`) override individually and are safe — which is exactly why the queue names and paths are `${VAR}` placeholders in the shipped YAML rather than something you have to override structurally.
+
+## 4 — Prove the environment before consuming anything
+
+```bash
+./current/intake.sh preflight          # everything
+./current/intake.sh preflight mq       # or: hdfs, app
+```
+
+Preflight connects to the real dependencies, checks one fact at a time, prints a report naming the fix for each failure, and exits non-zero if anything failed. **It starts no listener and consumes no message**, so it is safe against an environment carrying live data.
+
+- [ ] `PREFLIGHT PASSED`, exit status 0
+- [ ] `production-mode` reports **ARMED**
+
+Fix everything it reports before starting. A failure found here is a failure found with no messages in flight.
+
+## 5 — Start, watch, stop
+
+```bash
+./current/intake.sh start      # background; waits for the startup confirmation
+./current/intake.sh status     # pid, release, health, key metrics
+./current/intake.sh logs -f    # follow
+./current/intake.sh stop       # graceful
+```
+
+`start` refuses if a service is already running, and reports failure with the last 30 log lines if the process dies during startup rather than claiming success for a process that a config gate killed three seconds later.
+
+**`stop` sends SIGTERM and waits.** The receive loop drains and commits its in-flight batch on shutdown; that is why the script never escalates to `kill -9` on its own. If the drain has not finished within `STOP_TIMEOUT_SECONDS` (default 90) it tells you and stops, leaving the decision with you. A forced kill is safe for delivery — the batch rolls back and MQ redelivers — but it manufactures avoidable duplicates.
+
+### What "working" looks like
+
+```bash
+./current/intake.sh status
+```
+
+```
+process : running (pid 2954962, up 04:11)
+release : module=rms
+release : git_rev=e61bbf8
+health  : {"status":"UP","components":{"bindings":{"status":"UP",
+          "details":{"rms":{"status":"HEALTHY", ...
+metric  : messages_consumed_total          12.0
+metric  : batches_committed_total          4.0
+metric  : batches_rolled_back_total        0.0
+metric  : balance_check_failures_total     0.0
+metric  : backout_queue_depth              0.0
+```
+
+Then confirm data actually landed:
+
+```bash
+hdfs dfs -ls -R $HDFS_BASE_PATH | grep '\.seq$'
+hdfs dfs -cat $HDFS_AUDIT_BASE_PATH/rms/$(date -u +%Y%m%d)/audit_*.json | python3 -m json.tool
+```
+
+The audit record should read `"balance_status": "BALANCED"` with `consumed_count` equal to `record_count + backout_count`.
+
+> **A handful of test messages will not appear immediately.** Production settings flush a batch on size (1000), on bytes, or at the quarter-hour partition boundary — so a dozen messages sit in the in-flight batch until the boundary passes. They are already consumed (the source queue shows depth 0) and they are not lost: a graceful `stop` drains them to disk immediately, which is a good way to see the whole path work in one minute. For sustained functional testing, use the test overlay in the test plan (`batch.size: 10`, `interval-ms: 5000`) via a `config/application.yml` with the complete binding block.
+
+## 6 — Upgrade and roll back
+
+Upgrading is deploy, stop, start:
+
+```bash
+./scripts/deploy.sh rms user@testhost      # from your machine; does not touch the running service
+ssh user@testhost 'cd ~/mq-intake && ./current/intake.sh stop && ./current/intake.sh start'
+```
+
+Rolling back is repointing the symlink — the previous release still has its own jar and control script:
+
+```bash
+cd ~/mq-intake
+./current/intake.sh stop
+ln -sfn releases/<previous-stamp> current
+./current/intake.sh start
+```
+
+`config/` and `env.sh` live outside the release directories, so they survive both.
+
+**Rollback is always message-safe.** Anything unprocessed simply queues on MQ; landed files stay landed and audited. There is no data migration in either direction.
+
+## 7 — Where things are
+
+| | |
+|---|---|
+| `~/mq-intake/current/` | symlink to the active release (jar + control script + `RELEASE` metadata) |
+| `~/mq-intake/releases/` | last five releases; rollback targets |
+| `~/mq-intake/config/` | optional YAML overrides; survives deploys |
+| `~/mq-intake/env.sh` | environment and credentials, chmod 600; survives deploys |
+| `~/mq-intake/logs/current.log` | symlink to the log of the running instance |
+| `~/mq-intake/run/intake.pid` | pid of the running instance |
+
+## 8 — Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `refuses to start … dev-placeholder defaults` | production mode is armed and `MQ_HOST`/`MQ_QUEUE_MANAGER`/`MQ_CHANNEL` are unset — the gate doing its job |
+| `Binding 'null' must specify mq-connection` | a partial binding override; copy the whole `bindings:` block (see §3) |
+| Preflight `MQRC 2035` on the connection | credential reference empty or wrong; check `MQ_CREDENTIAL_REF` and that `MQ_USER`/`MQ_PASSWORD` are exported |
+| Preflight `MQRC 2085` on a queue | the queue is not on the queue manager this connection reached — commonly a sibling QM in a pair |
+| Preflight `MQRC 2035` on a queue but not the connection | connected fine, but the account lacks the open option; on MQ, an authority profile's `*` matches one qualifier, so `MQ.ABC.*` does **not** cover `MQ.ABC.DEF.IN` — use `**` |
+| Started, but no `.seq` files | fewer than `batch.size` messages and the partition boundary has not passed (see §5) |
+| `status` shows health not answering | the process is still starting, or `SERVER_PORT` differs from the default 8080 — set `HEALTH_URL`/`METRICS_URL` in `env.sh` |
+| Service exits immediately | read `logs/current.log`; a startup gate names the exact cause on its first ERROR line |

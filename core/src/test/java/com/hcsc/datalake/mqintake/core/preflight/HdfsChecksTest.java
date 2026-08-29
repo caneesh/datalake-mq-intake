@@ -177,6 +177,20 @@ class HdfsChecksTest {
     }
 
     @Test
+    void aMissingAuditBindingDirectoryIsCreatedRatherThanFailed() throws Exception {
+        // StartupValidator mkdirs this directory, so a fresh environment where
+        // only the audit BASE exists is deployable. Preflight must predict the
+        // service, not be stricter than it.
+        fileSystem.delete(new Path(auditPath + "/rms"), true);
+
+        CheckOutcome outcome = outcomeOf(run(fileSystem), "audit-path");
+
+        assertThat(outcome.getStatus()).isEqualTo(CheckOutcome.Status.PASS);
+        assertThat(outcome.getDetail()).contains("created and writable");
+        assertThat(fileSystem.exists(new Path(auditPath + "/rms"))).isTrue();
+    }
+
+    @Test
     void anUnconfiguredAuditPathIsSkippedNotFailed() {
         properties.getHdfs().setAuditBasePath("");
 

@@ -5,6 +5,8 @@
 **Review verdict:** `RMS GO WITH CONDITIONS` — no confirmed code defect blocks promotion; the conditions are the environment checks and pre-cutover tests below.
 **Claims:** ships as a **separate application** with deliberately limited scope this release. Its checklist is a short appendix at the end; nothing Claims does can affect the RMS process.
 
+Deployment mechanics (build locally, ship, run, roll back) live in `docs/TEST_DEPLOYMENT_GUIDE.md`; the same scripts serve production.
+
 Conventions: `[ ]` = must be checked off by a named person before cutover. Items marked **GATE** are verified automatically at startup — if the pod comes up, they passed; they are listed so the operator knows what a startup failure means. Items marked **[preflight]** are proven by the step below, which produces the evidence for them.
 
 ---
@@ -44,8 +46,10 @@ Without the script: `java -jar rms/target/*.jar --intake.preflight.enabled=true 
 
 ## 1 — IBM MQ environment
 
-Queue names are environment-specific and are **not** the repo's placeholder values. Override them in the deployment manifest — no code change needed, Spring relaxed binding accepts:
-`INTAKE_BINDINGS_0_SOURCE_QUEUE`, `INTAKE_BINDINGS_0_TRACKER_QUEUE`, `INTAKE_BINDINGS_0_BACKOUT_QUEUE`.
+Queue names are environment-specific and are **not** the repo's placeholder values. The shipped YAML reads them from the environment, so set these in the manifest:
+`MQ_SOURCE_QUEUE`, `MQ_TRACKER_QUEUE`, `MQ_BACKOUT_QUEUE` (and `HDFS_BASE_PATH`, `HDFS_AUDIT_BASE_PATH`).
+
+> Do **not** try `INTAKE_BINDINGS_0_SOURCE_QUEUE` or `--intake.bindings[0].source-queue`. Spring supplies a whole collection from one source, so a single indexed override discards the rest of the binding and startup fails with `Binding 'null' must specify mq-connection`. Verified, not theoretical. Behaviour changes (batch size, thresholds) need a config file carrying the complete `bindings:` block — see `docs/TEST_DEPLOYMENT_GUIDE.md`.
 
 - [ ] Source queue exists on the queue manager the application will connect to. **[preflight]**
 - [ ] **Tracker queue exists on that SAME queue manager.** **[preflight]** The tracker producer is created from the listener's own transacted session, so a tracker queue on a different QM cannot be reached — the binding fails when the session opens.

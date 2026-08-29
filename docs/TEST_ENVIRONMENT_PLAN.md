@@ -5,7 +5,7 @@
 **Purpose:** prove, in a test environment against real IBM MQ and real HDFS, everything unit tests and the Docker drill cannot: real connectivity, real Kerberos, real partition behaviour, real recovery, real throughput.
 **Audience:** whoever runs the test cycle. Follow the parts in order — later parts assume earlier ones passed.
 
-Companion document: `docs/DEPLOYMENT_CHECKLIST.md` (production cutover). This document is what you execute *before* that one.
+Companion documents: `docs/TEST_DEPLOYMENT_GUIDE.md` (how to get the service onto the test server and running) and `docs/DEPLOYMENT_CHECKLIST.md` (production cutover). This document is what you execute between them.
 
 ---
 
@@ -83,13 +83,17 @@ DISPLAY QLOCAL(MQ.HPS.MEMBERSHIP.IN) BOTHRESH BOQNAME MAXDEPTH MAXMSGL
 DISPLAY QMGR MAXUMSGS
 ```
 
-The names above are the repo's placeholders. Real environments use their own — override them in the launch environment rather than editing the jar:
+The names above are the repo's placeholders. Real environments use their own — the shipped YAML reads them from the environment, so export these rather than editing the jar:
 
 ```bash
-export INTAKE_BINDINGS_0_SOURCE_QUEUE=<real source queue>
-export INTAKE_BINDINGS_0_TRACKER_QUEUE=<real tracker queue>
-export INTAKE_BINDINGS_0_BACKOUT_QUEUE=<real backout queue>
+export MQ_SOURCE_QUEUE=<real source queue>
+export MQ_TRACKER_QUEUE=<real tracker queue>
+export MQ_BACKOUT_QUEUE=<real backout queue>
+export HDFS_BASE_PATH=<real landing path>
+export HDFS_AUDIT_BASE_PATH=<real audit path>
 ```
+
+> `INTAKE_BINDINGS_0_SOURCE_QUEUE` does **not** work, and neither does `--intake.bindings[0].source-queue`: Spring takes a whole collection from a single source, so one indexed override wipes the rest of the binding (`Binding 'null' must specify mq-connection`). Verified. To change batch sizes or thresholds, use a config file with the complete `bindings:` block — see `docs/TEST_DEPLOYMENT_GUIDE.md`.
 
 - [ ] **Source, tracker and backout queues all exist on the SAME queue manager the app connects to.** Both the tracker producer and the backout producer are created from the listener's own transacted session, so neither can reach a queue on a sibling QM. A backout queue defined only on the other QM of a pair is the worst case: the first poison message fails to route, rolls back, and redelivers forever — the binding stalls permanently. In a multi-QM pair, check every QM the app may connect to.
 - [ ] If the feed arrives on **more than one queue manager**, decide now: one binding per QM, each with its **own `hdfs.base-path`**. Two bindings sharing a base path make reconciliation report each other's files as orphans on every pass.

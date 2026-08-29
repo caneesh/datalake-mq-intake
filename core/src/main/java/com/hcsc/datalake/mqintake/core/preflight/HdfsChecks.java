@@ -127,9 +127,38 @@ public final class HdfsChecks {
         String auditBase = properties.getHdfs().getAuditBasePath();
         String path = (auditBase == null || auditBase.isBlank())
                 ? null : AuditPaths.bindingDir(auditBase, binding.getId());
-        return pathWritable("hdfs", binding.getId() + ".audit-path", path,
-                "audit records can be written — they are fail-closed, so this blocks ingestion",
-                fileSystem);
+        return new MqChecks.AbstractCheck("hdfs", binding.getId() + ".audit-path",
+                "audit records can be written — they are fail-closed, so this blocks ingestion") {
+            @Override
+            public CheckOutcome run() {
+                if (path == null) {
+                    return CheckOutcome.skip("no audit base path configured");
+                }
+                try {
+                    // Mirrors StartupValidator, which mkdirs the binding's
+                    // audit directory: a missing-but-creatable directory is
+                    // normal on a fresh environment, and reporting it as a
+                    // failure would make preflight stricter than the service
+                    // it predicts.
+                    Path target = new Path(path);
+                    boolean created = false;
+                    if (!fileSystem.exists(target)) {
+                        if (!fileSystem.mkdirs(target)) {
+                            return CheckOutcome.fail("does not exist and could not be created: " + path,
+                                    "The audit trail is a control: an unwritable audit path stops "
+                                            + "ingestion at the first batch.");
+                        }
+                        created = true;
+                    }
+                    fileSystem.access(target, FsAction.WRITE);
+                    return CheckOutcome.pass(path + (created ? " created and writable" : " writable"));
+                } catch (Exception e) {
+                    return CheckOutcome.fail("audit path unusable: " + path, e,
+                            "The audit trail is a control: an unwritable audit path stops "
+                                    + "ingestion at the first batch.");
+                }
+            }
+        };
     }
 
     private static PreflightCheck durabilityRoundTrip(BindingConfig binding, String basePath,
