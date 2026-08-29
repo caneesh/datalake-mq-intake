@@ -66,6 +66,11 @@ Queue names are environment-specific and are **not** the repo's placeholder valu
 
 ## 2 — HDFS and Kerberos
 
+Every variable, where it goes, and which preflight check proves it: **[Property reference](PROPERTY_REFERENCE.md)**. When deploying onto a host that already runs another Hadoop client, the cluster-side values can be read off the working application rather than requested — see the mapping table there, and [Deploying alongside another Hadoop client](WEBSPHERE_HOST_DEPLOYMENT.md).
+
+- [ ] `HDFS_CONFIG_RESOURCES` points at the **target** cluster's conf directory **[preflight]** — `cluster-config.resources` prints the files it read. (**GATE**: production mode refuses an empty value, and refuses a filesystem that resolves to local disk.)
+- [ ] `HDFS_EXPECTED_NAMESERVICE` set **[preflight]** — `filesystem.nameservice` must **pass, not skip**. A skip means nothing is guarding which cluster the data lands on, and every other check passes against the wrong one.
+- [ ] `dfs.client.use.datanode.hostname` settled — set via `JAVA_OPTS`, or confirmed present in the cluster's `hdfs-site.xml`. NameNode connectivity does not imply DataNode connectivity.
 - [ ] Landing base path exists and is writable by the service principal **[preflight]** (**GATE**: `StartupValidator` refuses to start otherwise, including the `_tmp` subtree).
 - [ ] Audit base path exists and is writable **[preflight]** (**GATE**: validated per binding at startup; audit is fail-closed, so an unwritable audit path stalls the first batch — validation turns that into a refusal to start).
 - [ ] Kerberos keytab and principal valid **against the production KDC** **[preflight]** — `filesystem.connect` reports the identity it authenticated as, which is the real proof; a manual `kinit` remains useful if that check fails.

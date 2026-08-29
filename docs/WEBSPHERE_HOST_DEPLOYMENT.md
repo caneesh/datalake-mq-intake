@@ -46,6 +46,8 @@ If this ever moves *inside* the WebSphere JVM, all four rows change and so does 
 
 ## Configuration
 
+The cluster-side values do not have to be requested: the WebSphere application on this host already reaches the target cluster, so its working `odp.*` values can be read off the host and mapped across. [Property reference](PROPERTY_REFERENCE.md) has the commands for finding them and the property-by-property mapping.
+
 | Property | Environment variable | Required | Purpose |
 |---|---|---|---|
 | `intake.hdfs.config-resources` | `HDFS_CONFIG_RESOURCES` | **Yes** | Target cluster's conf directory, or the two XML files directly. Missing entries fail startup |

@@ -123,7 +123,9 @@ vi env.sh
 
 Everything the environment needs is there: MQ host/port/queue-manager/channel, the three queue names, the credential reference, HDFS paths, Kerberos, heap, and `MQ_INTAKE_PRODUCTION`.
 
-Two things to get right:
+**Every variable, what it does, whether test and production should share it, and which preflight check proves it: [Property reference](PROPERTY_REFERENCE.md).** If this host already runs another Hadoop client, that page also shows how to read the working cluster values off it instead of asking for them.
+
+Four things to get right:
 
 **Credentials are referenced, not embedded in configuration.** `MQ_CREDENTIAL_REF="env:MQ_USER,MQ_PASSWORD"` tells the service to read those two variables. The password is never logged and never printed by `intake.sh config`, which shows secrets only as `<set>` or `<unset>`.
 
