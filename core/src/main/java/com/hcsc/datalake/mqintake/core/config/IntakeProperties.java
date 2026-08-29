@@ -253,6 +253,44 @@ public class IntakeProperties {
          */
         private boolean allowLocalFilesystem = false;
 
+        /**
+         * The nameservice (or any distinctive fragment) {@code fs.defaultFS}
+         * must contain — for example the {@code dfs.nameservices} value of the
+         * target cluster.
+         *
+         * <p>This is the guard against being pointed at the wrong conf
+         * directory on a host that also holds another Hadoop client's
+         * configuration. Without it, a wrong {@link #configResources} produces
+         * a service that connects, authenticates, writes and reports healthy
+         * against someone else's cluster. Optional, and loudly warned about
+         * when unset, because the check can only be as specific as the value
+         * the operator supplies.
+         */
+        private String expectedNameservice;
+
+        /**
+         * Hadoop properties applied after the site files, overriding them.
+         *
+         * <p>For keys a deployment needs but the cluster's XML does not carry —
+         * {@code dfs.client.use.datanode.hostname} being the usual one, since
+         * a client outside the cluster's network segment often resolves
+         * DataNode hostnames but cannot route to the addresses the NameNode
+         * hands back.
+         */
+        private Map<String, String> properties = new java.util.LinkedHashMap<>();
+
+        /**
+         * Builds the configuration with {@code new Configuration(false)},
+         * skipping Hadoop's packaged defaults.
+         *
+         * <p>Off by default. The isolation it is usually reached for is already
+         * provided by this application's classpath being nothing but its own
+         * jar, and skipping the defaults means also skipping every tuned client
+         * default — so it trades a real cost for a guarantee already held. Kept
+         * available for environments whose Hadoop team requires it.
+         */
+        private boolean isolateConfiguration = false;
+
         public String getAuditBasePath() { return auditBasePath; }
         public void setAuditBasePath(String auditBasePath) { this.auditBasePath = auditBasePath; }
         public long getTempFileMaxAgeMs() { return tempFileMaxAgeMs; }
@@ -264,6 +302,16 @@ public class IntakeProperties {
         public boolean isAllowLocalFilesystem() { return allowLocalFilesystem; }
         public void setAllowLocalFilesystem(boolean allowLocalFilesystem) {
             this.allowLocalFilesystem = allowLocalFilesystem;
+        }
+        public String getExpectedNameservice() { return expectedNameservice; }
+        public void setExpectedNameservice(String expectedNameservice) {
+            this.expectedNameservice = expectedNameservice;
+        }
+        public Map<String, String> getProperties() { return properties; }
+        public void setProperties(Map<String, String> properties) { this.properties = properties; }
+        public boolean isIsolateConfiguration() { return isolateConfiguration; }
+        public void setIsolateConfiguration(boolean isolateConfiguration) {
+            this.isolateConfiguration = isolateConfiguration;
         }
     }
 

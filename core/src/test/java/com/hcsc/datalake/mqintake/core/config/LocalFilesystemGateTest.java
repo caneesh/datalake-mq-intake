@@ -39,15 +39,37 @@ class LocalFilesystemGateTest {
     }
 
     @Test
-    void productionModeRefusesToStartOnTheLocalFilesystem() {
+    void productionModeRefusesToStartWithNoClusterConfigurationAtAll() {
+        // Caught while building the Configuration, before anything connects:
+        // no cluster configuration means Hadoop's own defaults, which name the
+        // local disk.
         runner(ProductionMode.enabled(), false).run(context -> {
             assertThat(context.getStartupFailure())
                     .as("landing production data on local disk must never start quietly")
                     .isNotNull();
             assertThat(context.getStartupFailure())
-                    .hasStackTraceContaining("the LOCAL disk, not HDFS")
-                    .hasStackTraceContaining("intake.hdfs.config-resources");
+                    .hasStackTraceContaining("config-resources is empty");
         });
+    }
+
+    @Test
+    void productionModeRefusesAClusterConfigurationThatNamesTheLocalDisk(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        // The second guard, one layer down: configuration was loaded, so the
+        // first check is satisfied — and it resolves to the local disk anyway.
+        // Only creating the FileSystem reveals that.
+        java.nio.file.Path conf = tmp.resolve("conf");
+        java.nio.file.Files.createDirectories(conf);
+        java.nio.file.Files.writeString(conf.resolve("core-site.xml"),
+                "<?xml version=\"1.0\"?><configuration><property>"
+                        + "<name>fs.defaultFS</name><value>file:///</value>"
+                        + "</property></configuration>");
+
+        runner(ProductionMode.enabled(), false, conf.toString()).run(context ->
+                assertThat(context.getStartupFailure())
+                        .isNotNull()
+                        .hasStackTraceContaining("the LOCAL disk, not HDFS")
+                        .hasStackTraceContaining("intake.hdfs.config-resources"));
     }
 
     @Test

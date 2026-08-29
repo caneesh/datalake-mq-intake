@@ -37,8 +37,22 @@ intake:
     # Cluster configuration. REQUIRED to reach a real cluster: a fat jar has
     # only itself on the classpath, so without this Hadoop resolves
     # fs.defaultFS to file:/// and lands data on the server's own disk.
-    # Point at /etc/hadoop/conf, or list the XML files directly.
+    # Point at the target cluster's conf directory, or list the XML files.
     config-resources: ${HDFS_CONFIG_RESOURCES:}
+
+    # What fs.defaultFS must contain once those files are loaded. On a host
+    # that also holds another Hadoop client's configuration, this is the only
+    # thing standing between a wrong conf directory and data landing on the
+    # wrong cluster -- every other check passes either way.
+    expected-nameservice: ${HDFS_EXPECTED_NAMESERVICE:}
+
+    # Hadoop properties applied after the site files, overriding them. Set
+    # dfs.client.use.datanode.hostname=true when the client can resolve
+    # DataNode hostnames but cannot route to the addresses the NameNode
+    # returns -- common when the client sits outside the cluster's network
+    # segment. Without it the NameNode connects and the writes still fail.
+    properties: {}
+
     audit-base-path: ${HDFS_AUDIT_BASE_PATH:/data/audit}
     temp-file-max-age-ms: 3600000  # 1 hour
 

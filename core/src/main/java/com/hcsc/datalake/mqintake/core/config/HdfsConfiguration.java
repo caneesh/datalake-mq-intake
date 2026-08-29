@@ -22,51 +22,13 @@ public class HdfsConfiguration {
     private KerberosManager kerberosManager;
 
     @Bean
-    public Configuration hadoopConfiguration(IntakeProperties properties) {
-        Configuration conf = new Configuration();
-        // Classpath lookups: work when the config XMLs are packaged or added
-        // to the classpath, which is NOT the case for a fat jar started with
-        // java -jar. Kept because they cost nothing when absent.
-        conf.addResource("core-site.xml");
-        conf.addResource("hdfs-site.xml");
-
-        for (String entry : properties.getHdfs().getConfigResources()) {
-            if (entry == null || entry.isBlank()) {
-                continue;
-            }
-            java.io.File file = new java.io.File(entry.trim());
-            if (!file.exists()) {
-                // Loud, because the alternative is a silent fall back to
-                // file:/// and data written to the server's local disk.
-                throw new IllegalStateException(
-                        "intake.hdfs.config-resources names something that does not exist: "
-                                + file.getAbsolutePath()
-                                + " — point it at core-site.xml/hdfs-site.xml or the directory "
-                                + "holding them (usually /etc/hadoop/conf).");
-            }
-            if (file.isDirectory()) {
-                boolean found = false;
-                for (String name : new String[]{"core-site.xml", "hdfs-site.xml"}) {
-                    java.io.File resource = new java.io.File(file, name);
-                    if (resource.isFile()) {
-                        conf.addResource(new org.apache.hadoop.fs.Path(resource.getAbsolutePath()));
-                        log.info("Loaded Hadoop configuration: {}", resource.getAbsolutePath());
-                        found = true;
-                    }
-                }
-                if (!found) {
-                    throw new IllegalStateException(
-                            "intake.hdfs.config-resources directory holds neither core-site.xml "
-                                    + "nor hdfs-site.xml: " + file.getAbsolutePath());
-                }
-            } else {
-                conf.addResource(new org.apache.hadoop.fs.Path(file.getAbsolutePath()));
-                log.info("Loaded Hadoop configuration: {}", file.getAbsolutePath());
-            }
-        }
-
-        log.info("Hadoop fs.defaultFS resolves to '{}'", conf.get("fs.defaultFS", "file:///"));
-        return conf;
+    public Configuration hadoopConfiguration(IntakeProperties properties,
+                                             ProductionMode productionMode) {
+        // Preflight exists to report a misconfigured cluster one line at a
+        // time; throwing here would kill the context before it prints anything.
+        boolean enforce = !properties.getPreflight().isEnabled();
+        return HadoopConfigurationFactory.create(
+                properties.getHdfs(), productionMode.isEnabled(), enforce);
     }
 
     @Bean

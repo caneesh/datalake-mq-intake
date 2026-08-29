@@ -36,8 +36,10 @@ public final class HdfsChecks {
                                                       FileSystem fileSystem,
                                                       String instanceId) {
         List<PreflightCheck> checks = new ArrayList<>();
+        checks.add(clusterConfigLoaded(properties));
         checks.add(filesystemReachable(fileSystem,
                 properties.getHdfs().isAllowLocalFilesystem()));
+        checks.add(nameserviceMatches(fileSystem, properties.getHdfs().getExpectedNameservice()));
         for (BindingConfig binding : properties.getBindings()) {
             String basePath = binding.getHdfs().getBasePath();
             checks.add(pathWritable("hdfs", binding.getId() + ".landing-path", basePath,
@@ -47,6 +49,101 @@ public final class HdfsChecks {
             checks.add(durabilityRoundTrip(binding, basePath, fileSystem, instanceId));
         }
         return checks;
+    }
+
+    /**
+     * Reports which cluster configuration files were found, before anything
+     * tries to use them. On a host that also carries another Hadoop client's
+     * configuration, "which directory did it read" is the first question worth
+     * answering.
+     */
+    private static PreflightCheck clusterConfigLoaded(IntakeProperties properties) {
+        return new MqChecks.AbstractCheck("hdfs", "cluster-config.resources",
+                "the configured cluster's core-site.xml and hdfs-site.xml are present") {
+            @Override
+            public CheckOutcome run() {
+                List<String> entries = properties.getHdfs().getConfigResources();
+                List<String> found = new ArrayList<>();
+                List<String> missing = new ArrayList<>();
+                for (String entry : entries) {
+                    if (entry == null || entry.isBlank()) {
+                        continue;
+                    }
+                    java.io.File file = new java.io.File(entry.trim());
+                    if (!file.exists()) {
+                        missing.add(file.getAbsolutePath());
+                    } else if (file.isDirectory()) {
+                        boolean any = false;
+                        for (String name : new String[]{"core-site.xml", "hdfs-site.xml"}) {
+                            java.io.File resource = new java.io.File(file, name);
+                            if (resource.isFile()) {
+                                found.add(resource.getAbsolutePath());
+                                any = true;
+                            }
+                        }
+                        if (!any) {
+                            missing.add(file.getAbsolutePath()
+                                    + " (holds neither core-site.xml nor hdfs-site.xml)");
+                        }
+                    } else {
+                        found.add(file.getAbsolutePath());
+                    }
+                }
+                if (!missing.isEmpty()) {
+                    return CheckOutcome.fail("cannot read " + missing,
+                            "Set intake.hdfs.config-resources (HDFS_CONFIG_RESOURCES) to the "
+                                    + "target cluster's conf directory.");
+                }
+                if (found.isEmpty() && properties.getHdfs().isAllowLocalFilesystem()) {
+                    // Mirrors the application's own rule: writing to local disk
+                    // is a legitimate configuration once asked for, and
+                    // preflight must not be stricter than the service it
+                    // predicts.
+                    return CheckOutcome.skip("none configured — local filesystem explicitly "
+                            + "allowed");
+                }
+                if (found.isEmpty()) {
+                    return CheckOutcome.fail("no cluster configuration is configured",
+                            "Without core-site.xml/hdfs-site.xml Hadoop uses its packaged "
+                                    + "defaults and resolves fs.defaultFS to file:/// — the local "
+                                    + "disk. Set intake.hdfs.config-resources "
+                                    + "(HDFS_CONFIG_RESOURCES).");
+                }
+                return CheckOutcome.pass("loaded " + found);
+            }
+        };
+    }
+
+    /**
+     * The wrong conf directory is an ordinary mistake, and every other check
+     * passes cheerfully after it: the connection works, the paths exist, the
+     * writes succeed. Only the cluster is wrong. This is the check that says so.
+     */
+    private static PreflightCheck nameserviceMatches(FileSystem fileSystem, String expected) {
+        return new MqChecks.AbstractCheck("hdfs", "filesystem.nameservice",
+                "fs.defaultFS names the cluster this service is configured to write to") {
+            @Override
+            public CheckOutcome run() {
+                if (expected == null || expected.isBlank()) {
+                    return CheckOutcome.skip("intake.hdfs.expected-nameservice not configured — "
+                            + "setting it is what makes a wrong conf directory detectable");
+                }
+                String uri = String.valueOf(fileSystem.getUri());
+                if (!uri.contains(expected.trim())) {
+                    return CheckOutcome.fail(
+                            "fs.defaultFS is '" + uri + "', which does not name '"
+                                    + expected.trim() + "'",
+                            "The loaded configuration points at a DIFFERENT cluster than the one "
+                                    + "configured. Check that intake.hdfs.config-resources names "
+                                    + "the intended cluster's conf directory — on a host that "
+                                    + "carries more than one Hadoop client configuration this is "
+                                    + "the mistake that silently lands data on the wrong "
+                                    + "cluster.");
+                }
+                return CheckOutcome.pass(uri + " matches expected nameservice '"
+                        + expected.trim() + "'");
+            }
+        };
     }
 
     private static PreflightCheck filesystemReachable(FileSystem fileSystem,

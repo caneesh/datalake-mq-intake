@@ -125,6 +125,57 @@ class HdfsChecksTest {
     }
 
     @Test
+    void aFilesystemNamingADifferentClusterIsReportedAsAFailure() {
+        // Every other check in this class passes against the wrong cluster —
+        // it connects, the paths exist, the durability sequence works. This is
+        // the only one that can tell the operator they are about to land data
+        // somewhere nobody is looking for it.
+        properties.getHdfs().setExpectedNameservice("target-ns");
+
+        CheckOutcome outcome = outcomeOf(run(fileSystem), "filesystem.nameservice");
+
+        assertThat(outcome.isFailure()).isTrue();
+        assertThat(outcome.getDetail()).contains("does not name 'target-ns'");
+        assertThat(outcome.getRemedy()).contains("DIFFERENT cluster");
+    }
+
+    @Test
+    void anUncheckedNameserviceIsSkippedRatherThanAssumedCorrect() {
+        CheckOutcome outcome = outcomeOf(run(fileSystem), "filesystem.nameservice");
+
+        assertThat(outcome.getStatus()).isEqualTo(CheckOutcome.Status.SKIP);
+        assertThat(outcome.getDetail()).contains("expected-nameservice not configured");
+    }
+
+    @Test
+    void aClusterConfigDirectoryThatCannotBeReadIsReported() {
+        properties.getHdfs().setConfigResources(
+                List.of(tempDir.resolve("no-such-conf").toString()));
+
+        CheckOutcome outcome = outcomeOf(run(fileSystem), "cluster-config.resources");
+
+        assertThat(outcome.isFailure()).isTrue();
+        assertThat(outcome.getDetail()).contains("cannot read");
+        assertThat(outcome.getRemedy()).contains("HDFS_CONFIG_RESOURCES");
+    }
+
+    @Test
+    void theLoadedClusterConfigurationIsNamedInTheReport() throws Exception {
+        // "Which configuration did it actually read" is the first question on
+        // a host that carries more than one Hadoop client's config.
+        java.nio.file.Path conf = tempDir.resolve("target-conf");
+        Files.createDirectories(conf);
+        Files.writeString(conf.resolve("core-site.xml"),
+                "<?xml version=\"1.0\"?><configuration/>");
+        properties.getHdfs().setConfigResources(List.of(conf.toString()));
+
+        CheckOutcome outcome = outcomeOf(run(fileSystem), "cluster-config.resources");
+
+        assertThat(outcome.isFailure()).isFalse();
+        assertThat(outcome.getDetail()).contains("core-site.xml");
+    }
+
+    @Test
     void aMissingLandingPathFailsWithAnActionableRemedy() throws Exception {
         properties.getBindings().get(0).getHdfs()
                 .setBasePath(tempDir.resolve("nonexistent").toString());
