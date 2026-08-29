@@ -139,7 +139,22 @@ cmd_status() {
     else
         echo "process : NOT running"
     fi
-    [[ -f "${RELEASE_DIR}/RELEASE" ]] && sed 's/^/release : /' "${RELEASE_DIR}/RELEASE"
+    if [[ -f "${RELEASE_DIR}/RELEASE" ]]; then
+        sed 's/^/release : /' "${RELEASE_DIR}/RELEASE"
+        # Integrity, not security: confirms the jar is byte-identical to the
+        # one the build machine shipped. Useful where the build host has no
+        # version control, because then the checksum IS the version.
+        local recorded actual
+        recorded=$(grep '^jar_sha256=' "${RELEASE_DIR}/RELEASE" 2>/dev/null | cut -d= -f2 || true)
+        if [[ -n "$recorded" ]]; then
+            actual=$(sha256sum "$JAR" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$JAR" | cut -d' ' -f1)
+            if [[ "$recorded" == "$actual" ]]; then
+                echo "release : jar_verified=yes"
+            else
+                echo "release : jar_verified=NO — on-disk jar differs from the deployed one!" >&2
+            fi
+        fi
+    fi
 
     if command -v curl > /dev/null; then
         local health

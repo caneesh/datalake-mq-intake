@@ -30,9 +30,44 @@ Companions: `docs/TEST_ENVIRONMENT_PLAN.md` (what to test once it runs) and `doc
 - A writable home or install directory
 - `curl` (optional — `status` uses it for health and metrics)
 
-Nothing else: no Maven, no repository clone, no MQ client install. The jar is self-contained.
+Nothing else on the **server**: no Maven, no git, no repository clone, no MQ client install — the jar is self-contained. The **build machine** needs Java 11 and Maven; git is optional (see §2).
 
-## 2 — Deploy
+## 2 — If the build machine has no git
+
+**git is optional here.** The deploy script never requires it, and nothing in the workflow calls out to a remote. What changes is only how a release is *stamped*, and there is a better answer than a revision id anyway.
+
+**Stamping.** Releases are identified in this order:
+
+1. a `VERSION` file at the repository root, if present — one line, whatever your change process calls this build (`rms-2026.08.29-rc1`);
+2. the git revision, if git happens to be available and this is a working copy;
+3. otherwise `no-vcs`, and the jar's checksum stands alone.
+
+Create the `VERSION` file when the build machine has no version control — it costs one line and it is what appears on the server:
+
+```bash
+echo "rms-2026.08.29-rc1" > VERSION
+```
+
+**The checksum is the real identity.** Every deploy records the jar's `sha256` in the server's `RELEASE` file, verifies it after the copy (a truncated `scp` is caught before the release is activated, not at 3am), and `intake.sh status` re-verifies the on-disk jar against it:
+
+```
+release : jar_sha256=cb5e0ff21d9b84f143b2ba21d263863977e4c76a6a91ea348684e00ed5f29b31
+release : jar_verified=yes
+```
+
+That answers "is the server running exactly what I built?" — which a revision id cannot, since it says nothing about what was actually compiled or whether it arrived intact.
+
+**If the machine is also offline**, Maven needs a populated local repository. Prime `~/.m2` once from a connected machine (copy the directory across), then:
+
+```bash
+./scripts/deploy.sh rms user@testhost --offline    # passes -o to maven
+```
+
+A build that fails on a missing artifact in offline mode is telling you the local repository is incomplete, not that anything is wrong with the code.
+
+**Getting the source onto the build machine** is outside this toolchain — a zip, a shared drive, whatever your environment allows. The only thing the scripts assume is a directory containing the project, with `scripts/` in it.
+
+## 3 — Deploy
 
 From the repository root on your machine:
 
@@ -46,9 +81,9 @@ It builds (running the full test suite), uploads the jar and the control script 
 
 **What deploy deliberately does not do:** start anything, stop anything, or overwrite `config/` and `env.sh`. A deploy must never restart a live consumer by surprise, and must never clobber the file holding credentials. If a service is already running from the previous release, deploy says so and leaves it alone.
 
-Use `--fast` to skip the test suite while iterating. Never for a deployment you intend to test against.
+Use `--fast` to skip the test suite while iterating (never for a deployment you intend to test against), and `--offline` if the build machine has no network — see §2.
 
-## 3 — Configure the server (first deploy only)
+## 4 — Configure the server (first deploy only)
 
 The first deploy seeds `env.sh` from a template and chmods it 600. Edit it:
 
@@ -76,7 +111,7 @@ vi ~/mq-intake/config/application.yml
 
 > **Copy the whole `bindings:` block when you do this.** Spring does not merge collections across configuration sources: whichever source mentions `intake.bindings` supplies the entire list. A file containing only `intake.bindings[0].batch.size` produces a binding with *nothing else set*, and the service fails with `Binding 'null' must specify mq-connection`. The same is true of `--intake.bindings[0].x=y` on the command line and of `INTAKE_BINDINGS_0_X` in the environment. Scalar values outside the list (`intake.hdfs.audit-base-path`, `intake.mq-connections.primary.host`) override individually and are safe — which is exactly why the queue names and paths are `${VAR}` placeholders in the shipped YAML rather than something you have to override structurally.
 
-## 4 — Prove the environment before consuming anything
+## 5 — Prove the environment before consuming anything
 
 ```bash
 ./current/intake.sh preflight          # everything
@@ -90,7 +125,7 @@ Preflight connects to the real dependencies, checks one fact at a time, prints a
 
 Fix everything it reports before starting. A failure found here is a failure found with no messages in flight.
 
-## 5 — Start, watch, stop
+## 6 — Start, watch, stop
 
 ```bash
 ./current/intake.sh start      # background; waits for the startup confirmation
@@ -133,7 +168,7 @@ The audit record should read `"balance_status": "BALANCED"` with `consumed_count
 
 > **A handful of test messages will not appear immediately.** Production settings flush a batch on size (1000), on bytes, or at the quarter-hour partition boundary — so a dozen messages sit in the in-flight batch until the boundary passes. They are already consumed (the source queue shows depth 0) and they are not lost: a graceful `stop` drains them to disk immediately, which is a good way to see the whole path work in one minute. For sustained functional testing, use the test overlay in the test plan (`batch.size: 10`, `interval-ms: 5000`) via a `config/application.yml` with the complete binding block.
 
-## 6 — Upgrade and roll back
+## 7 — Upgrade and roll back
 
 Upgrading is deploy, stop, start:
 
@@ -155,7 +190,7 @@ ln -sfn releases/<previous-stamp> current
 
 **Rollback is always message-safe.** Anything unprocessed simply queues on MQ; landed files stay landed and audited. There is no data migration in either direction.
 
-## 7 — Where things are
+## 8 — Where things are
 
 | | |
 |---|---|
@@ -166,15 +201,18 @@ ln -sfn releases/<previous-stamp> current
 | `~/mq-intake/logs/current.log` | symlink to the log of the running instance |
 | `~/mq-intake/run/intake.pid` | pid of the running instance |
 
-## 8 — Troubleshooting
+## 9 — Troubleshooting
 
 | Symptom | Cause |
 |---|---|
 | `refuses to start … dev-placeholder defaults` | production mode is armed and `MQ_HOST`/`MQ_QUEUE_MANAGER`/`MQ_CHANNEL` are unset — the gate doing its job |
-| `Binding 'null' must specify mq-connection` | a partial binding override; copy the whole `bindings:` block (see §3) |
+| `Binding 'null' must specify mq-connection` | a partial binding override; copy the whole `bindings:` block (see §4) |
 | Preflight `MQRC 2035` on the connection | credential reference empty or wrong; check `MQ_CREDENTIAL_REF` and that `MQ_USER`/`MQ_PASSWORD` are exported |
 | Preflight `MQRC 2085` on a queue | the queue is not on the queue manager this connection reached — commonly a sibling QM in a pair |
 | Preflight `MQRC 2035` on a queue but not the connection | connected fine, but the account lacks the open option; on MQ, an authority profile's `*` matches one qualifier, so `MQ.ABC.*` does **not** cover `MQ.ABC.DEF.IN` — use `**` |
-| Started, but no `.seq` files | fewer than `batch.size` messages and the partition boundary has not passed (see §5) |
+| Started, but no `.seq` files | fewer than `batch.size` messages and the partition boundary has not passed (see §6) |
 | `status` shows health not answering | the process is still starting, or `SERVER_PORT` differs from the default 8080 — set `HEALTH_URL`/`METRICS_URL` in `env.sh` |
 | Service exits immediately | read `logs/current.log`; a startup gate names the exact cause on its first ERROR line |
+| `status` shows `jar_verified=NO` | the jar on disk is not the one deployed — a partial copy or a hand edit; redeploy |
+| Release shows `source=no-vcs` | expected on a build machine without git; add a `VERSION` file (§2) if you want a human-readable stamp |
+| Offline build fails on a missing artifact | `~/.m2` is incomplete for `-o`; re-prime it from a connected machine |

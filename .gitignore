@@ -30,3 +30,6 @@ mqjms.log*
 
 # Server environment file: holds credentials, never committed
 env.sh
+
+# Release stamp created on a build machine without version control
+VERSION
