@@ -31,6 +31,7 @@ public class IntakeProperties {
     private HdfsProperties hdfs = new HdfsProperties();
     private ShutdownProperties shutdown = new ShutdownProperties();
     private ReconciliationProperties reconciliation = new ReconciliationProperties();
+    private PreflightProperties preflight = new PreflightProperties();
 
     public List<BindingConfig> getBindings() {
         return bindings;
@@ -86,6 +87,45 @@ public class IntakeProperties {
 
     public void setHdfs(HdfsProperties hdfs) {
         this.hdfs = hdfs;
+    }
+
+    public PreflightProperties getPreflight() {
+        return preflight;
+    }
+
+    public void setPreflight(PreflightProperties preflight) {
+        this.preflight = preflight;
+    }
+
+    /**
+     * Diagnostic mode: probe each dependency, print a report, exit.
+     *
+     * <p>When enabled the runtime does not auto-start, so no listener thread
+     * is created and nothing is consumed — preflight is safe to run against
+     * an environment carrying live data.
+     */
+    public static class PreflightProperties {
+
+        private boolean enabled = false;
+
+        /** Groups to run — {@code mq}, {@code hdfs}, {@code app}; empty = all. */
+        private java.util.List<String> only = new java.util.ArrayList<>();
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public java.util.List<String> getOnly() {
+            return only;
+        }
+
+        public void setOnly(java.util.List<String> only) {
+            this.only = only;
+        }
     }
 
     public ReconciliationProperties getReconciliation() {

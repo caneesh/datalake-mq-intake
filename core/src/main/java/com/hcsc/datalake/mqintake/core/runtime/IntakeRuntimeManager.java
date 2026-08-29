@@ -451,6 +451,13 @@ public class IntakeRuntimeManager implements SmartLifecycle {
 
     @Override
     public boolean isAutoStartup() {
+        // Preflight probes dependencies and exits. Starting listeners would
+        // consume real messages from a real queue, which a diagnostic must
+        // never do.
+        if (properties.getPreflight().isEnabled()) {
+            log.info("Preflight mode: listeners will NOT start and nothing will be consumed");
+            return false;
+        }
         return true;
     }
 

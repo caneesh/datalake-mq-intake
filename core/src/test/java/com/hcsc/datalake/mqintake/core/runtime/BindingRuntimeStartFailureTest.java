@@ -64,6 +64,17 @@ class BindingRuntimeStartFailureTest {
                 BindingMetrics.noop(), 1_000) {
             @Override
             public void start() {
+                // Waits for the listener task to be genuinely running before
+                // failing. Without this the executor could be shut down by the
+                // abort path before its single thread had even picked the task
+                // up, and the test would race rather than prove anything.
+                try {
+                    if (!taskStarted.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("submitted task never started");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
                 throw new RejectedExecutionException("no threads left");
             }
         };

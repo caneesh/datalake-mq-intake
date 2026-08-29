@@ -142,6 +142,35 @@ java -jar rms/target/datalake-mq-intake-rms-*.jar    # add --spring.profiles.act
 
 ---
 
+## Part 2.5 — Preflight: probe each component before running anything
+
+Preflight connects to the real dependencies, checks one fact at a time, prints a report and exits. **It starts no listener, consumes no message, sends nothing to a queue another system reads, and writes only inside `_tmp/{instanceId}` (probe files are removed).** Safe against an environment carrying live data.
+
+```bash
+./preflight.sh rms              # every group
+./preflight.sh rms mq           # MQ only
+./preflight.sh rms hdfs         # HDFS only
+./preflight.sh rms app          # serializer, tracker builder, gate summary
+```
+
+Equivalent without the script: `java -jar rms/target/*.jar --intake.preflight.enabled=true [--preflight=mq]`. Exit status is 0 when everything passes and 1 otherwise, so a deployment pipeline can gate on it.
+
+### Test 0 — Preflight is clean
+
+Run it first, and after **any** environment change. It answers most of Part 1 in about a second, and its failures name the fix.
+
+| Group | Checks |
+|---|---|
+| `mq` | connect + authenticate; source queue opens for input; backout queue opens for output; tracker queue opens for output (TRACKED); backout queue browsable, with current depth |
+| `hdfs` | filesystem reachable and under which identity; landing path writable; `_tmp/{instance}` usable; audit path writable; **durability round trip** — write → hsync → close → rename → read-back, byte-compared |
+| `app` | production gates armed or not; serializer buildable and production-eligible; tracker builder buildable; a one-line summary of every control this binding runs with |
+
+**Pass:** `PREFLIGHT PASSED`, exit status 0.
+
+**The check to watch:** all three queue probes run on **one session of the connection the app will actually use**. That is what proves the tracker and backout queues live on the same queue manager as the source — the failure mode where a backout queue defined on a sibling QM stalls the binding on its first poison message, which no console inspection reveals. An `MQRC 2085` from `backout-queue.output` is exactly that, and the report says so.
+
+Run it once more with the real production-mode flag (`MQ_INTAKE_PRODUCTION=true`) to confirm the gates report as ARMED.
+
 ## Part 3 — Startup verification
 
 ### Test 1 — Clean startup
