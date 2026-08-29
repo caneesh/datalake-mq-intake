@@ -33,3 +33,6 @@ env.sh
 
 # Release stamp created on a build machine without version control
 VERSION
+
+# Deployment bundles
+dist/

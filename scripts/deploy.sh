@@ -35,6 +35,9 @@ usage: deploy.sh <rms|claims> <user@host> [remote-base-dir] [--fast]
 
 git is optional: releases are stamped from a VERSION file if present, from git
 if this is a working copy, and otherwise from the jar's sha256 alone.
+
+If this machine cannot reach the server at all, use scripts/bundle.sh instead
+and carry the archive across; it installs with the same installer.
 USAGE
     exit 2
 }
@@ -58,133 +61,43 @@ done
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+# One installer, two transports: deploy builds the same bundle that
+# scripts/bundle.sh produces for hand-carried transfers, ships it, and runs the
+# bundle's own install.sh on the far side. Anything else invites the two paths
+# to drift until only one of them is actually tested.
+BUNDLE_ARGS=("$MODULE")
+$FAST && BUNDLE_ARGS+=(--fast)
+$OFFLINE && BUNDLE_ARGS+=(--offline)
 
-# Source identity, best effort and honest about it. Build machines are not
-# required to have git — or a working copy, or network access to a remote —
-# so git is one source of an answer here, never a requirement. Order:
-# an explicit VERSION file, then git if this really is a repository, then
-# nothing. The jar checksum below is the identifier that always works.
-describe_source() {
-    if [[ -f "${REPO_ROOT}/VERSION" ]]; then
-        head -1 "${REPO_ROOT}/VERSION" | tr -d '\r\n'
-        return
-    fi
-    if command -v git > /dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir > /dev/null 2>&1; then
-        local rev dirty=""
-        rev=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
-        if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --quiet; then
-            dirty=" (uncommitted changes)"
-        fi
-        echo "git:${rev}${dirty}"
-        return
-    fi
-    echo "no-vcs (add a VERSION file at the repo root to stamp releases)"
-}
-SOURCE_ID=$(describe_source)
+STAGING="$(mktemp -d)"
+trap 'rm -rf "$STAGING"' EXIT
 
-echo "==> Building ${MODULE} — source: ${SOURCE_ID}"
-MVN_FLAGS=()
-$OFFLINE && { MVN_FLAGS+=(-o); echo "    maven OFFLINE (-o): resolving from the local ~/.m2 only"; }
-if $FAST; then
-    echo "    tests SKIPPED (--fast)"
-    mvn -q "${MVN_FLAGS[@]}" clean install -pl "$MODULE" -am -DskipTests
-else
-    mvn -q "${MVN_FLAGS[@]}" clean install
-fi
-
-JAR=$(ls "${MODULE}"/target/datalake-mq-intake-"${MODULE}"-*.jar 2>/dev/null | head -1 || true)
-[[ -n "$JAR" ]] || { echo "no jar produced for ${MODULE}" >&2; exit 1; }
-
-# The checksum is the release's real identity: it names the exact bytes, which
-# a revision id cannot, and it lets the server prove later that the jar it is
-# running is the one that left this machine intact.
-JAR_SHA=$(sha256sum "$JAR" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$JAR" | cut -d' ' -f1)
-echo "    $(basename "$JAR")  ($(du -h "$JAR" | cut -f1))  sha256:${JAR_SHA:0:16}…"
+"${REPO_ROOT}/scripts/bundle.sh" "${BUNDLE_ARGS[@]}" -o "$STAGING"
+ARCHIVE=$(ls "$STAGING"/*.tar.gz | head -1)
+[[ -n "$ARCHIVE" ]] || { echo "bundle step produced no archive" >&2; exit 1; }
 
 # Resolve the remote base once, so ~ and $HOME behave the same everywhere.
 REMOTE_BASE_RESOLVED=$(ssh "$TARGET" "eval echo \"$REMOTE_BASE\"")
-RELEASE="${REMOTE_BASE_RESOLVED}/releases/${STAMP}"
 
-echo "==> Preparing ${TARGET}:${REMOTE_BASE_RESOLVED}"
-ssh "$TARGET" "mkdir -p '${RELEASE}' '${REMOTE_BASE_RESOLVED}/config' '${REMOTE_BASE_RESOLVED}/logs' '${REMOTE_BASE_RESOLVED}/run'"
+echo "==> Shipping $(basename "$ARCHIVE") to ${TARGET}"
+REMOTE_TMP=$(ssh "$TARGET" "mktemp -d")
+scp -q "$ARCHIVE" "${TARGET}:${REMOTE_TMP}/"
 
-echo "==> Uploading"
-scp -q "$JAR" "${TARGET}:${RELEASE}/app.jar"
-scp -q "${REPO_ROOT}/scripts/server/intake.sh" "${TARGET}:${RELEASE}/intake.sh"
-ssh "$TARGET" "chmod +x '${RELEASE}/intake.sh'"
-
-# Release metadata, so 'what is actually running' is answerable on the server.
-ssh "$TARGET" "cat > '${RELEASE}/RELEASE' <<EOF
-module=${MODULE}
-source=${SOURCE_ID}
-jar=$(basename "$JAR")
-jar_sha256=${JAR_SHA}
-built_by=$(whoami)@$(hostname)
-deployed_at=${STAMP}
-tests=$($FAST && echo skipped || echo run)
-EOF"
-
-# Prove the bytes survived the copy. A truncated scp produces a jar that
-# starts and then fails somewhere unhelpful; catching it here costs a second.
-REMOTE_SHA=$(ssh "$TARGET" "sha256sum '${RELEASE}/app.jar' 2>/dev/null | cut -d' ' -f1 || shasum -a 256 '${RELEASE}/app.jar' | cut -d' ' -f1")
-if [[ "$REMOTE_SHA" != "$JAR_SHA" ]]; then
-    echo "TRANSFER CORRUPTED: local ${JAR_SHA} != remote ${REMOTE_SHA}" >&2
-    echo "The release was NOT activated. Re-run the deploy." >&2
-    exit 1
-fi
-echo "    checksum verified on the server"
-
-# First deploy only: seed the environment file and leave it for the operator.
-# Never overwritten — it holds credentials and environment specifics that must
-# survive every subsequent deployment.
-if ssh "$TARGET" "[ -f '${REMOTE_BASE_RESOLVED}/env.sh' ]"; then
-    echo "    env.sh present — left untouched"
-else
-    scp -q "${REPO_ROOT}/scripts/server/env.sh.example" "${TARGET}:${REMOTE_BASE_RESOLVED}/env.sh"
-    ssh "$TARGET" "chmod 600 '${REMOTE_BASE_RESOLVED}/env.sh'"
-    echo "    env.sh seeded from template — EDIT IT BEFORE STARTING"
-    SEEDED_ENV=true
-fi
-
-echo "==> Activating release"
-ssh "$TARGET" "ln -sfn '${RELEASE}' '${REMOTE_BASE_RESOLVED}/current'"
-
-# Keep the last 5 releases: enough to roll back through a bad week, few enough
-# not to fill a modest /home.
-ssh "$TARGET" "cd '${REMOTE_BASE_RESOLVED}/releases' && ls -1t | tail -n +6 | xargs -r rm -rf"
-
-RUNNING=$(ssh "$TARGET" "'${REMOTE_BASE_RESOLVED}/current/intake.sh' is-running >/dev/null 2>&1 && echo yes || echo no")
+echo "==> Installing on ${TARGET}:${REMOTE_BASE_RESOLVED}"
+# The installer verifies the bundle's own checksums, so a transfer that lost
+# bytes fails there rather than at first start.
+ssh "$TARGET" "set -e
+    cd '${REMOTE_TMP}'
+    tar xzf '$(basename "$ARCHIVE")'
+    cd \"\$(basename '$(basename "$ARCHIVE")' .tar.gz)\"
+    ./install.sh '${REMOTE_BASE_RESOLVED}'
+    rm -rf '${REMOTE_TMP}'"
 
 cat <<EOF
 
 ==> Deployed ${MODULE} to ${TARGET}:${REMOTE_BASE_RESOLVED}
-    source ${SOURCE_ID}, sha256 ${JAR_SHA}
-
-Next, on the server:
 
   ssh ${TARGET}
   cd ${REMOTE_BASE_RESOLVED}
-EOF
 
-if [[ "${SEEDED_ENV:-false}" == "true" ]]; then
-    cat <<EOF
-  vi env.sh                 # REQUIRED: queues, hosts, paths, credential ref
 EOF
-fi
-
-cat <<EOF
-  ./current/intake.sh preflight     # prove MQ + HDFS before consuming anything
-  ./current/intake.sh start
-  ./current/intake.sh status
-EOF
-
-if [[ "$RUNNING" == "yes" ]]; then
-    cat <<EOF
-
-NOTE: a service is currently RUNNING from the previous release. This deploy did
-      not touch it. To adopt the new release:
-        ./current/intake.sh stop     # graceful: drains and commits in flight
-        ./current/intake.sh start
-EOF
-fi

@@ -10,7 +10,9 @@ How to get the intake service onto a test server and running against real IBM MQ
   mvn clean install                    releases/<stamp>/app.jar
         │                              current ──► releases/<stamp>
         │  scripts/deploy.sh           config/     your overrides
-        └────── scp/ssh ──────────►    env.sh      environment + secrets (chmod 600)
+        ├────── scp/ssh ──────────►    env.sh      environment + secrets (chmod 600)
+        │  scripts/bundle.sh
+        └── tar.gz ─ any medium ──►    (install.sh, same installer)
                                        logs/  run/
                                              │
                                              ├── preflight  → proves MQ + HDFS
@@ -82,6 +84,30 @@ It builds (running the full test suite), uploads the jar and the control script 
 **What deploy deliberately does not do:** start anything, stop anything, or overwrite `config/` and `env.sh`. A deploy must never restart a live consumer by surprise, and must never clobber the file holding credentials. If a service is already running from the previous release, deploy says so and leaves it alone.
 
 Use `--fast` to skip the test suite while iterating (never for a deployment you intend to test against), and `--offline` if the build machine has no network — see §2.
+
+### If this machine cannot reach the server
+
+`deploy.sh` needs `ssh` to the target. When there is no route — a jump host you cannot script through, an air-gapped test environment, a change process that moves artifacts by ticket — build a bundle instead and carry it across by any means:
+
+```bash
+./scripts/bundle.sh rms                    # -> dist/mq-intake-rms-<stamp>.tar.gz (+ .sha256)
+./scripts/bundle.sh rms -o /mnt/transfer   # write it straight to the transfer medium
+```
+
+Then on the server, with nothing installed but Java:
+
+```bash
+sha256sum -c mq-intake-rms-<stamp>.tar.gz.sha256   # did it survive the journey?
+tar xzf mq-intake-rms-<stamp>.tar.gz
+cd mq-intake-rms-<stamp>
+./install.sh                                       # or: ./install.sh /opt/mq-intake
+```
+
+The bundle carries its own installer, control script, environment template and a `README.txt`, plus a `MANIFEST.sha256` that `install.sh` verifies before touching anything — a bundle that lost bytes in transit is refused with nothing installed, rather than producing a service that starts and fails obscurely later.
+
+**`deploy.sh` builds and installs this same bundle over ssh.** One installer, two transports: the hand-carried path is not a lesser sibling that nobody tests, it is the identical code with a different delivery. Both give you the same layout, the same guarantees (never start, never stop, never overwrite `env.sh` or `config/`), and the same rollback.
+
+Re-installing the same bundle is harmless — it replaces its own release directory and leaves your configuration alone.
 
 ## 4 — Configure the server (first deploy only)
 
@@ -200,6 +226,7 @@ ln -sfn releases/<previous-stamp> current
 | `~/mq-intake/env.sh` | environment and credentials, chmod 600; survives deploys |
 | `~/mq-intake/logs/current.log` | symlink to the log of the running instance |
 | `~/mq-intake/run/intake.pid` | pid of the running instance |
+| `dist/` (build machine) | bundles produced by `scripts/bundle.sh`, with `.sha256` sidecars |
 
 ## 9 — Troubleshooting
 
@@ -216,3 +243,4 @@ ln -sfn releases/<previous-stamp> current
 | `status` shows `jar_verified=NO` | the jar on disk is not the one deployed — a partial copy or a hand edit; redeploy |
 | Release shows `source=no-vcs` | expected on a build machine without git; add a `VERSION` file (§2) if you want a human-readable stamp |
 | Offline build fails on a missing artifact | `~/.m2` is incomplete for `-o`; re-prime it from a connected machine |
+| `CHECKSUM MISMATCH` from `install.sh` | the bundle lost bytes in transit; nothing was installed — copy it again |
