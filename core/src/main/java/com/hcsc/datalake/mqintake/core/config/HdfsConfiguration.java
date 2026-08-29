@@ -121,6 +121,19 @@ public class HdfsConfiguration {
         if (productionMode.isEnabled()
                 && "file".equals(scheme)
                 && !properties.getHdfs().isAllowLocalFilesystem()) {
+
+            // Preflight is the diagnostic that exists to *report* this, and it
+            // starts no listener, so nothing can land while it runs. Throwing
+            // here would kill the context before the report is printed and
+            // replace one actionable line with a page of Spring stack trace —
+            // and it would block an MQ-only run on a host where the cluster
+            // configuration is not in place yet.
+            if (properties.getPreflight().isEnabled()) {
+                log.warn("Filesystem resolved to '{}' — the LOCAL disk, not HDFS. Allowed only "
+                        + "because this is a preflight run; the hdfs checks report it.", fs.getUri());
+                return fs;
+            }
+
             throw new IllegalStateException(
                     "Production mode is enabled but the filesystem resolved to '" + fs.getUri()
                             + "' — the LOCAL disk, not HDFS. Point intake.hdfs.config-resources "

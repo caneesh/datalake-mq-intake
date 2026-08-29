@@ -65,6 +65,21 @@ class LocalFilesystemGateTest {
     }
 
     @Test
+    void preflightIsAllowedToStartSoItCanReportTheProblem() {
+        // Preflight starts no listener, so nothing can land on the wrong
+        // filesystem while it runs — and killing the context here would
+        // replace its one-line report with a page of Spring stack trace, on
+        // exactly the run whose job is to diagnose this.
+        IntakeProperties properties = new IntakeProperties();
+        properties.getPreflight().setEnabled(true);
+        new ApplicationContextRunner()
+                .withBean(IntakeProperties.class, () -> properties)
+                .withBean(ProductionMode.class, ProductionMode::enabled)
+                .withUserConfiguration(HdfsConfiguration.class)
+                .run(context -> assertThat(context.getStartupFailure()).isNull());
+    }
+
+    @Test
     void aConfigResourceThatDoesNotExistFailsLoudly() {
         // Silently ignoring a bad path would land us back on file:/// with the
         // operator believing the cluster was configured.
