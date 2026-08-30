@@ -48,7 +48,24 @@ public class HdfsConfiguration {
                 kerberos.getReloginIntervalMs()
         );
 
-        kerberosManager.initialize(hadoopConf);
+        try {
+            kerberosManager.initialize(hadoopConf);
+        } catch (KerberosManager.KerberosLoginException e) {
+            if (!properties.getPreflight().isEnabled()) {
+                throw e;
+            }
+            // A wrong keytab path is the likeliest thing to be wrong on a first
+            // deployment, and preflight is what an operator runs to find that
+            // out. Failing the context here buries one actionable line under
+            // six frames of Spring wrapping and prints no report at all — so
+            // during preflight the failure is carried into the report instead,
+            // where it is one line with a remedy. Nothing is consumed and
+            // nothing is written either way.
+            log.warn("Kerberos login failed: {} — reported by preflight rather than aborting",
+                    e.getMessage());
+            kerberosManager = null;
+            return null;
+        }
         log.info("Kerberos initialized: principal={}", kerberos.getPrincipal());
 
         return kerberosManager;

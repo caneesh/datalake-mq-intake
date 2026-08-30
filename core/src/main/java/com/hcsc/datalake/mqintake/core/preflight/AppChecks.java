@@ -30,8 +30,17 @@ public final class AppChecks {
                                                       ProductionMode productionMode,
                                                       RecordSerializerFactory serializerFactory,
                                                       TrackerMessageBuilderFactory trackerFactory) {
+        return forAllBindings(properties, productionMode, serializerFactory, trackerFactory, true);
+    }
+
+    public static List<PreflightCheck> forAllBindings(IntakeProperties properties,
+                                                      ProductionMode productionMode,
+                                                      RecordSerializerFactory serializerFactory,
+                                                      TrackerMessageBuilderFactory trackerFactory,
+                                                      boolean kerberosLoggedIn) {
         List<PreflightCheck> checks = new ArrayList<>();
         checks.add(productionGates(productionMode));
+        checks.add(kerberosIdentity(properties, kerberosLoggedIn));
         for (BindingConfig binding : properties.getBindings()) {
             checks.add(serializerBuildable(binding, serializerFactory, productionMode));
             checks.add(trackerBuildable(binding, trackerFactory));
@@ -51,6 +60,61 @@ public final class AppChecks {
                 }
                 return CheckOutcome.pass("not armed (development posture) — gates are advisory "
                         + "only; set the prod profile or MQ_INTAKE_PRODUCTION=true to arm them");
+            }
+        };
+    }
+
+    /**
+     * The identity every HDFS operation will run as.
+     *
+     * <p>Checked here rather than left to the first write because the two
+     * things most likely to be wrong on a first deployment — a keytab path
+     * that does not exist, and one that exists but is unreadable by the
+     * account this service runs as — are both silent until something tries to
+     * authenticate, and then surface as a stack trace rather than a sentence.
+     */
+    private static PreflightCheck kerberosIdentity(IntakeProperties properties,
+                                                   boolean loggedIn) {
+        return new MqChecks.AbstractCheck("app", "kerberos",
+                "the service can authenticate as the identity it will write with") {
+            @Override
+            public CheckOutcome run() {
+                IntakeProperties.KerberosProperties kerberos = properties.getKerberos();
+                if (!kerberos.isEnabled()) {
+                    return CheckOutcome.skip("disabled — the service will use simple "
+                            + "authentication, which a secured cluster rejects");
+                }
+                if (kerberos.getPrincipal() == null || kerberos.getPrincipal().isBlank()) {
+                    return CheckOutcome.fail("enabled but no principal configured",
+                            "Set intake.kerberos.principal (KERBEROS_PRINCIPAL).");
+                }
+                String keytabPath = kerberos.getKeytabPath();
+                if (keytabPath == null || keytabPath.isBlank()) {
+                    return CheckOutcome.fail("enabled but no keytab configured",
+                            "Set intake.kerberos.keytab-path (KERBEROS_KEYTAB_PATH).");
+                }
+                java.io.File keytab = new java.io.File(keytabPath);
+                if (!keytab.exists()) {
+                    return CheckOutcome.fail("keytab does not exist: " + keytab.getAbsolutePath(),
+                            "Check the path. If it is right, the file may live on a host this "
+                                    + "process is not running on.");
+                }
+                if (!keytab.canRead()) {
+                    return CheckOutcome.fail("keytab is not readable: " + keytab.getAbsolutePath(),
+                            "It is readable by someone — commonly the account that owns the "
+                                    + "application it was issued for, which may not be the "
+                                    + "account running this service. Grant read to this account "
+                                    + "or run as that one.");
+                }
+                if (!loggedIn) {
+                    return CheckOutcome.fail("login failed for " + kerberos.getPrincipal(),
+                            "The keytab is present and readable, so the principal or the realm "
+                                    + "is the problem: confirm the spelling against "
+                                    + "'klist -kt " + keytab.getAbsolutePath() + "', and that "
+                                    + "the KDC is reachable from this host.");
+                }
+                return CheckOutcome.pass("logged in as " + kerberos.getPrincipal()
+                        + " from " + keytab.getAbsolutePath());
             }
         };
     }

@@ -49,10 +49,16 @@ public class PreflightConfiguration {
                                            MqConnectionProvider mqConnections,
                                            RecordSerializerFactory serializerFactory,
                                            @Autowired(required = false)
-                                           TrackerMessageBuilderFactory trackerFactory) {
+                                           TrackerMessageBuilderFactory trackerFactory,
+                                           @Autowired(required = false)
+                                           com.hcsc.datalake.mqintake.core.security.KerberosManager
+                                                   kerberosManager) {
         List<PreflightCheck> checks = new ArrayList<>();
+        // A null manager with Kerberos enabled means the login failed and was
+        // deferred so this report could be printed at all.
+        boolean kerberosLoggedIn = kerberosManager != null;
         checks.addAll(AppChecks.forAllBindings(
-                properties, productionMode, serializerFactory, trackerFactory));
+                properties, productionMode, serializerFactory, trackerFactory, kerberosLoggedIn));
         checks.addAll(MqChecks.forAllBindings(properties, mqConnections));
         checks.addAll(HdfsChecks.forAllBindings(properties, fileSystem, instanceId.value()));
         return new PreflightRunner(checks, properties.getPreflight().getCheckTimeoutMs());
