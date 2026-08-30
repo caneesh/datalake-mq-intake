@@ -99,6 +99,20 @@ intake:
         # accumulate backout count too; a lower threshold would misroute them.
         # Set BOTHRESH on the queue manager to match.
         threshold: 14
+        # Suppress backout routing while failures are infrastructure-classified.
+        # Delivery count cannot tell a malformed message from a healthy one
+        # that sat in batches which rolled back because the landing path was
+        # unwritable; without this, such an outage diverts good messages to a
+        # queue that must then be replayed by hand. A genuine poison message
+        # still reaches the BOQ — its own failure classifies as message data,
+        # which opens the gate on the next redelivery.
+        #
+        # This matters more here than for RMS, not less. Claims carries the
+        # higher volume, and BISECT drives the threshold to 14, so an outage
+        # would spend far longer accumulating delivery counts across far more
+        # messages before anything was diverted — and divert far more when it
+        # finally was.
+        route-only-on-data-failures: true
         # Feeds the backout-depth gauge, which DESIGN §14 nominates as the
         # pager condition. Sampled by browsing (read-only, does not consume).
         # 0 disables the monitor and with it the alert.

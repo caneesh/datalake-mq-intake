@@ -99,7 +99,7 @@ Every variable, where it goes, and which preflight check proves it: **[Property 
 | `tracker.body-mode` | `FULL_COPY` | `CUSTOM` now fails loudly; `HEADER_ONLY` would drop payloads |
 | `tracker.fail-batch-on-error` | `false` (default) | legacy MDB parity — tracker failure never rolls back the message |
 | `backout.threshold` | 5 | keep in step with QM `BOTHRESH` (see §1) |
-| `backout.route-only-on-data-failures` | `true` (RMS only) | an infrastructure outage must not divert healthy messages to the BOQ |
+| `backout.route-only-on-data-failures` | `true` (both bindings) | an infrastructure outage must not divert healthy messages to the BOQ |
 | `reconciliation.enabled` | `true` | the post-write half of ABC |
 | `mq-connections.*.receive-timeout-ms` | positive (1000) | `receive(0)` waits forever and starves partition flush (**GATE**) |
 
@@ -159,4 +159,6 @@ Health endpoint semantics: `PARTIAL_OUTAGE` and `DEGRADED` return **HTTP 200** (
 
 ## Appendix — Claims application (deliberately limited this release)
 
-Separate deployment, separate process; nothing here affects RMS. Deploy with its shipped config: `LAND_ONLY`, `BISECT` degradation with `backout.threshold: 14` (matching `BOTHRESH(14)` on the real QM — verify like §1), reconciliation **disabled**, record index **off**, balance check **off**. Known and accepted: no per-message identity, no reconciliation/dedup/completeness guarantee. In production mode the placeholder-serializer gate refuses startup unless explicitly resolved — that is intentional; confirm the intended Claims posture with the data owners before arming production mode on the Claims app.
+Separate deployment, separate process; nothing here affects RMS. Deploy with its shipped config: `LAND_ONLY`, `BISECT` degradation with `backout.threshold: 14` (matching `BOTHRESH(14)` on the real QM — verify like §1), `route-only-on-data-failures: true`, reconciliation **disabled**, record index **off**, balance check **off**.
+
+The routing gate matters more here than for RMS, not less: Claims carries the higher volume and BISECT drives the threshold to 14, so a storage outage spends longer accumulating delivery counts across more messages before diverting anything — and diverts far more when it does. Preflight's `claims.controls` line reports `gated=true` when it is on. Known and accepted: no per-message identity, no reconciliation/dedup/completeness guarantee. In production mode the placeholder-serializer gate refuses startup unless explicitly resolved — that is intentional; confirm the intended Claims posture with the data owners before arming production mode on the Claims app.
