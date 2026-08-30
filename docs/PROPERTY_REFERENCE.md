@@ -71,9 +71,15 @@ All are set in `env.sh` unless the row says otherwise. "Differs" means the two e
 | `MQ_SOURCE_QUEUE` | differs | differs | |
 | `MQ_TRACKER_QUEUE` | differs | differs | RMS only; Claims ignores it |
 | `MQ_BACKOUT_QUEUE` | differs | differs | Must exist on the same QM |
-| `MQ_CREDENTIAL_REF` | same | same | `env:MQ_USER,MQ_PASSWORD` — a reference, not the secret |
+| `MQ_CREDENTIAL_REF` | same | same | `env:MQ_USER,MQ_PASSWORD` — a reference, not the secret. **One credential serves all three queues**, see below |
 | `MQ_USER` | differs | differs | |
 | `MQ_PASSWORD` | differs | differs | Never logged; `intake.sh config` prints `<set>` / `<unset>` only |
+
+> **One credential per binding, not one per queue.** JMS authenticates at the *connection*, and a listener thread's consumer, tracker producer and backout producer are all created from one transacted session on that connection — which is what makes a batch's consume, tracker send and backout put commit or roll back together. So the account named by `MQ_CREDENTIAL_REF` must hold GET on the source queue and PUT on the tracker and backout queues.
+>
+> If the legacy application uses a separate account for one of those queues, that is a WebSphere resource-definition convention, not necessarily an authority restriction — ask the MQ team whether the consuming account *can* be granted the missing authority before assuming it cannot. Splitting them in this service would mean a second connection outside the transaction, which breaks the atomicity above and is a change to the delivery guarantee, not a configuration option.
+>
+> Preflight answers it directly: `<binding>.tracker-queue.output` and `.backout-queue.output` open those queues as the configured account, and `MQRC 2035` there means exactly this.
 
 ### Storage and identity
 
