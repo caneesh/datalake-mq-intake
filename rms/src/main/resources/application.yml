@@ -73,7 +73,23 @@ intake:
     - id: rms
       mq-connection: primary
       source-queue: ${MQ_SOURCE_QUEUE:MQ.HPS.MEMBERSHIP.IN}
-      mode: TRACKED
+      # TRACKED is the production contract: every consumed message also puts a
+      # tracker message, in the same transaction.
+      #
+      # LAND_ONLY exists here for one situation — the account this service
+      # connects with does not yet hold PUT authority on the tracker queue.
+      # JMS authenticates at the connection, so the tracker producer uses the
+      # consumer's identity; without that authority the producer fails to open
+      # and every listener thread dies at session initialisation. The process
+      # still starts, reports health DOWN, and consumes nothing. LAND_ONLY
+      # skips creating the producer entirely, which lets the delivery path be
+      # tested while the authority is requested.
+      #
+      # It is a temporary posture, not a configuration choice: RMS in LAND_ONLY
+      # sends no tracker messages at all, so the downstream tracker sees
+      # nothing. Preflight prints the live value on the binding's `controls`
+      # line, and the deployment checklist gates cutover on it being TRACKED.
+      mode: ${RMS_BINDING_MODE:TRACKED}
       listener-threads: 4
       batch:
         # Sized against the BACKOUT queue's depth, not just MAXUMSGS. Backout

@@ -84,6 +84,7 @@ Every variable, where it goes, and which preflight check proves it: **[Property 
 - [ ] Production mode armed: Spring profile `prod`/`production` active **or** `MQ_INTAKE_PRODUCTION=true` **[preflight]** — `production-mode` reports ARMED. This is what arms every gate (dev-default, placeholder-serializer, tracker-contract). Without it the app runs in permissive dev posture.
 - [ ] `-Xmx` sized so that 512 MB of raw in-flight batches (4 listeners × 128 MB `batch.bytes`) fits under the memory validator's ceiling **with the real copy multiplier** — payload copies during normalization/serialization put realistic worst case at 1–1.5 GB. Recommend `-Xmx ≥ 4g`. (**GATE**: `AggregateMemoryRule` fails startup if the configured budget exceeds 50% of max heap.)
 - [ ] Container liveness probe → `/actuator/health/liveness` (ping only). Readiness/alerting → main health endpoint. Do **not** point the restart probe at the main endpoint.
+- [ ] **`RMS_BINDING_MODE` unset or `TRACKED`.** LAND_ONLY is the interim posture for when the connecting account lacks PUT on the tracker queue; in it RMS sends no tracker messages at all and the downstream tracker sees nothing. **[preflight]** — the binding's `controls` line prints `mode=`, and `tracker-builder` reports `skip` instead of naming the builder.
 - [ ] No legacy flat binding keys in any override layer (**GATE**: `LegacyBindingKeyDetector` fails startup naming each stale key and its replacement).
 
 ## 4 — Application configuration (verify in the deployed config, not just the repo)
