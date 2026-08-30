@@ -69,10 +69,20 @@ public final class AppChecks {
                             + " / " + serializer.getValueClass().getSimpleName();
                     if (serializer instanceof PlaceholderSerializer) {
                         String reason = ((PlaceholderSerializer) serializer).getPlaceholderReason();
+                        if (productionMode.isEnabled() && binding.isAcceptPlaceholderSerializer()) {
+                            // Deliberately not a silent pass: an accepted
+                            // limitation that stops being visible is one nobody
+                            // revisits.
+                            return CheckOutcome.pass(type + " is a PLACEHOLDER, ACCEPTED for "
+                                    + "production by configuration — " + reason);
+                        }
                         if (productionMode.isEnabled()) {
                             return CheckOutcome.fail(type + " is a PLACEHOLDER: " + reason,
-                                    "Production mode refuses to start with it. This binding "
-                                            + "cannot be promoted until the serializer is final.");
+                                    "Production mode refuses to start with it. Finalise the "
+                                            + "serializer, or set accept-placeholder-serializer "
+                                            + "on this binding to accept the consequences — "
+                                            + "narrower than disarming production mode, which "
+                                            + "also switches off the local-filesystem refusal.");
                         }
                         return CheckOutcome.skip(type + " is a placeholder (" + reason
                                 + ") — allowed outside production mode");

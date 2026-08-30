@@ -75,6 +75,23 @@ intake:
       source-queue: ${MQ_SOURCE_QUEUE:MQ.DMIH.CLAIMS.IN}
       mode: LAND_ONLY           # no tracker group for LAND_ONLY mode
       listener-threads: 4
+      # ClaimsRecordSerializer is a placeholder: the metadata placement of
+      # DESIGN §9.1 is not final and there is no confirmed identity field.
+      # Production mode refuses a placeholder by default; this accepts it for
+      # this binding only, so the rest of the production gates stay armed --
+      # in particular the refusal to write to a local filesystem, which is
+      # what stands between this service and landing data on the wrong disk.
+      #
+      # What is being accepted: the record format is not final, so data landed
+      # before it changes has to be reprocessed. That was already recorded as
+      # a known limitation of this release. Remove this line once the
+      # serializer is final.
+      #
+      # This is only ONE of the two production gates on claims. The other is
+      # claims.identity-field below, which this flag does not and must not
+      # bypass: accepting an unfinished format is a reversible cost, while
+      # reconciling on the wrong field produces confident, wrong answers.
+      accept-placeholder-serializer: ${CLAIMS_ACCEPT_PLACEHOLDER:true}
       batch:
         size: 8000              # ≤ MAXUMSGS for LAND_ONLY mode (unit of work is N)
         bytes: 134217728        # 128 MB
@@ -149,3 +166,14 @@ management:
         # never restart the pod.
         liveness:
           include: ping
+
+# The field that identifies a claims record, used by reconciliation and
+# de-duplication. Production startup is blocked until it is set: without it
+# there is nothing stable to compare landed records against.
+#
+# Candidates named in the design are CLM_XMITSN_ID and REC_CTL_NBR. Which one
+# is correct is a data-ownership decision (open item #17), not a configuration
+# default -- a field that is not genuinely unique and stable makes every
+# reconciliation result confidently wrong, which is worse than having none.
+claims:
+  identity-field: ${CLAIMS_IDENTITY_FIELD:}

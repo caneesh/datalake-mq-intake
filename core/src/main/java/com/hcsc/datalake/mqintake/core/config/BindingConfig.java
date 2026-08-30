@@ -33,6 +33,26 @@ public class BindingConfig {
     private Audit audit = new Audit();
     private Degradation degradation = new Degradation();
 
+    /**
+     * Accepts this binding's placeholder serializer in production mode.
+     *
+     * <p>A placeholder serializer is one whose output format is not final.
+     * Production mode refuses it by default, because data landed in a format
+     * that later changes has to be reprocessed, and a serializer with no
+     * identity field cannot be reconciled or de-duplicated at all.
+     *
+     * <p>Setting this accepts those consequences for one binding, deliberately
+     * and visibly, rather than disarming production mode wholesale — which
+     * would also switch off the dev-default connection gate, the tracker
+     * contract check, and the refusal to write to a local filesystem. Losing
+     * the last of those on a host that carries another cluster's configuration
+     * is a far worse trade than the one being made here.
+     *
+     * <p>The acceptance is logged at startup and reported by preflight; it is
+     * never silent.
+     */
+    private boolean acceptPlaceholderSerializer = false;
+
     /** Batch accumulation: when a unit of work is considered full. */
     public static class Batch {
 
@@ -418,6 +438,14 @@ public class BindingConfig {
 
     public void setDegradation(Degradation degradation) {
         this.degradation = degradation;
+    }
+
+    public boolean isAcceptPlaceholderSerializer() {
+        return acceptPlaceholderSerializer;
+    }
+
+    public void setAcceptPlaceholderSerializer(boolean acceptPlaceholderSerializer) {
+        this.acceptPlaceholderSerializer = acceptPlaceholderSerializer;
     }
 
     /**

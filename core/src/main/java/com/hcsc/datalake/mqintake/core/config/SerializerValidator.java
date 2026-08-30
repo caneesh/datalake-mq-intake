@@ -64,9 +64,24 @@ public class SerializerValidator {
                 PlaceholderSerializer placeholder = (PlaceholderSerializer) serializer;
                 String reason = placeholder.getPlaceholderReason();
 
-                if (productionMode) {
+                if (productionMode && binding.isAcceptPlaceholderSerializer()) {
+                    // Accepted deliberately, for this binding only, with every
+                    // other production gate still armed. Logged at error level
+                    // on purpose: it belongs in whatever an operator reads
+                    // first, not in the noise below it.
+                    log.error("Binding '{}' is running in production with PLACEHOLDER serializer "
+                                    + "{} because accept-placeholder-serializer is set: {}. Data "
+                                    + "landed in a format that later changes must be reprocessed, "
+                                    + "and without an identity field it cannot be reconciled or "
+                                    + "de-duplicated.",
+                            bindingId, serializer.getClass().getSimpleName(), reason);
+                } else if (productionMode) {
                     String error = String.format(
-                            "Binding '%s' uses placeholder serializer %s in production mode: %s",
+                            "Binding '%s' uses placeholder serializer %s in production mode: %s. "
+                                    + "Finalise the serializer, or set "
+                                    + "intake.bindings[].accept-placeholder-serializer=true to "
+                                    + "accept the consequences for this binding — which is a "
+                                    + "narrower thing to do than disarming production mode.",
                             bindingId, serializer.getClass().getSimpleName(), reason);
                     errors.add(error);
                     log.error(error);

@@ -36,6 +36,61 @@ class SerializerValidatorTest {
     }
 
     @Test
+    void theRefusalNamesTheNarrowerWayOut() {
+        // An operator told only "refused" reaches for MQ_INTAKE_PRODUCTION=false,
+        // which also switches off the local-filesystem refusal — trading a
+        // format limitation for the risk of landing data on the wrong disk.
+        RecordSerializerFactory factory = config -> new TestPlaceholderSerializer();
+        SerializerValidator validator = new SerializerValidator(factory, true);
+
+        List<String> errors = validator.validateBindings(List.of(createTestConfig("test-binding")));
+
+        assertThat(errors.get(0)).contains("accept-placeholder-serializer");
+    }
+
+    @Test
+    void anExplicitlyAcceptedPlaceholderIsAllowedInProduction() {
+        RecordSerializerFactory factory = config -> new TestPlaceholderSerializer();
+        SerializerValidator validator = new SerializerValidator(factory, true);
+
+        BindingConfig config = createTestConfig("test-binding");
+        config.setAcceptPlaceholderSerializer(true);
+
+        assertThat(validator.validateBindings(List.of(config))).isEmpty();
+    }
+
+    @Test
+    void acceptanceAppliesToOneBindingOnly() {
+        // The escape is per binding on purpose. A second binding that never
+        // asked for it must still be refused, or one team's accepted
+        // limitation silently becomes everyone's.
+        RecordSerializerFactory factory = config -> new TestPlaceholderSerializer();
+        SerializerValidator validator = new SerializerValidator(factory, true);
+
+        BindingConfig accepted = createTestConfig("accepted");
+        accepted.setAcceptPlaceholderSerializer(true);
+        BindingConfig other = createTestConfig("other");
+
+        List<String> errors = validator.validateBindings(List.of(accepted, other));
+
+        assertThat(errors).hasSize(1);
+        assertThat(errors.get(0)).contains("other");
+    }
+
+    @Test
+    void acceptanceDoesNothingForAProductionSerializer() {
+        // Setting it on a binding that does not need it must not become a
+        // habit that hides a later regression to a placeholder.
+        RecordSerializerFactory factory = config -> new TestProductionSerializer();
+        SerializerValidator validator = new SerializerValidator(factory, true);
+
+        BindingConfig config = createTestConfig("test-binding");
+        config.setAcceptPlaceholderSerializer(true);
+
+        assertThat(validator.validateBindings(List.of(config))).isEmpty();
+    }
+
+    @Test
     void nonProductionModeAllowsPlaceholderSerializer() {
         RecordSerializerFactory factory = config -> new TestPlaceholderSerializer();
         SerializerValidator validator = new SerializerValidator(factory, false);
