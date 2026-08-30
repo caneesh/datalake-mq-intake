@@ -67,6 +67,48 @@ Setting a Hadoop property override from `env.sh`:
 export JAVA_OPTS="$JAVA_OPTS -Dintake.hdfs.properties.dfs.client.use.datanode.hostname=true"
 ```
 
+## The shape of the deployment
+
+Two applications, two `env.sh` files, two processes. **The real values live in `env.sh` on the server** — chmod 600, never committed. What is recorded here is the shape, because that is what has to be true regardless of the values.
+
+| | RMS | Claims |
+|---|---|---|
+| Queue manager | `<rms-qm>` | `<claims-qm>` — **a different one** |
+| MQ host | `<rms-mq-host>` | `<claims-mq-host>` |
+| Port, channel | shared between both | shared between both |
+| Source queue | `<rms-source>` | `<claims-source>` |
+| Tracker queue | `<rms-tracker>` — **on the RMS queue manager** | none (`LAND_ONLY`) |
+| Backout queue | `<rms-source>.BO` | `<claims-source>.BO` |
+| MQ credential | `<rms-account>` | `<claims-account>` — may differ |
+| Landing root | `<membership-root>` | `<claims-root>` |
+| Binding mode | `TRACKED` (interim: `LAND_ONLY`) | `LAND_ONLY` |
+
+Shared by both, from the legacy application's own configuration:
+
+| Variable | Shape |
+|---|---|
+| `HDFS_CONFIG_RESOURCES` | the target cluster's conf directory |
+| `HDFS_EXPECTED_NAMESERVICE` | that cluster's `dfs.nameservices` value |
+| `HDFS_AUDIT_BASE_PATH` | one base for both — see below |
+| `KERBEROS_PRINCIPAL` / `KERBEROS_KEYTAB_PATH` | one identity for both |
+
+### Why the audit base can be shared
+
+`AuditPaths.bindingDir()` appends the binding id, so one base serves both applications without collision:
+
+```
+<audit-base>/rms/YYYY-MM-DD/…
+<audit-base>/claims/YYYY-MM-DD/…
+```
+
+RMS's reconciliation reads only its own subtree. **This path has no counterpart in the legacy application**, which is exactly why it gets forgotten: nobody has created it, and `mkdirs` will only succeed if the principal may write in its parent — usually not, for a top-level directory. Request it explicitly, created and chowned, in the same conversation as the write grants on the landing roots.
+
+It is also fail-closed. The audit record is written before every commit, so an unwritable audit path does not degrade — it stops ingestion at the first batch. That is deliberate; an unaudited commit is worse than a stalled one.
+
+### Two queue managers is not a problem
+
+Each application is its own process with its own `env.sh` and its own connection, so nothing is shared between them. What matters is the constraint *within* each: a binding's source, tracker and backout queues must all live on the queue manager that binding connects to, because all three are opened from one transacted session. Preflight proves it per application.
+
 ## DataNodes: why NameNode connectivity proves nothing
 
 An HDFS write does not go to the NameNode. The client asks the NameNode where to write, receives a **pipeline of DataNode addresses**, and connects directly to those DataNodes. A host can reach the NameNode perfectly and fail every single write.
