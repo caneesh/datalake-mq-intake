@@ -40,7 +40,7 @@ grep -n "dfs.nameservices" <odp-conf-dir>/hdfs-site.xml
 
 | WebSphere property | Set in intake as | Notes |
 |---|---|---|
-| `odp.conf.dir` | `HDFS_CONFIG_RESOURCES` | Same directory. We load `core-site.xml` and `hdfs-site.xml` from it by absolute path |
+| `odp.hadoop.conf.dir` | `HDFS_CONFIG_RESOURCES` | Same directory. We load `core-site.xml` and `hdfs-site.xml` from it by absolute path |
 | `odp.expected.nameservice.prefix` | `HDFS_EXPECTED_NAMESERVICE` | Same semantics: `fs.defaultFS` must contain it |
 | `odp.principal` | `KERBEROS_PRINCIPAL` | Plus `KERBEROS_ENABLED=true`, which is off by default |
 | `odp.keytab` | `KERBEROS_KEYTAB_PATH` | Must be readable by the account running *this* service, which may not be the WebSphere account |
@@ -48,6 +48,7 @@ grep -n "dfs.nameservices" <odp-conf-dir>/hdfs-site.xml
 | — | `HDFS_AUDIT_BASE_PATH` | **No WebSphere equivalent.** New path, must exist and be writable — the audit is fail-closed and stops ingestion if it is not |
 | `conf.set("dfs.client.use.datanode.hostname","true")` in `createOdpConfiguration` | `-Dintake.hdfs.properties.dfs.client.use.datanode.hostname=true` | The legacy code sets it unconditionally, so assume this environment needs it |
 | `conf.set("fs.hdfs.impl", …)`, `fs.AbstractFileSystem.hdfs.impl` | nothing to port | Only needed because that code uses `new Configuration(false)`. Applies here solely if you enable `intake.hdfs.isolate-configuration` |
+| `odp.enabled` | nothing to port | That flag exists because the legacy application writes to two clusters. This service writes to one, and it is required — there is no disabled mode |
 | `hadoop.security.authentication` | nothing to port | `KerberosManager` sets it before login |
 | `UserGroupInformation.setLoginUser(ugi)` | nothing to port | Separate JVM; `loginUserFromKeytab` already establishes the login user |
 | `java.security.krb5.conf` (if set on the WAS JVM) | `-Djava.security.krb5.conf=<path>` in `JAVA_OPTS` | Only if the host's default `/etc/krb5.conf` is not the one that works |
@@ -141,7 +142,7 @@ export MQ_USER=<service account>
 export MQ_PASSWORD=<secret>
 
 # ---- Target cluster (values from the working WebSphere configuration) ----
-export HDFS_CONFIG_RESOURCES=<odp.conf.dir>
+export HDFS_CONFIG_RESOURCES=<odp.hadoop.conf.dir>
 export HDFS_EXPECTED_NAMESERVICE=<odp.expected.nameservice.prefix>
 export HDFS_BASE_PATH=<odp.root.directory or the agreed landing path>
 export HDFS_AUDIT_BASE_PATH=<new audit path>
