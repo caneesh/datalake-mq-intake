@@ -51,7 +51,7 @@ The cluster-side values do not have to be requested: the WebSphere application o
 | Property | Environment variable | Required | Purpose |
 |---|---|---|---|
 | `intake.hdfs.config-resources` | `HDFS_CONFIG_RESOURCES` | **Yes** | Target cluster's conf directory, or the two XML files directly. Missing entries fail startup |
-| `intake.hdfs.expected-nameservice` | `HDFS_EXPECTED_NAMESERVICE` | **Strongly recommended** | `fs.defaultFS` must contain it. The wrong-cluster guard |
+| `intake.hdfs.expected-nameservice` | `HDFS_EXPECTED_NAMESERVICE` | **Yes** | `fs.defaultFS` must contain it. The wrong-cluster guard, and the whole reason this deployment is different |
 | `intake.hdfs.properties` | `-D` via `JAVA_OPTS`, or `config/application.yml` | Conditional | Hadoop keys the cluster XML does not carry. See DataNodes below |
 | `intake.hdfs.isolate-configuration` | — | Optional | `new Configuration(false)`. Default `false` |
 | `intake.kerberos.enabled` | `KERBEROS_ENABLED` | **Yes** — must be `true` | Off by default; a secured cluster rejects you without it |

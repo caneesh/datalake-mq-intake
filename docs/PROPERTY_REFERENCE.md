@@ -75,8 +75,8 @@ All are set in `env.sh` unless the row says otherwise. "Differs" means the two e
 
 | Variable | Test | Prod | Notes |
 |---|---|---|---|
-| `HDFS_CONFIG_RESOURCES` | differs if the clusters differ | | The target cluster's conf directory. **Without it Hadoop resolves `file:///` and writes to local disk** |
-| `HDFS_EXPECTED_NAMESERVICE` | differs if the clusters differ | | The one check that distinguishes two clusters. Everything else passes against either |
+| `HDFS_CONFIG_RESOURCES` | required | required | The target cluster's conf directory; differs whenever test and production target different clusters. **Without it Hadoop resolves `file:///` and writes to local disk** |
+| `HDFS_EXPECTED_NAMESERVICE` | required | required | Must match the cluster `HDFS_CONFIG_RESOURCES` points at. The one check that distinguishes two clusters — everything else passes against either |
 | `HDFS_BASE_PATH` | differs | differs | Landing root, must exist and be writable by the principal |
 | `HDFS_AUDIT_BASE_PATH` | differs | differs | Created if absent; unwritable stops ingestion at the first batch |
 | `KERBEROS_ENABLED` | `true` | `true` | Defaults to `false`. A secured cluster rejects you without it |

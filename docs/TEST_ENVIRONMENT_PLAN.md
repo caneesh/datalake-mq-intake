@@ -91,7 +91,16 @@ export MQ_TRACKER_QUEUE=<real tracker queue>
 export MQ_BACKOUT_QUEUE=<real backout queue>
 export HDFS_BASE_PATH=<real landing path>
 export HDFS_AUDIT_BASE_PATH=<real audit path>
+
+# Which cluster, and the assertion that it is the right one. Hadoop finds
+# core-site.xml on the classpath, and `java -jar` puts only the application
+# jar there -- so without the first line fs.defaultFS falls back to file:///
+# and the whole test lands on the server's local disk while reporting healthy.
+export HDFS_CONFIG_RESOURCES=<target cluster conf dir>
+export HDFS_EXPECTED_NAMESERVICE=<target cluster nameservice>
 ```
+
+The second line is what makes a wrong conf directory detectable. It matters most on a host that already runs another Hadoop client, where the wrong path is a live cluster that accepts every write — connection, permissions, durability and audit all pass against it, and only `filesystem.nameservice` can tell the difference. Preflight reports it as `SKIP` when unset, and a skip here is not a pass.
 
 > `INTAKE_BINDINGS_0_SOURCE_QUEUE` does **not** work, and neither does `--intake.bindings[0].source-queue`: Spring takes a whole collection from a single source, so one indexed override wipes the rest of the binding (`Binding 'null' must specify mq-connection`). Verified. To change batch sizes or thresholds, use a config file with the complete `bindings:` block — see `docs/TEST_DEPLOYMENT_GUIDE.md`.
 
