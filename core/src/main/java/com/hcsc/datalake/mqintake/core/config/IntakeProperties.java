@@ -111,6 +111,24 @@ public class IntakeProperties {
         /** Groups to run — {@code mq}, {@code hdfs}, {@code app}; empty = all. */
         private java.util.List<String> only = new java.util.ArrayList<>();
 
+        /**
+         * How long a single check may take before it is reported as timed out.
+         *
+         * <p>Unreachable dependencies do not fail quickly — Hadoop retries an
+         * unresolvable NameNode, and a dropped TCP connect waits on the socket.
+         * Without a bound the diagnostic hangs on exactly the environment it
+         * was run to diagnose.
+         */
+        private long checkTimeoutMs = 30_000;   // PreflightRunner.DEFAULT_CHECK_TIMEOUT_MS
+
+        public long getCheckTimeoutMs() {
+            return checkTimeoutMs;
+        }
+
+        public void setCheckTimeoutMs(long checkTimeoutMs) {
+            this.checkTimeoutMs = checkTimeoutMs;
+        }
+
         public boolean isEnabled() {
             return enabled;
         }

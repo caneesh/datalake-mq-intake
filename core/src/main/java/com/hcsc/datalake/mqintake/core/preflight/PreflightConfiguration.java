@@ -55,7 +55,7 @@ public class PreflightConfiguration {
                 properties, productionMode, serializerFactory, trackerFactory));
         checks.addAll(MqChecks.forAllBindings(properties, mqConnections));
         checks.addAll(HdfsChecks.forAllBindings(properties, fileSystem, instanceId.value()));
-        return new PreflightRunner(checks);
+        return new PreflightRunner(checks, properties.getPreflight().getCheckTimeoutMs());
     }
 
     @Bean

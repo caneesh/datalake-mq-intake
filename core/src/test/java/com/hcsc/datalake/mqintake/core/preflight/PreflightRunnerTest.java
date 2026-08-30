@@ -24,6 +24,67 @@ class PreflightRunnerTest {
     }
 
     @Test
+    void aCheckThatNeverAnswersIsReportedAsATimeout() throws Exception {
+        // An unreachable dependency does not fail fast: Hadoop retries a
+        // NameNode it cannot resolve, and a dropped TCP connect sits on the
+        // socket. Without a bound, the diagnostic hangs on exactly the
+        // environment it was run to diagnose.
+        java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+        PreflightCheck hangs = new MqChecks.AbstractCheck("hdfs", "hangs", "never answers") {
+            @Override
+            public CheckOutcome run() {
+                entered.countDown();
+                try {
+                    Thread.sleep(Long.MAX_VALUE);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return CheckOutcome.pass("never reached");
+            }
+        };
+
+        long startedMs = System.currentTimeMillis();
+        PreflightReport report = new PreflightRunner(List.of(hangs), 250).run(Set.of());
+        long tookMs = System.currentTimeMillis() - startedMs;
+
+        assertThat(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                .as("the check should have been started").isTrue();
+        assertThat(report.hasFailures()).isTrue();
+        assertThat(report.getEntries().get(0).getOutcome().getDetail())
+                .contains("did not answer within");
+        assertThat(report.getEntries().get(0).getOutcome().getRemedy())
+                .contains("firewall is dropping packets");
+        assertThat(tookMs)
+                .as("the report must arrive on the operator's timescale, not the socket's")
+                .isLessThan(10_000);
+    }
+
+    @Test
+    void aTimeoutDoesNotStopTheRemainingChecks() {
+        PreflightCheck hangs = new MqChecks.AbstractCheck("hdfs", "hangs", "never answers") {
+            @Override
+            public CheckOutcome run() {
+                try {
+                    Thread.sleep(Long.MAX_VALUE);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return CheckOutcome.pass("never reached");
+            }
+        };
+
+        // Each check gets its own thread, so a stuck one must not leave the
+        // rest queued behind it — the checks after a dead NameNode are often
+        // the ones that explain why it is dead.
+        PreflightReport report = new PreflightRunner(
+                List.of(hangs, check("mq", "after", CheckOutcome.pass("fine"))), 250)
+                .run(Set.of());
+
+        assertThat(report.count(CheckOutcome.Status.FAIL)).isEqualTo(1);
+        assertThat(report.count(CheckOutcome.Status.PASS)).isEqualTo(1);
+    }
+
+    @Test
     void runsEveryCheckEvenAfterOneFails() {
         AtomicInteger ran = new AtomicInteger();
         PreflightCheck counting = new MqChecks.AbstractCheck("hdfs", "later", "runs last") {

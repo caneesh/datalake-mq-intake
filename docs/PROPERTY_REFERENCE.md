@@ -121,6 +121,8 @@ Any Hadoop key can be set this way; it is applied after the site files and overr
 
 Run `preflight mq` first: it needs none of the storage values, so it is useful before the cluster side is settled.
 
+**A check that cannot reach its dependency does not fail quickly.** Hadoop retries a NameNode it cannot resolve, and a firewall that drops packets rather than refusing them leaves a TCP connect waiting on the socket. Each check is therefore bounded at 30s and reported as `did not answer within 30s`, which is itself diagnostic: it means the address resolved but nothing answered. Lower it with `--intake.preflight.check-timeout-ms=<ms>` when probing an environment you expect to be unreachable, since every storage check pays the timeout separately.
+
 ## Worked `env.sh`
 
 Identical in shape for test and production; only the values differ. Copy from `env.sh.example`, never from another environment's live file.

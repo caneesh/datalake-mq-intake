@@ -87,8 +87,10 @@ cmd_preflight() {
     require_java
     local group="${1:-}"
     local args=(--intake.preflight.enabled=true)
-    # Must be intake.preflight.only: a bare --preflight= binds to nothing, so
-    # the filter would be ignored and every group would run regardless.
+    # Either form works: PreflightConfiguration reads --preflight=<group> from
+    # the application arguments and unions it with intake.preflight.only. The
+    # property form is used here because it is the one a config file or
+    # manifest can also set.
     [[ -n "$group" ]] && args+=(--intake.preflight.only="$group")
     echo "Preflight — probing dependencies. Nothing is consumed and nothing is started."
     # Exit status propagates: 0 clean, 1 if any check failed.
