@@ -44,7 +44,10 @@ grep -n "dfs.nameservices" <odp-conf-dir>/hdfs-site.xml
 | `odp.expected.nameservice.prefix` | `HDFS_EXPECTED_NAMESERVICE` | Same semantics: `fs.defaultFS` must contain it |
 | `odp.principal` | `KERBEROS_PRINCIPAL` | Plus `KERBEROS_ENABLED=true`, which is off by default |
 | `odp.keytab` | `KERBEROS_KEYTAB_PATH` | Must be readable by the account running *this* service, which may not be the WebSphere account |
-| `odp.root.directory` | `HDFS_BASE_PATH` | The landing root for the binding |
+| `<binding>RootDirectory` (e.g. the claims / membership root properties) | `HDFS_BASE_PATH` | The landing root, per binding. **The root transfers; the layout underneath it does not** — see [the layout comparison](WEBSPHERE_HOST_DEPLOYMENT.md#where-the-files-land-and-how-that-differs-from-the-legacy-feed) |
+| `user` (HDFS user) | nothing to port | **Not the same as the principal.** With Kerberos the effective user is the principal's short name; there is no proxy-user support. Confirm that user can write both roots |
+| `namenodes` (host:port list) | nothing to port | We resolve the NameNodes from the conf directory's HA configuration instead. Still worth having for the firewall request |
+| `fileCloseInterval`, `fileNameBuildertype`, `timeFormat`, `fileName` | nothing to port | Legacy partitioning and naming. This service has its own, and they do not match |
 | — | `HDFS_AUDIT_BASE_PATH` | **No WebSphere equivalent.** New path, must exist and be writable — the audit is fail-closed and stops ingestion if it is not |
 | `conf.set("dfs.client.use.datanode.hostname","true")` in `createOdpConfiguration` | `-Dintake.hdfs.properties.dfs.client.use.datanode.hostname=true` | The legacy code sets it unconditionally, so assume this environment needs it |
 | `conf.set("fs.hdfs.impl", …)`, `fs.AbstractFileSystem.hdfs.impl` | nothing to port | Only needed because that code uses `new Configuration(false)`. Applies here solely if you enable `intake.hdfs.isolate-configuration` |

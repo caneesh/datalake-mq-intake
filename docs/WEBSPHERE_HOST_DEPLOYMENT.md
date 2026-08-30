@@ -78,6 +78,40 @@ Two consequences for the network request:
 - Firewall rules must cover **every DataNode**, not just the NameNodes.
 - **Forward and reverse DNS** must work for every DataNode from this host. Reverse lookups matter beyond routing: Kerberos service-principal matching uses them.
 
+## Where the files land, and how that differs from the legacy feed
+
+The legacy application writes to the same cluster, so the landing roots can be lifted from its properties. **The layout underneath them cannot.** These are different feeds sharing a tree, not a drop-in replacement, and the difference is invisible until a downstream consumer looks in the wrong directory.
+
+| | Legacy | This service |
+|---|---|---|
+| Partition path | `<root>/YYYY/MM/dd/HH/mm` | `<root>/year=YYYY/month=MM/day=DD/hour=HH/quarter=Q` |
+| Time zone | Not stated in its config — verify; a bare `timeFormat` is the JVM default, i.e. server local | **UTC**, always |
+| Quarter encoding | Minute of the boundary (`00`/`15`/`30`/`45`) | `quarter=0..3` |
+| File name | `messages…` / `HPSmessages…` (configured) | `{binding}_{instance}_{epochMs}_{batchSeq}.seq` |
+| Close trigger | Fixed interval (`fileCloseInterval`) | Batch full, batch interval, or partition boundary |
+
+Two consequences worth settling before cutover, both with the data owners rather than in code:
+
+- **A consumer globbing `messages*` or walking `YYYY/MM/dd` will not see our output.** Nothing errors; the files are simply somewhere else under a different name.
+- **If the time zones differ, the same wall-clock hour is a different directory.** For a cluster whose consumers assume local time, UTC partitions are shifted by the host's offset — which looks like missing data for part of every day, and duplicated data at the boundary.
+
+Reconciliation is unaffected either way: it only enumerates `year=…/quarter=N` directories and only files ending `.seq`, so legacy files in the same tree are never read and never classified as orphans. Verified in `PartitionReconciliationService` and `OrphanFileClassifier`.
+
+Landing in a **separate root** during parallel running keeps the two feeds legible and makes the comparison easy. Landing in the **same root** is safe mechanically but leaves two layouts interleaved in one tree.
+
+## Which identity actually writes
+
+The legacy configuration names an HDFS user (`user=…`) separately from the Kerberos principal. Those are not the same thing, and the difference decides whether this service can write at all.
+
+With Kerberos enabled, this service's effective HDFS user is **the short name of the principal it logs in as** — there is no proxy-user support and no `HADOOP_USER_NAME` override. If the landing directories are owned by, or granted to, the legacy application's HDFS user and the principal's short name is different, every write fails with `AccessControlException` naming the principal.
+
+Preflight answers this without consuming anything:
+
+- `filesystem.connect` prints **the user it authenticated as** — compare it against the directory owner.
+- `<binding>.landing-path` and `.audit-path` perform a real `access(WRITE)` as that user.
+
+Establish before deployment how the legacy application uses its `user=` property — whether it proxies, logs in separately, or the value is vestigial — and confirm the principal has write access to both roots in its own right.
+
 ## Kerberos (VERIFIED behavior)
 
 `KerberosManager` logs in with `UserGroupInformation.loginUserFromKeytab(principal, keytab)` after setting `hadoop.security.authentication=kerberos`, then `FileSystem.get()` runs inside `ugi.doAs(...)`. The `FileSystem` instance captures that identity, so every later operation — write, rename, audit, reconciliation — runs as it.
