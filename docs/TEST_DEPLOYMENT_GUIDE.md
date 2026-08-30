@@ -176,6 +176,14 @@ Two failures here are worth recognising on sight:
 | `MQRC 2085` unknown object name | The queue exists, but on a **different queue manager**. The tracker and backout producers are created from the listener's own transacted session, so all three queues must live on the one it connects to. |
 | `MQRC 2042` object in use | The source queue is defined `NOSHARE` and the legacy consumer holds it exclusively. Nothing was disturbed; the queue must be `SHARE` before the two can ever run side by side. |
 
+### Verifying queues without MQ administrator access
+
+`preflight mq` is a substitute for `runmqsc`, not merely a complement to it. It opens each configured queue on the queue manager the application actually connected to, using the service account the application will use — which is the exact question an operator without admin rights cannot otherwise answer. A queue that is missing, misspelled, or defined on a sibling queue manager comes back as `MQRC 2085` naming the queue, and nothing is consumed to find out.
+
+This matters most for the **backout queue**, because it is the one whose absence stays hidden. `PoisonMessageHandler` creates its producer lazily, at the moment a message first needs routing — so a wrong backout queue name survives deployment, survives a smoke test, and fails weeks later when the first malformed message arrives. At that point routing throws, the batch rolls back, the message redelivers, routing throws again: **that binding stalls permanently on one message** while the queue backs up behind it. Preflight opening the queue at startup is what turns that into a one-second answer.
+
+Monitoring tools can confirm a queue exists but cannot prove one does not: a queue outside the monitoring scope, or one that has never carried traffic, may simply not appear. Treat "not in the dashboard" as unknown, and let preflight decide.
+
 Add `hdfs` once the cluster paths are known. That group writes and deletes a probe file inside `_tmp/{instanceId}` — never in a data partition, so it cannot be mistaken for landed data or picked up by reconciliation.
 
 ## 6 — Start, watch, stop
