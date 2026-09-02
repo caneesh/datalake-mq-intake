@@ -23,7 +23,73 @@ queue manager — the tracker and backout producers come off the listener's own 
 session and cannot reach a sibling QM. Across the two modules nothing is shared: different
 queue managers, different queues, different credentials.
 
-## 2. Ship it
+## 2. Get from the MQ admin
+
+### Ask these two first — the answers can block the deployment
+
+**Do the SVRCONN channels require TLS?** `MqConnectionManager` sets only host, port, queue
+manager, channel and transport type. There is **no cipher spec, no keystore, no CCDT** support
+anywhere in the codebase. A TLS-enabled channel is a code change, not a config value — find out
+before you build anything.
+
+**Can one account hold every authority a binding needs?** JMS authenticates at the *connection*,
+and a listener thread's consumer, tracker producer and backout producer all come from one session
+on it. So per queue manager, a single account must hold:
+
+| Queue | Authority | Used by |
+|---|---|---|
+| Source | GET | the consumer |
+| Tracker (rms only) | PUT | tracker producer, same session |
+| Backout | PUT | poison routing, same session |
+| Backout | **BROWSE** | the depth monitor samples with a `QueueBrowser` |
+
+BROWSE is the one that gets missed — a separate authority from PUT. Without it
+`backout_queue_depth` never populates, and that gauge is the pager condition. Preflight probes
+all four; `MQRC 2035` on any of them means this.
+
+If their security model cannot give one account all of these, say so early: it changes the
+design, not the configuration.
+
+### Values to type into `env.sh` — once per queue manager
+
+Host, listener port, queue manager name, SVRCONN channel name, the queue names (source, backout,
+plus tracker for rms), and the account and password.
+
+### Settings only they can apply
+
+The application cannot set these, and a mismatch fails under load rather than at startup.
+
+| Setting | On | Value |
+|---|---|---|
+| `BOTHRESH` | each source queue | **5** rms, **14** claims (BISECT needs ≥ ceil(log2 8000) + 1) |
+| `BOQNAME` | each source queue | the matching backout queue |
+| `MAXUMSGS` | each queue manager | ≥ 2000 rms (TRACKED, unit of work is 2N), ≥ 8000 claims. The 10000 default suffices — confirm it was not lowered |
+| `MAXMSGL` | claims source queue **and its channel** | IBM MQ defaults to 4 MB; claims has messages over 10 MB. Unraised, the largest messages cannot be put or got at all |
+| `MAXMSGL` | rms tracker queue | the tracker body is a `FULL_COPY` of the source payload, so it needs the source queue's ceiling |
+| `MAXDEPTH` | rms tracker queue | a full tracker queue now **stops rms ingestion** rather than silently dropping acks |
+
+### Two judgement calls that need their sign-off
+
+**`BOTHRESH` sizing against plausible outage length.** Poison detection is delivery-count only,
+and infrastructure failures deliberately do not shrink the batch, so every message in every
+rolled-back batch accrues delivery count at full rate. A long enough outage pushes undamaged
+messages onto the backout queue. This is legacy-MDB parity, not a regression — but the mitigation
+is sizing `BOTHRESH` above realistic outage windows, and that is their call.
+See `READINESS_REVIEW.md` §D″ item 5.
+
+**Validating the tracker message against its live consumers.** The rewritten
+`MessageHeaderDetails` is reproduced from the legacy EJBHelper source and pinned by tests, but
+nobody has confirmed the output against the consumers on the other side of the tracker queue.
+An operational check at cutover, not a code gate (DESIGN item #24).
+
+### What you do not need to ask for
+
+MQ admin access. Preflight substitutes for it — it opens each queue as the configured account and
+reports one actionable line per failure, consuming nothing and writing nothing outside
+`_tmp/{instanceId}`. Run `./current/intake.sh preflight mq` from each module's directory and send
+them the output; it is usually a faster conversation than requesting a `DISPLAY QLOCAL`.
+
+## 3. Ship it
 
 Give each module its own base directory — that separation is what keeps the two queue
 managers apart.
@@ -41,9 +107,9 @@ No network path to the server? Build a bundle, carry it across, install with the
 tar xzf mq-intake-rms-<stamp>.tar.gz && cd mq-intake-rms-<stamp> && ./install.sh
 ```
 
-Deploy **never** starts, stops, or overwrites configuration. Starting is step 4.
+Deploy **never** starts, stops, or overwrites configuration. Starting is step 5.
 
-## 3. Set the variables
+## 4. Set the variables
 
 **One file per module: `<base>/env.sh`** on the server. The first install seeds it from the
 template and chmods it 600; every later deploy leaves it alone.
@@ -73,8 +139,7 @@ cd ~/mq-intake-rms && vi env.sh        # then again for ~/mq-intake-claims
 | `MQ_CREDENTIAL_REF` | `env:MQ_USER,MQ_PASSWORD` — a reference, never the secret itself |
 | `MQ_USER`, `MQ_PASSWORD` | one account per queue manager. rms needs GET on source + PUT on tracker and backout; claims needs GET on source + PUT on backout |
 
-Ask the MQ team, **for both queue managers**, to set `BOTHRESH` and `BOQNAME` on each source
-queue to match its app (rms: 5, claims: 14) and `MAXUMSGS` ≥ 2 × batch size.
+The queue-manager-side settings that must match these are in step 2.
 
 ### HDFS
 
@@ -103,7 +168,7 @@ JVMs on one host from sharing a `_tmp` tree.
 
 YAML overrides beyond these go in `<base>/config/application.yml`, which also survives deploys.
 
-## 4. Start it
+## 5. Start it
 
 ```bash
 cd ~/mq-intake-rms                # and separately for ~/mq-intake-claims
@@ -116,7 +181,9 @@ cd ~/mq-intake-rms                # and separately for ~/mq-intake-claims
 one fact at a time, names the fix for each failure, and exits non-zero if anything fails —
 so a pipeline can gate on it. Narrow it with `preflight mq`, `hdfs`, or `app`.
 
-## 5. Day to day
+---
+
+## Day to day
 
 ```bash
 ./current/intake.sh status        # pid, release, health, key metrics
@@ -137,7 +204,7 @@ pre-commit, page it), `mq_intake_backout_queue_depth` (non-zero = poison sitting
 `mq_intake_tracker_sent_total` flatlining while `mq_intake_messages_consumed_total` climbs
 (data landing unacknowledged).
 
-## 6. Roll back
+## Roll back
 
 ```bash
 cd ~/mq-intake-rms                # the modules roll back independently
@@ -149,7 +216,7 @@ ln -sfn releases/<previous-stamp> current
 Always message-safe: unprocessed messages queue on MQ, landed files stay landed and audited.
 `env.sh` and `config/` live outside the release directories and survive both directions.
 
-## 7. Where things are
+## Where things are
 
 | Path | |
 |---|---|
@@ -160,7 +227,7 @@ Always message-safe: unprocessed messages queue on MQ, landed files stay landed 
 | `<base>/logs/current.log` | log of the running instance |
 | `<base>/run/intake.pid` | pid |
 
-## 8. If startup fails
+## If startup fails
 
 It is almost always a gate doing its job. The message names the cause; the common ones:
 
