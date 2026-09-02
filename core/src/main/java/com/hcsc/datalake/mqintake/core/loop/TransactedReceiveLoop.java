@@ -98,6 +98,9 @@ public class TransactedReceiveLoop implements Runnable {
     /** Loop-thread-confined; see UNRECOGNISED_FAULTS_BEFORE_FORCED_RECOVERY. */
     private int consecutiveUnrecognisedFaults = 0;
 
+    /** Drives the log cadence in recordTrackerSuppressed; the metric is the signal. */
+    private final AtomicLong suppressedTrackers = new AtomicLong(0);
+
     /**
      * Creates a receive loop for the given binding.
      *
@@ -762,36 +765,89 @@ public class TransactedReceiveLoop implements Runnable {
     /**
      * Sends one tracker message per source message.
      *
-     * <p>By default a per-message failure is logged and skipped rather than
-     * failing the batch, matching the legacy MDB, which catches and logs
-     * tracker exceptions and lets the message commit regardless. The landed
-     * data is kept; that one tracker notification is lost. Set
-     * {@code fail_batch_on_tracker_error} to restore the stricter §2.2 reading.
+     * <p><strong>Two failure kinds, handled differently, because they have
+     * different blast radii.</strong>
      *
-     * <p>This only covers per-message failures. A broken session or connection
-     * still surfaces at {@code session.commit()} and rolls the batch back,
-     * because at that point nothing in the unit of work is safe.
+     * <p><em>Infrastructure ({@code JMSException}) fails the batch.</em> The
+     * provider refusing a put — tracker queue full, message too big for it,
+     * producer broken — is not about this message; it will refuse the next one
+     * too. Rolling back stalls the feed and pages, which is right: the
+     * alternative is landing every message with its acknowledgement silently
+     * dropped, for as long as the condition lasts. It also classifies as
+     * MQ_INFRASTRUCTURE, which does NOT permit backout routing, so a stall
+     * cannot divert healthy messages to the BOQ.
      *
-     * <p>Unlike the MDB, failures are counted and logged rather than silently
-     * swallowed — matching its delivery behaviour is deliberate, inheriting its
+     * <p><em>Content ({@code RuntimeException}) is skipped and counted.</em> A
+     * malformed header that breaks the rewrite — {@code HeaderRewriter} runs
+     * {@code replaceAll}, so tag content with regex metacharacters can throw —
+     * affects exactly one message. Failing the batch for it would be actively
+     * worse: such a failure classifies as UNKNOWN, which never triggers
+     * degraded mode, so there is no bisection to isolate the culprit; the
+     * batch would roll back at full size until delivery count pushed the
+     * WHOLE batch past BOTHRESH and onto the backout queue. One bad header
+     * would cost a thousand healthy messages a manual replay. Skipping loses
+     * that one tracker notification instead, which is what the legacy MDB
+     * does.
+     *
+     * <p>{@code fail_batch_on_tracker_error} escalates the content case to
+     * match the infrastructure one. It no longer means "never fail the batch"
+     * when false — infrastructure failures always do.
+     *
+     * <p>Unlike the MDB, every outcome is counted: sent, suppressed, and
+     * failed. Matching its delivery behaviour is deliberate, inheriting its
      * blindness is not.
      */
     private void sendTrackerMessages(List<Message> batch) throws JMSException {
         for (Message sourceMessage : batch) {
             try {
-                Optional<Message> trackerMessage = trackerMessageBuilder.build(listenerSession.session(), sourceMessage);
+                Optional<Message> trackerMessage =
+                        trackerMessageBuilder.build(listenerSession.session(), sourceMessage);
+
                 if (trackerMessage.isPresent()) {
                     listenerSession.trackerProducer().send(trackerMessage.get());
+                    metrics.recordTrackerSent();
+                } else {
+                    recordTrackerSuppressed();
                 }
-            } catch (JMSException | RuntimeException e) {
+            } catch (JMSException e) {
+                metrics.recordTrackerFailure();
+                log.error("Tracker put failed for binding '{}' — rolling back rather than "
+                                + "landing messages whose acknowledgement was dropped. Check the "
+                                + "tracker queue '{}' for depth, MAXDEPTH and MAXMSGL: {}",
+                        config.getId(), config.getTracker().getQueue(), e.getMessage(), e);
+                throw e;
+            } catch (RuntimeException e) {
                 if (config.getTracker().isFailBatchOnError()) {
                     throw e;
                 }
                 metrics.recordTrackerFailure();
-                log.warn("Tracker send failed for binding '{}' — message still commits, " +
-                        "this tracker notification is lost: {}",
+                log.warn("Tracker message could not be built for binding '{}' — this one "
+                                + "message still commits and its tracker notification is lost: {}",
                         config.getId(), e.getMessage());
             }
+        }
+    }
+
+    /**
+     * A source message the builder declined to track.
+     *
+     * <p>Legitimate per message (RMS suppresses anything without
+     * MessageHeaderDetails, which is what keeps claims-shaped messages off the
+     * tracker queue) and a serious condition in bulk: if upstream stops
+     * setting that property, every message lands and none is acknowledged.
+     * Logged first-and-every-thousandth so a systemic regression is visible
+     * without a malformed flood becoming its own log problem; the counter
+     * behind it is the thing to alert on.
+     */
+    private void recordTrackerSuppressed() {
+        metrics.recordTrackerSuppressed();
+        long suppressed = suppressedTrackers.incrementAndGet();
+        if (suppressed == 1 || suppressed % 1000 == 0) {
+            log.warn("Binding '{}': {} message(s) landed with NO tracker notification — the "
+                            + "builder found no MessageHeaderDetails to rewrite. Isolated cases "
+                            + "are expected; a climbing count means data is landing "
+                            + "unacknowledged.",
+                    config.getId(), suppressed);
         }
     }
 

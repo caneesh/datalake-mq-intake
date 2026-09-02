@@ -106,6 +106,15 @@ public class IntakeMicrometerBridge {
                 "Messages routed to the backout queue");
         counter(metrics, tags, "tracker_failures_total", BindingMetrics::getTrackerFailureCount,
                 "Tracker notifications that could not be sent");
+        counter(metrics, tags, "tracker_sent_total", BindingMetrics::getTrackerSentCount,
+                "Tracker notifications put on the tracker queue — the only positive proof "
+                        + "tracking is working. Alert when this stops advancing while "
+                        + "messages_consumed_total does");
+        counter(metrics, tags, "tracker_suppressed_total",
+                BindingMetrics::getTrackerSuppressedCount,
+                "Messages landed with no tracker notification because the builder suppressed "
+                        + "one (RMS: no MessageHeaderDetails). Expected at zero for RMS, so a "
+                        + "sustained climb means an upstream regression and unacknowledged data");
         counter(metrics, tags, "audit_failures_total", BindingMetrics::getAuditFailureCount,
                 "Audit records that could not be written after a commit");
         counter(metrics, tags, "balance_check_failures_total",

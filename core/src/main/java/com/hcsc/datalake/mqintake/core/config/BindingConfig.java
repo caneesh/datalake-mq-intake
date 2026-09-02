@@ -151,22 +151,34 @@ public class BindingConfig {
         private TrackerFields fields;
 
         /**
-         * Whether a tracker build/send failure should fail the whole batch.
+         * Whether a per-message tracker CONTENT failure should fail the batch.
          *
-         * <p>Default false, matching the legacy MDB: it catches and logs
-         * tracker exceptions in both {@code HDFSIngest.forwardToMessageTracker}
-         * and {@code EJBHelper}, so a tracker failure never rolls back the
-         * message. The landed data is kept and that one tracker notification
-         * is lost.
+         * <p><strong>This is no longer the only control over whether a tracker
+         * failure rolls back.</strong> The loop splits the two failure kinds:
+         * a {@code JMSException} from the build or the put — tracker queue
+         * full, message too big for it, producer broken — always fails the
+         * batch regardless of this flag, because it will refuse the next
+         * message too and the alternative is landing every message with its
+         * acknowledgement silently dropped. This flag governs only the
+         * remaining case: a {@code RuntimeException} out of the builder, which
+         * means one message's own content broke the header rewrite.
          *
-         * <p>Set true for the stricter reading of §2.2 — tracker and get in one
-         * unit of work, so losing the tracker means replaying the message.
-         * That is safer for the tracker consumer but turns a tracker-side
-         * outage into repeated batch rollbacks on the landing path.
+         * <p>Default false for that case, matching the legacy MDB: it catches
+         * and logs tracker exceptions in both
+         * {@code HDFSIngest.forwardToMessageTracker} and {@code EJBHelper}, so
+         * a tracker failure never rolls back the message. The landed data is
+         * kept and that one tracker notification is lost.
          *
-         * <p>Note this only governs per-message failures. A broken session or
-         * connection still surfaces at commit and rolls the batch back either
-         * way.
+         * <p>Setting it true is the stricter reading of §2.2 — tracker and get
+         * in one unit of work — but think it through first: a content failure
+         * classifies as UNKNOWN, which never triggers degraded mode, so there
+         * is no bisection to isolate the offending message. The batch rolls
+         * back at full size until delivery count carries the WHOLE batch past
+         * BOTHRESH and onto the backout queue. One malformed header then costs
+         * a thousand healthy messages a manual replay.
+         *
+         * <p>Either way the outcome is counted: {@code tracker_sent_total},
+         * {@code tracker_suppressed_total} and {@code tracker_failures_total}.
          */
         private boolean failBatchOnError = false;
 

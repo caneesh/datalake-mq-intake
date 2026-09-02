@@ -40,6 +40,10 @@ public class BindingMetrics {
     private final LongAdder reconnectFailureCount = new LongAdder();
     private final LongAdder auditFailureCount = new LongAdder();
     private final LongAdder trackerFailureCount = new LongAdder();
+    /** Tracker messages actually put on the tracker queue. */
+    private final LongAdder trackerSentCount = new LongAdder();
+    /** Source messages the builder deliberately produced no tracker for. */
+    private final LongAdder trackerSuppressedCount = new LongAdder();
     /** Batches rolled back because consumed != written + backout (ABC). */
     private final LongAdder balanceCheckFailureCount = new LongAdder();
     private final LongAdder reconciliationDiscrepancyCount = new LongAdder();
@@ -142,6 +146,33 @@ public class BindingMetrics {
     /** A tracker message that could not be built or sent, per message. */
     public void recordTrackerFailure() {
         trackerFailureCount.increment();
+    }
+
+    /**
+     * A tracker message put on the tracker queue.
+     *
+     * <p>The only POSITIVE tracker signal. Failures and suppressions are both
+     * counted, but neither fires when tracking simply stops — an upstream that
+     * drops {@code MessageHeaderDetails} produces suppressions, while an
+     * unreachable tracker queue produces failures, and a binding
+     * misconfigured to LAND_ONLY produces neither. Alerting on this counter
+     * flatlining against {@code messages_consumed_total} catches all three.
+     */
+    public void recordTrackerSent() {
+        trackerSentCount.increment();
+    }
+
+    /**
+     * A source message the builder chose not to track.
+     *
+     * <p>Not an error: the RMS builder suppresses any message without
+     * {@code MessageHeaderDetails}, which is what keeps claims-shaped messages
+     * off the tracker queue. It becomes a problem only in bulk — if upstream
+     * stops setting that property, every message lands and none is
+     * acknowledged, which without this counter was visible only at DEBUG.
+     */
+    public void recordTrackerSuppressed() {
+        trackerSuppressedCount.increment();
     }
 
     public void setIdentityMissSupplier(java.util.function.LongSupplier supplier) {
@@ -248,6 +279,14 @@ public class BindingMetrics {
 
     public long getReconnectFailureCount() {
         return reconnectFailureCount.sum();
+    }
+
+    public long getTrackerSentCount() {
+        return trackerSentCount.sum();
+    }
+
+    public long getTrackerSuppressedCount() {
+        return trackerSuppressedCount.sum();
     }
 
     public long getTrackerFailureCount() {

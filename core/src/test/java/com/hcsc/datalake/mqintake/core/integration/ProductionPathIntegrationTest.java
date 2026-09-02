@@ -162,12 +162,14 @@ class ProductionPathIntegrationTest {
         assertThat(listFiles(config.getHdfs().getBasePath() + "/_tmp/it-instance")).isEmpty();
     }
 
-    // §15.6 tracker queue failure. Default policy matches the legacy MDB:
-    // the failure is logged and the batch still commits, so the data lands
-    // once and only that tracker notification is lost. No rollback, therefore
-    // no redelivery and no duplicate.
+    // §15.6 tracker CONTENT failure — one message's own payload breaks the
+    // header rewrite. Default policy matches the legacy MDB: the failure is
+    // logged and the batch still commits, so the data lands once and only
+    // that tracker notification is lost. No rollback, therefore no redelivery
+    // and no duplicate. A tracker QUEUE failure is a different case and rolls
+    // back; see failureAfterRenameBeforeCommitYieldsPermittedDuplicateNotLoss.
     @Test
-    void trackerFailureLosesOnlyTheNotificationNotTheData() throws Exception {
+    void trackerContentFailureLosesOnlyTheNotificationNotTheData() throws Exception {
         BindingConfig config = bindingConfig("trk", "IT.TRK.SOURCE", BindingMode.TRACKED, 1);
         config.getTracker().setQueue("IT.TRK.TRACKER");
         sendMessages("IT.TRK.SOURCE", "trk", 4);
@@ -175,7 +177,10 @@ class ProductionPathIntegrationTest {
         AtomicInteger trackerCalls = new AtomicInteger();
         TrackerMessageBuilderFactory failingOnceTracker = cfg -> (session, source) -> {
             if (trackerCalls.getAndIncrement() == 0) {
-                throw new JMSException("tracker queue unavailable");
+                // HeaderRewriter passes tag content to replaceAll, so a
+                // payload carrying regex metacharacters throws this.
+                throw new java.util.regex.PatternSyntaxException(
+                        "Unclosed character class", "<MesgStatus>[RCVD", 12);
             }
             return Optional.of(session.createTextMessage("TRACKER"));
         };
@@ -199,17 +204,20 @@ class ProductionPathIntegrationTest {
         assertThat(metricsRegistry.forBinding("trk").getRollbackCount()).isZero();
     }
 
-    // §15.3 failure after rename, before MQ commit. With
-    // fail_batch_on_tracker_error the tracker failure aborts the batch AFTER
-    // the file was renamed into the partition, which is the crash window the
-    // design permits a duplicate in. Kept as a test because the strict policy
-    // remains a supported configuration, and because the scenario is otherwise
-    // hard to trigger deterministically.
+    // §15.3 failure after rename, before MQ commit. A tracker QUEUE failure
+    // (JMSException — queue full, message too big for it, producer broken)
+    // aborts the batch AFTER the file was renamed into the partition, which
+    // is the crash window the design permits a duplicate in. No flag is set:
+    // this is the DEFAULT for a put failure, because the alternative is
+    // landing every message with its acknowledgement silently dropped for as
+    // long as the tracker queue is unreachable. The trade the design already
+    // makes everywhere else — a detectable duplicate over an undetectable
+    // gap. (fail_batch_on_tracker_error still escalates the content case;
+    // TransactedReceiveLoopTest covers that.)
     @Test
     void failureAfterRenameBeforeCommitYieldsPermittedDuplicateNotLoss() throws Exception {
         BindingConfig config = bindingConfig("trk2", "IT.TRK2.SOURCE", BindingMode.TRACKED, 1);
         config.getTracker().setQueue("IT.TRK2.TRACKER");
-        config.getTracker().setFailBatchOnError(true);
         sendMessages("IT.TRK2.SOURCE", "trk2", 4);
 
         AtomicInteger trackerCalls = new AtomicInteger();

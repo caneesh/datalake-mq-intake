@@ -166,10 +166,13 @@ class TransactedReceiveLoopTest {
     }
 
     @Test
-    void trackerFailureDoesNotRollBackByDefault() throws Exception {
-        // MDB parity: the legacy code catches and logs tracker exceptions in
-        // both HDFSIngest and EJBHelper, so a tracker failure never rolls back
-        // the message. The landed data is kept; that one notification is lost.
+    void trackerContentFailureDoesNotRollBackByDefault() throws Exception {
+        // MDB parity, and only for a CONTENT failure: one message's own
+        // payload broke the header rewrite (HeaderRewriter runs replaceAll, so
+        // regex metacharacters in tag content throw). It affects nothing else,
+        // and failing the batch for it has no isolation path — see
+        // trackerPutFailureRollsBackEvenByDefault for the case that does roll
+        // back. The landed data is kept; that one notification is lost.
         BindingConfig config = createTrackedConfig(3);
         sendMessages(3);
 
@@ -177,7 +180,8 @@ class TransactedReceiveLoopTest {
         TrackerMessageBuilder failingBuilder = (session, source) -> {
             callCount[0]++;
             if (callCount[0] == 2) {
-                throw new JMSException("Simulated tracker failure");
+                throw new java.util.regex.PatternSyntaxException(
+                        "Unclosed character class", "<MesgStatus>[RCVD", 12);
             }
             return Optional.of(session.createTextMessage("TRACKER"));
         };
@@ -204,9 +208,10 @@ class TransactedReceiveLoopTest {
     }
 
     @Test
-    void trackerFailureRollsBackWhenConfiguredToFailTheBatch() throws Exception {
-        // The stricter §2.2 reading remains available: tracker and get in one
-        // unit of work, so losing a tracker means replaying the message.
+    void trackerContentFailureRollsBackWhenConfiguredToFailTheBatch() throws Exception {
+        // The stricter §2.2 reading remains available for content failures:
+        // tracker and get in one unit of work, so losing a tracker means
+        // replaying the message.
         BindingConfig config = createTrackedConfig(3);
         config.getTracker().setFailBatchOnError(true);
         sendMessages(3);
@@ -215,7 +220,8 @@ class TransactedReceiveLoopTest {
         TrackerMessageBuilder failingBuilder = (session, source) -> {
             callCount[0]++;
             if (callCount[0] == 2) {
-                throw new JMSException("Simulated tracker failure");
+                throw new java.util.regex.PatternSyntaxException(
+                        "Unclosed character class", "<MesgStatus>[RCVD", 12);
             }
             return Optional.of(session.createTextMessage("TRACKER"));
         };
@@ -333,6 +339,81 @@ class TransactedReceiveLoopTest {
     }
 
     @Test
+    void trackerPutFailureRollsBackEvenByDefault() throws Exception {
+        // A JMSException is the provider refusing the put — tracker queue
+        // full, message too big for it, producer broken. It is not about this
+        // message and will refuse the next one too, so committing would land
+        // every message with its acknowledgement silently dropped for as long
+        // as the condition lasts. Rolls back WITHOUT fail-batch-on-error,
+        // which is the behaviour change: this used to commit.
+        BindingConfig config = createTrackedConfig(3);
+        assertThat(config.getTracker().isFailBatchOnError())
+                .as("the default is what is under test")
+                .isFalse();
+        sendMessages(3);
+
+        TrackerMessageBuilder queueFullBuilder = (session, source) -> {
+            throw new JMSException("MQRC_Q_FULL");
+        };
+
+        BindingMetrics metrics = new BindingMetrics("test-binding");
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, queueFullBuilder, null, null, null, null,
+                metrics, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForRollbacks(loop, 1, 2000);
+        loop.stop();
+        future.get(1, TimeUnit.SECONDS);
+
+        assertThat(loop.getRollbackCount()).isGreaterThanOrEqualTo(1);
+        assertThat(loop.getCommitCount()).isZero();
+        assertThat(countMessagesOnQueue(SOURCE_QUEUE))
+                .as("nothing lands while its acknowledgement cannot be sent")
+                .isEqualTo(3);
+        assertThat(metrics.getTrackerFailureCount()).isGreaterThanOrEqualTo(1);
+    }
+
+    @Test
+    void everyTrackerOutcomeIsCounted() throws Exception {
+        // Sent, suppressed and failed each have their own counter. Before
+        // this, only failures were counted: an upstream that stopped setting
+        // MessageHeaderDetails produced silent suppressions at DEBUG, and
+        // there was no positive signal whose absence could be alerted on.
+        BindingConfig config = createTrackedConfig(3);
+        sendMessages(3);
+
+        final int[] callCount = {0};
+        TrackerMessageBuilder mixedBuilder = (session, source) -> {
+            callCount[0]++;
+            if (callCount[0] == 2) {
+                return Optional.empty();                       // suppressed
+            }
+            if (callCount[0] == 3) {
+                throw new java.util.regex.PatternSyntaxException(   // content failure
+                        "Unclosed character class", "<MesgStatus>[RCVD", 12);
+            }
+            return Optional.of(session.createTextMessage("TRACKER"));
+        };
+
+        BindingMetrics metrics = new BindingMetrics("test-binding");
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, mixedBuilder, null, null, null, null,
+                metrics, "test-instance", RECEIVE_TIMEOUT_MS);
+
+        Future<?> future = executor.submit(loop);
+        waitForCommits(loop, 1, 2000);
+        loop.stop();
+        future.get(1, TimeUnit.SECONDS);
+
+        assertThat(loop.getCommitCount()).isEqualTo(1);
+        assertThat(metrics.getTrackerSentCount()).isEqualTo(1);
+        assertThat(metrics.getTrackerSuppressedCount()).isEqualTo(1);
+        assertThat(metrics.getTrackerFailureCount()).isEqualTo(1);
+        assertThat(countMessagesOnQueue(TRACKER_QUEUE)).isEqualTo(1);
+    }
+
+    @Test
     void trackerBuilderCanSuppressIndividualMessages() throws Exception {
         // Given: TRACKED config, builder suppresses message 2
         BindingConfig config = createTrackedConfig(3);
@@ -348,8 +429,10 @@ class TransactedReceiveLoopTest {
         };
 
         // When: run the loop
+        BindingMetrics metrics = new BindingMetrics("test-binding");
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, selectiveBuilder, null, null, null, null, null, "test-instance", RECEIVE_TIMEOUT_MS);
+                config, connection, batchWriter, selectiveBuilder, null, null, null, null,
+                metrics, "test-instance", RECEIVE_TIMEOUT_MS);
 
         Future<?> future = executor.submit(loop);
         waitForCommits(loop, 1, 2000);
@@ -359,6 +442,8 @@ class TransactedReceiveLoopTest {
         // Then: only 2 tracker messages (one suppressed)
         assertThat(loop.getMessageCount()).isEqualTo(3);
         assertThat(countMessagesOnQueue(TRACKER_QUEUE)).isEqualTo(2);
+        assertThat(metrics.getTrackerSentCount()).isEqualTo(2);
+        assertThat(metrics.getTrackerSuppressedCount()).isEqualTo(1);
     }
 
     // --- Helper methods ---
