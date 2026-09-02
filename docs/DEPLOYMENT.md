@@ -25,12 +25,7 @@ queue managers, different queues, different credentials.
 
 ## 2. Get from the MQ admin
 
-### Ask these two first — the answers can block the deployment
-
-**Do the SVRCONN channels require TLS?** `MqConnectionManager` sets only host, port, queue
-manager, channel and transport type. There is **no cipher spec, no keystore, no CCDT** support
-anywhere in the codebase. A TLS-enabled channel is a code change, not a config value — find out
-before you build anything.
+### Ask this first — the answer can change the design
 
 **Can one account hold every authority a binding needs?** JMS authenticates at the *connection*,
 and a listener thread's consumer, tracker producer and backout producer all come from one session
@@ -54,6 +49,12 @@ design, not the configuration.
 
 Host, listener port, queue manager name, SVRCONN channel name, the queue names (source, backout,
 plus tracker for rms), and the account and password.
+
+> **The channels are plain TCP/IP — settled, and worth keeping settled.** The client supports no
+> other kind: `MqConnectionManager` sets host, port, queue manager, channel and transport type,
+> and there is no cipher spec, no keystore and no CCDT support anywhere in the codebase. Moving
+> either channel to TLS later is a code change, not a configuration value, so it needs notice
+> rather than a change window.
 
 ### Settings only they can apply
 
