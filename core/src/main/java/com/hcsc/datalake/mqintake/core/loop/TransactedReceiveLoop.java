@@ -17,6 +17,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.jms.*;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -76,6 +77,13 @@ public class TransactedReceiveLoop implements Runnable {
     private final SessionFaultPolicy faultPolicy;
     private final BackoffPolicy backoffPolicy;
 
+    /**
+     * Clock behind the FlushTrigger — and therefore behind the partition
+     * window a batch is stamped with. Injectable so a test can cross a
+     * quarter-hour boundary without waiting one.
+     */
+    private final Clock flushClock;
+
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicLong commitCount = new AtomicLong(0);
     private final AtomicLong rollbackCount = new AtomicLong(0);
@@ -118,7 +126,7 @@ public class TransactedReceiveLoop implements Runnable {
                                   long receiveTimeoutMs) {
         this(config, connection, batchWriter, trackerMessageBuilder, poisonMessageHandler,
                 degradedModeManager, healthManager, auditRecordEmitter, metrics,
-                instanceId, receiveTimeoutMs, null, null, null);
+                instanceId, receiveTimeoutMs, null, null, null, null);
     }
 
     /**
@@ -126,6 +134,8 @@ public class TransactedReceiveLoop implements Runnable {
      * fault policy with known classifications, and a fast backoff — the only
      * way to drive the recovery state machine (RETRY→RECOVERED, budget
      * exhaustion, fatal-mid-recovery) without a real queue-manager outage.
+     * The clock drives the FlushTrigger, which is the only way to cross a
+     * quarter-hour partition boundary in a test without waiting for one.
      * Null means the production default.
      */
     TransactedReceiveLoop(BindingConfig config,
@@ -141,7 +151,8 @@ public class TransactedReceiveLoop implements Runnable {
                           long receiveTimeoutMs,
                           ListenerSession listenerSession,
                           SessionFaultPolicy faultPolicy,
-                          BackoffPolicy backoffPolicy) {
+                          BackoffPolicy backoffPolicy,
+                          Clock flushClock) {
         this.config = config;
         this.connection = connection;
         this.batchWriter = batchWriter;
@@ -164,6 +175,7 @@ public class TransactedReceiveLoop implements Runnable {
                 ? faultPolicy : SessionFaultPolicy.defaultPolicy();
         this.backoffPolicy = backoffPolicy != null
                 ? backoffPolicy : BackoffPolicy.exponentialWithJitter();
+        this.flushClock = flushClock != null ? flushClock : Clock.systemUTC();
 
         if (config.getMode() == BindingMode.TRACKED && trackerMessageBuilder == null) {
             throw new IllegalArgumentException(
@@ -198,7 +210,8 @@ public class TransactedReceiveLoop implements Runnable {
         FlushTrigger flushTrigger = new FlushTrigger(
                 config.getBatch().getSize(),
                 config.getBatch().getBytes(),
-                config.getBatch().getIntervalMs()
+                config.getBatch().getIntervalMs(),
+                flushClock
         );
         List<Message> batch = new ArrayList<>(config.getBatch().getSize());
 
@@ -213,7 +226,7 @@ public class TransactedReceiveLoop implements Runnable {
             }
         }
 
-        drainOnShutdown(batch);
+        drainOnShutdown(batch, flushTrigger);
     }
 
     /**
@@ -225,6 +238,17 @@ public class TransactedReceiveLoop implements Runnable {
         Message message = listenerSession.consumer().receive(receiveTimeoutMs);
 
         if (message != null) {
+            // A message arriving after the window turned belongs to the NEXT
+            // partition, so the accumulated batch is flushed BEFORE it joins:
+            // the flush is then stamped with its own window, and this message
+            // opens a batch anchored to the new one. Adding first and flushing
+            // afterwards would put both windows' messages in one file under
+            // one of the two partitions. A no-op until the batch has opened,
+            // so the first message of a batch never triggers it.
+            if (flushTrigger.isPartitionBoundaryCrossed()) {
+                flushBatch(batch, flushTrigger);
+            }
+
             batch.add(message);
             flushTrigger.trackMessage(message);
             // In-flight batch depth. One atomic store per message,
@@ -320,7 +344,7 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     /** Lands whatever is still accumulated when the loop stops. */
-    private void drainOnShutdown(List<Message> batch) {
+    private void drainOnShutdown(List<Message> batch, FlushTrigger flushTrigger) {
         // stop() interrupts this thread to break the blocking receive(). The
         // drain below has to commit, and the IBM MQ client can fail in-flight
         // calls when the calling thread is still marked interrupted — which
@@ -335,7 +359,7 @@ public class TransactedReceiveLoop implements Runnable {
         log.info("Draining {} messages on shutdown for binding '{}'",
                 batch.size(), config.getId());
         try {
-            processBatch(batch);
+            processBatch(batch, flushTrigger.getBatchAnchor());
         } catch (Exception e) {
             log.warn("Failed to drain batch on shutdown for binding '{}': {}",
                     config.getId(), e.getMessage());
@@ -345,7 +369,9 @@ public class TransactedReceiveLoop implements Runnable {
 
     /** Processes the accumulated batch and resets the accumulation state. */
     private void flushBatch(List<Message> batch, FlushTrigger flushTrigger) {
-        processBatch(batch);
+        // Anchor read BEFORE reset(): reset re-anchors the trigger to now,
+        // which for a partition-triggered flush is already the next window.
+        processBatch(batch, flushTrigger.getBatchAnchor());
         batch.clear();
         flushTrigger.reset();
         metrics.setCurrentBatchSize(0);
@@ -367,7 +393,7 @@ public class TransactedReceiveLoop implements Runnable {
         return config.getBatch().getSize();
     }
 
-    private void processBatch(List<Message> batch) {
+    private void processBatch(List<Message> batch, java.time.Instant partitionInstant) {
         int batchSize = batch.size();
         log.debug("Processing batch of {} messages for binding '{}'",
                 batchSize, config.getId());
@@ -400,7 +426,8 @@ public class TransactedReceiveLoop implements Runnable {
                 }
             }
 
-            BatchWriter.BatchWriteResult writeResult = writeBatchToHdfs(cleanMessages);
+            BatchWriter.BatchWriteResult writeResult =
+                    writeBatchToHdfs(cleanMessages, partitionInstant);
 
             // ABC balance, before anything is sent or committed: every message
             // taken off the queue must be observed either in the file (the
@@ -506,10 +533,12 @@ public class TransactedReceiveLoop implements Runnable {
      * dominates batch time and the first thing to look at when throughput
      * drops.
      */
-    private BatchWriter.BatchWriteResult writeBatchToHdfs(List<Message> cleanMessages)
+    private BatchWriter.BatchWriteResult writeBatchToHdfs(List<Message> cleanMessages,
+                                                          java.time.Instant partitionInstant)
             throws BatchWriter.BatchWriteException {
         long flushStartNanos = System.nanoTime();
-        BatchWriter.BatchWriteResult writeResult = batchWriter.write(config.getId(), cleanMessages);
+        BatchWriter.BatchWriteResult writeResult =
+                batchWriter.write(config.getId(), cleanMessages, partitionInstant);
         metrics.recordFlushLatency(Duration.ofNanos(System.nanoTime() - flushStartNanos));
         return writeResult;
     }

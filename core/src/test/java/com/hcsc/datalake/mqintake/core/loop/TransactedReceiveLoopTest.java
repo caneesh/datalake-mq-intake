@@ -7,6 +7,7 @@ import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.BindingMode;
 import com.hcsc.datalake.mqintake.core.failure.DegradationStrategy;
 import com.hcsc.datalake.mqintake.core.failure.DegradedModeManager;
+import com.hcsc.datalake.mqintake.core.hdfs.PartitionPath;
 import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
 import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
 import com.hcsc.datalake.mqintake.core.tracker.TrackerMessageBuilder;
@@ -16,6 +17,7 @@ import org.junit.jupiter.api.*;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import javax.jms.*;
 import java.util.Optional;
@@ -386,6 +388,128 @@ class TransactedReceiveLoopTest {
         config.getBatch().setIntervalMs(30000);
         config.setListenerThreads(1);
         return config;
+    }
+
+    // --- Partition window placement ---
+
+    /** Quarter-hour partition window, in ms. */
+    private static final long WINDOW = 15L * 60L * 1000L;
+
+    @Test
+    void batchIsStampedWithItsOwnWindowNotTheFlushWindow() throws Exception {
+        // The partition trigger fires on the first poll AFTER the window
+        // closes, so the flush always happens in the NEXT window. Before the
+        // anchor was threaded through, the writer read its own clock at that
+        // moment and filed every partition-triggered batch one window late —
+        // which, with batch_interval_ms 0 and a low-volume feed, is every
+        // batch.
+        MutableClock clock = new MutableClock(WINDOW * 1000 + 60_000);
+
+        BindingConfig config = createLandOnlyConfig(1000);
+        config.getBatch().setIntervalMs(0);   // size is never reached; only the boundary flushes
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, null, null, null, null,
+                "test-instance", RECEIVE_TIMEOUT_MS, null, null, null, clock);
+        Future<?> future = executor.submit(loop);
+
+        try {
+            sendMessages(2);
+            waitForQueueEmpty(SOURCE_QUEUE, 2000);   // both are in the batch
+
+            // Window closes. The idle poll notices and flushes.
+            clock.set(WINDOW * 1001 + 500);
+            waitForCommits(loop, 1, 3000);
+
+            // A message in the new window, flushed when that window closes.
+            sendMessages(1);
+            waitForQueueEmpty(SOURCE_QUEUE, 2000);
+            clock.set(WINDOW * 1002 + 500);
+            waitForCommits(loop, 2, 3000);
+        } finally {
+            loop.stop();
+            future.get(2, TimeUnit.SECONDS);
+        }
+
+        List<CountingBatchWriter.Written> writes = batchWriter.getWritten();
+        assertThat(writes).hasSize(2);
+
+        assertThat(writes.get(0).getMessageCount()).isEqualTo(2);
+        assertThat(PartitionPath.windowId(writes.get(0).getPartitionInstant()))
+                .as("first batch belongs to the window it accumulated in, not the one it flushed in")
+                .isEqualTo(1000L);
+
+        assertThat(writes.get(1).getMessageCount()).isEqualTo(1);
+        assertThat(PartitionPath.windowId(writes.get(1).getPartitionInstant()))
+                .isEqualTo(1001L);
+    }
+
+    @Test
+    void oneBatchNeverSpansTwoWindows() throws Exception {
+        MutableClock clock = new MutableClock(WINDOW * 2000);
+
+        BindingConfig config = createLandOnlyConfig(1000);
+        config.getBatch().setIntervalMs(0);
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, null, null, null, null,
+                "test-instance", RECEIVE_TIMEOUT_MS, null, null, null, clock);
+        Future<?> future = executor.submit(loop);
+
+        try {
+            sendMessages(3);
+            waitForQueueEmpty(SOURCE_QUEUE, 2000);
+            clock.set(WINDOW * 2001);
+            waitForCommits(loop, 1, 3000);
+
+            sendMessages(4);
+            waitForQueueEmpty(SOURCE_QUEUE, 2000);
+            clock.set(WINDOW * 2002);
+            waitForCommits(loop, 2, 3000);
+        } finally {
+            loop.stop();
+            future.get(2, TimeUnit.SECONDS);
+        }
+
+        List<CountingBatchWriter.Written> writes = batchWriter.getWritten();
+        assertThat(writes).hasSize(2);
+        assertThat(writes.get(0).getMessageCount()).isEqualTo(3);
+        assertThat(writes.get(1).getMessageCount()).isEqualTo(4);
+        assertThat(PartitionPath.windowId(writes.get(0).getPartitionInstant()))
+                .isNotEqualTo(PartitionPath.windowId(writes.get(1).getPartitionInstant()));
+    }
+
+    /** A clock a test can move across a partition boundary without waiting. */
+    private static class MutableClock extends java.time.Clock {
+        private final AtomicLong millis;
+
+        MutableClock(long startMillis) {
+            this.millis = new AtomicLong(startMillis);
+        }
+
+        void set(long value) {
+            millis.set(value);
+        }
+
+        @Override
+        public java.time.ZoneId getZone() {
+            return java.time.ZoneOffset.UTC;
+        }
+
+        @Override
+        public java.time.Clock withZone(java.time.ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public java.time.Instant instant() {
+            return java.time.Instant.ofEpochMilli(millis.get());
+        }
+
+        @Override
+        public long millis() {
+            return millis.get();
+        }
     }
 
     private void sendMessages(int count) throws JMSException {
@@ -820,7 +944,7 @@ class TransactedReceiveLoopTest {
 
         // Always fails, so healthy=false is the final state rather than a
         // value a later successful redelivery would overwrite.
-        BatchWriter alwaysFails = (bindingId, messages) -> {
+        BatchWriter alwaysFails = (bindingId, messages, partitionInstant) -> {
             throw new BatchWriter.BatchWriteException("HDFS down");
         };
 

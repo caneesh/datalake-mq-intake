@@ -1,5 +1,7 @@
 package com.hcsc.datalake.mqintake.core.loop;
 
+import com.hcsc.datalake.mqintake.core.hdfs.PartitionPath;
+
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -265,6 +267,52 @@ class FlushTriggerTest {
         trigger.reset();
         trigger.trackMessage(100);
         assertThat(trigger.getActiveTrigger()).isEqualTo(FlushTrigger.Trigger.NONE);
+    }
+
+    @Test
+    void anchorIsTheBatchOpenInstantNotTheFlushInstant() {
+        TestClock clock = new TestClock();
+        FlushTrigger trigger = new FlushTrigger(Integer.MAX_VALUE, Long.MAX_VALUE, 0, clock);
+
+        clock.set(WINDOW * 100);
+        trigger.reset();
+
+        // The batch opens a minute into window 100...
+        clock.advance(60_000);
+        trigger.trackMessage(100);
+        Instant opened = clock.instant();
+
+        // ...and is flushed just after window 100 closes, which is how the
+        // partition trigger always fires. The anchor must still describe
+        // window 100: it is what the writer stamps the file with, and reading
+        // the clock at this point would file the batch one window late.
+        clock.set(WINDOW * 101 + 500);
+        assertThat(trigger.getActiveTrigger()).isEqualTo(FlushTrigger.Trigger.PARTITION);
+        assertThat(trigger.getBatchAnchor()).isEqualTo(opened);
+        assertThat(PartitionPath.windowId(trigger.getBatchAnchor()))
+                .as("the anchor's window is the batch's window, not the flush's")
+                .isEqualTo(100L)
+                .isNotEqualTo(PartitionPath.windowId(clock.instant()));
+    }
+
+    @Test
+    void anchorMovesToTheNewWindowOnlyWhenTheNextBatchOpens() {
+        TestClock clock = new TestClock();
+        FlushTrigger trigger = new FlushTrigger(Integer.MAX_VALUE, Long.MAX_VALUE, 0, clock);
+
+        clock.set(WINDOW * 100);
+        trigger.reset();
+        trigger.trackMessage(100);
+
+        clock.set(WINDOW * 101);
+        trigger.reset();
+
+        // reset() alone anchors to now; the first message of the next batch
+        // re-anchors to its own arrival, so a batch that opens late in a
+        // window is still stamped with that window.
+        clock.advance(30_000);
+        trigger.trackMessage(100);
+        assertThat(PartitionPath.windowId(trigger.getBatchAnchor())).isEqualTo(101L);
     }
 
     @Test

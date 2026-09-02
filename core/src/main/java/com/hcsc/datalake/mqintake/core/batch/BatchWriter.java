@@ -1,6 +1,7 @@
 package com.hcsc.datalake.mqintake.core.batch;
 
 import javax.jms.Message;
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -14,12 +15,38 @@ public interface BatchWriter {
      * On success, the data is durably visible in the target partition.
      * On failure, throws an exception and the caller must roll back the JMS transaction.
      *
-     * @param bindingId the binding identifier
-     * @param messages  the messages to write
+     * <p><strong>The partition comes from {@code partitionInstant}, not from
+     * the implementation's own clock.</strong> A batch is bounded to one
+     * partition window, and the partition trigger fires on the first poll
+     * <em>after</em> that window closes — so at the moment of the write, "now"
+     * is already the next window. An implementation that timestamps itself
+     * files every partition-triggered batch one window late, which for a
+     * low-volume feed is every batch. The caller supplies the window the
+     * messages actually belong to; see
+     * {@code FlushTrigger.getBatchAnchor()}.
+     *
+     * @param bindingId       the binding identifier
+     * @param messages        the messages to write
+     * @param partitionInstant an instant inside the partition window these
+     *                        messages belong to — the batch's anchor, never
+     *                        the flush time
      * @return result containing file path and record count
      * @throws BatchWriteException if the write fails
      */
-    BatchWriteResult write(String bindingId, List<Message> messages) throws BatchWriteException;
+    BatchWriteResult write(String bindingId, List<Message> messages, Instant partitionInstant)
+            throws BatchWriteException;
+
+    /**
+     * Writes a batch into the partition current at this moment.
+     *
+     * <p>Convenience for callers with no batch to anchor to — retrospective
+     * tooling and tests. The receive loop must NOT use it: it reintroduces the
+     * one-window-late placement this parameter exists to prevent.
+     */
+    default BatchWriteResult write(String bindingId, List<Message> messages)
+            throws BatchWriteException {
+        return write(bindingId, messages, Instant.now());
+    }
 
     /**
      * Result of a successful batch write.

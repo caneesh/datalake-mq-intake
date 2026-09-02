@@ -66,7 +66,8 @@ public class FaultableBatchWriter implements BatchWriter {
     }
 
     @Override
-    public BatchWriteResult write(String bindingId, List<Message> messages) throws BatchWriteException {
+    public BatchWriteResult write(String bindingId, List<Message> messages,
+                                 Instant partitionInstant) throws BatchWriteException {
         if (messages.isEmpty()) {
             throw new BatchWriteException("Cannot write empty batch");
         }
@@ -78,7 +79,10 @@ public class FaultableBatchWriter implements BatchWriter {
         }
 
         Instant now = Instant.now(clock);
-        String partitionPath = computePartitionPath(basePath, now);
+        // Mirrors SequenceFileBatchWriter: partition from the caller's anchor,
+        // filename from the write instant.
+        String partitionPath = computePartitionPath(basePath,
+                partitionInstant != null ? partitionInstant : now);
 
         long batchSeq = batchSequence.incrementAndGet();
         String filename = String.format("%s_%s_%d_%d.seq",

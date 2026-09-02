@@ -5,6 +5,7 @@ import com.hcsc.datalake.mqintake.core.hdfs.PartitionPath;
 import javax.jms.JMSException;
 import javax.jms.Message;
 import java.time.Clock;
+import java.time.Instant;
 
 /**
  * Determines when a batch should be flushed.
@@ -61,6 +62,7 @@ public class FlushTrigger {
     private final long maxBatchIntervalMs;
     private final Clock clock;
 
+    private Instant batchAnchor;
     private long batchStartTimeMs;
     private long batchWindowId;
     private boolean batchOpen;
@@ -89,11 +91,24 @@ public class FlushTrigger {
      * Resets the trigger state for a new batch.
      */
     public void reset() {
-        this.batchStartTimeMs = clock.millis();
-        this.batchWindowId = PartitionPath.windowId(clock.instant());
+        anchorTo(clock.instant());
         this.batchOpen = false;
         this.accumulatedBytes = 0;
         this.messageCount = 0;
+    }
+
+    /**
+     * Fixes the batch's anchor from a SINGLE clock reading.
+     *
+     * <p>The interval start, the partition window and the instant handed to
+     * the writer must all describe the same moment. Reading the clock once per
+     * derived value let a read straddle a window boundary, so a batch could be
+     * timed against one window and written into another.
+     */
+    private void anchorTo(Instant now) {
+        this.batchAnchor = now;
+        this.batchStartTimeMs = now.toEpochMilli();
+        this.batchWindowId = PartitionPath.windowId(now);
     }
 
     /**
@@ -120,9 +135,24 @@ public class FlushTrigger {
     private void openBatch() {
         if (!batchOpen) {
             batchOpen = true;
-            batchStartTimeMs = clock.millis();
-            batchWindowId = PartitionPath.windowId(clock.instant());
+            anchorTo(clock.instant());
         }
+    }
+
+    /**
+     * The instant this batch opened, which is the partition window its
+     * messages belong to.
+     *
+     * <p>This is what the writer must stamp the file with — <em>not</em> the
+     * flush instant. A batch bounded to one window is usually flushed just
+     * <em>after</em> that window closes (the partition trigger fires on the
+     * first poll past the boundary), so a writer reading its own clock would
+     * file every partition-triggered batch one window late. Before a batch has
+     * opened this is the reset instant, which is the window a batch starting
+     * now would belong to.
+     */
+    public Instant getBatchAnchor() {
+        return batchAnchor;
     }
 
     /**

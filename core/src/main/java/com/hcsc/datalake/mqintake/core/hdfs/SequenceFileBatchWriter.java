@@ -138,8 +138,24 @@ public class SequenceFileBatchWriter implements BatchWriter {
         }
     }
 
+    /**
+     * Writes into the partition current on this writer's clock.
+     *
+     * <p>Overrides the interface default so this writer's injected clock is
+     * honoured rather than the wall clock. Anchorless, so it carries the
+     * one-window-late placement described on
+     * {@link BatchWriter#write(String, List, Instant)} — the receive loop
+     * supplies an anchor and does not come through here.
+     */
     @Override
-    public BatchWriteResult write(String bindingId, List<Message> messages) throws BatchWriteException {
+    public BatchWriteResult write(String bindingId, List<Message> messages)
+            throws BatchWriteException {
+        return write(bindingId, messages, Instant.now(clock));
+    }
+
+    @Override
+    public BatchWriteResult write(String bindingId, List<Message> messages,
+                                  Instant partitionInstant) throws BatchWriteException {
         if (messages.isEmpty()) {
             throw new BatchWriteException("Cannot write empty batch");
         }
@@ -149,8 +165,13 @@ public class SequenceFileBatchWriter implements BatchWriter {
             throw new BatchWriteException("No base path configured for binding: " + bindingId);
         }
 
+        // The partition is the window the MESSAGES belong to, supplied by the
+        // caller. The filename keeps the write instant: it only has to be
+        // unique and to say when the file was produced, and a batch that
+        // waited out its window is more traceable stamped with when it landed.
         Instant now = Instant.now(clock);
-        String partitionPath = PartitionPath.compute(basePath, now);
+        String partitionPath = PartitionPath.compute(basePath,
+                partitionInstant != null ? partitionInstant : now);
 
         long batchSeq = batchSequence.incrementAndGet();
         String filename = PartitionPath.filename(bindingId, instanceId, now.toEpochMilli(), batchSeq);

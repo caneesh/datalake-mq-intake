@@ -177,7 +177,8 @@ class SessionRecoveryTest {
         return new TransactedReceiveLoop(
                 config, connection, writer, null, null, null, null, null, null,
                 "recovery-test", RECEIVE_TIMEOUT_MS,
-                session, null /* default fault policy */, BackoffPolicy.fixed(Duration.ofMillis(1)));
+                session, null /* default fault policy */, BackoffPolicy.fixed(Duration.ofMillis(1)),
+                null /* system clock */);
     }
 
     private BindingConfig config(String sourceQueue, int batchSize) {
@@ -218,7 +219,8 @@ class SessionRecoveryTest {
         final AtomicInteger written = new AtomicInteger();
 
         @Override
-        public BatchWriteResult write(String bindingId, List<Message> messages) {
+        public BatchWriteResult write(String bindingId, List<Message> messages,
+                                     java.time.Instant partitionInstant) {
             written.addAndGet(messages.size());
             return new BatchWriteResult("/fake/file.seq", messages.size(), 1_000);
         }
