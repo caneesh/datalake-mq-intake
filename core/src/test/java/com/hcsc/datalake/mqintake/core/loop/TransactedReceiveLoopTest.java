@@ -477,6 +477,32 @@ class TransactedReceiveLoopTest {
 
     // --- Health reporting for an infrastructure stall ---
 
+    /**
+     * A connection that redelivers a rolled-back message immediately and never
+     * gives up on it.
+     *
+     * <p>The broker's defaults delay every redelivery by a second and move a
+     * message to the DLQ after six, so a test driving five rollbacks and then
+     * waiting for a commit spends its budget on broker timers rather than on
+     * the loop — which is what made these two flaky. Scoped to the tests that
+     * need it: setting it on the shared factory changes redelivery for every
+     * test in this class, and several assert behaviour that depends on the
+     * defaults.
+     */
+    private Connection rollbackFriendlyConnection() throws JMSException {
+        ActiveMQConnectionFactory factory =
+                new ActiveMQConnectionFactory("vm://localhost?broker.persistent=false");
+        org.apache.activemq.RedeliveryPolicy redelivery = factory.getRedeliveryPolicy();
+        redelivery.setInitialRedeliveryDelay(0);
+        redelivery.setRedeliveryDelay(0);
+        redelivery.setUseExponentialBackOff(false);
+        redelivery.setMaximumRedeliveries(-1);
+        Connection c = factory.createConnection();
+        c.start();
+        return c;
+    }
+
+
     @Test
     void repeatedInfrastructureRollbacksReportTheListenerStalled() throws Exception {
         // An HDFS failure classifies as infrastructure, which by design never
@@ -488,13 +514,17 @@ class TransactedReceiveLoopTest {
         BindingHealthManager health = new BindingHealthManager();
         health.recordHealthy(config.getId());
 
-        // Exactly enough failures to cross the threshold, then the writer
-        // recovers on its own — no rollback storm for the broker to lose.
-        batchWriter.failNextWrites(5, "Failed to write batch to HDFS: NameNode in safemode");
+        // Keep failing until the stall has been OBSERVED, then recover. A
+        // fixed failure count raced this test against itself: with immediate
+        // redelivery the fifth rollback and the recovering commit both land in
+        // under a millisecond, so the DEGRADED state was gone before it could
+        // be read.
+        batchWriter.setFailOnNextWrite(true, "Failed to write batch to HDFS: NameNode in safemode");
         sendMessages(6);
 
+        Connection ownConnection = rollbackFriendlyConnection();
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, health, null, null,
+                config, ownConnection, batchWriter, null, null, null, health, null, null,
                 "test-instance", RECEIVE_TIMEOUT_MS);
         Future<?> future = executor.submit(loop);
 
@@ -513,8 +543,9 @@ class TransactedReceiveLoopTest {
             assertThat(health.getHealthSnapshot(config.getId()).getDegradedReason())
                     .contains("consecutive batches rolled back");
 
-            // The writer has already recovered; the next batch commits and
+            // Now let the landing path come back: the listener commits and
             // health follows it.
+            batchWriter.setFailOnNextWrite(false);
             waitForCommits(loop, 1, 5000);
 
             deadline = System.currentTimeMillis() + 3000;
@@ -527,6 +558,7 @@ class TransactedReceiveLoopTest {
         } finally {
             loop.stop();
             future.get(2, TimeUnit.SECONDS);
+            ownConnection.close();
         }
     }
 
@@ -542,8 +574,9 @@ class TransactedReceiveLoopTest {
         batchWriter.failNextWrites(1, "Failed to write batch to HDFS: transient");
         sendMessages(1);
 
+        Connection ownConnection = rollbackFriendlyConnection();
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, health, null, null,
+                config, ownConnection, batchWriter, null, null, null, health, null, null,
                 "test-instance", RECEIVE_TIMEOUT_MS);
         Future<?> future = executor.submit(loop);
 
@@ -557,6 +590,7 @@ class TransactedReceiveLoopTest {
         } finally {
             loop.stop();
             future.get(2, TimeUnit.SECONDS);
+            ownConnection.close();
         }
     }
 
