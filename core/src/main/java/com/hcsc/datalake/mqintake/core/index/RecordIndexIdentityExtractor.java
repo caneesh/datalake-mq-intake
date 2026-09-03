@@ -20,8 +20,24 @@ import java.util.Set;
  *
  * <p>Falls back to the previous extractor for files with no index: everything
  * landed before indexing was enabled, everything from a binding that has it
- * off, and the occasional file whose index write was interrupted. The fallback
- * still supplies record counts, which is what count-based checks need.
+ * off, and the occasional file whose index write was interrupted.
+ *
+ * <p><strong>Identities come from the index; the record COUNT never does.</strong>
+ * The sidecar and the audit record are both built from the writer's single
+ * {@code indexEntries} list, in one method, in one instant — so answering
+ * {@code countRecords} from the index made reconciliation compare
+ * {@code indexEntries.size()} with itself, and COUNT_MISMATCH could not fire
+ * on any indexed file. Worse, nothing then opened the data file at all, so an
+ * audited file that had become truncated or unreadable reconciled clean:
+ * UNREADABLE_FILE is only raised from the read that was being skipped.
+ *
+ * <p>The count is therefore always taken by reading the SequenceFile, which
+ * is the one observation in this path independent of what the writer believed
+ * it wrote. Identity still prefers the index, because under the production
+ * layout the file carries a byte-offset key and the payload, and the current
+ * file reader looks only at the key — so identity is not yet independently
+ * recoverable. Until it is, a DUPLICATE verdict rests on index metadata, which
+ * is why quarantining duplicates must stay off.
  *
  * <p>A partially identified index is treated as no index. Identity-set
  * comparison against a set that is missing entries reports those records as
@@ -57,12 +73,16 @@ public class RecordIndexIdentityExtractor implements IdentityExtractor {
         return indexReader.readIdentities(new Path(filePath));
     }
 
+    /**
+     * Counts records by reading the data file, always — see the class comment.
+     *
+     * <p>An {@code IOException} here is not swallowed: the caller turns it
+     * into an UNREADABLE_FILE discrepancy and retries the partition later,
+     * which is the only way a file that stopped being readable after landing
+     * is ever noticed.
+     */
     @Override
     public int countRecords(String filePath) throws IOException {
-        Optional<RecordIndex> index = indexReader.read(new Path(filePath));
-        if (index.isPresent()) {
-            return index.get().getRecordCount();
-        }
         return fallback.countRecords(filePath);
     }
 

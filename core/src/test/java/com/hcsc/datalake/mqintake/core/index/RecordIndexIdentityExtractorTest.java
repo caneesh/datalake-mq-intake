@@ -14,6 +14,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Reconciliation reading identities from the sidecar rather than from the file.
@@ -54,12 +55,34 @@ class RecordIndexIdentityExtractorTest {
     }
 
     @Test
-    void recordCountComesFromTheIndexWithoutReadingTheFile() throws Exception {
+    void recordCountIsReadFromTheFileEvenWhenAnIndexExists() throws Exception {
+        // The index claims three records; the file reader says seven. The
+        // count must come from the file.
+        //
+        // The sidecar and the audit record are both built from the writer's
+        // single indexEntries list, so answering from the index made
+        // reconciliation compare that list's size with itself — COUNT_MISMATCH
+        // could not fire on any indexed file, and because nothing then opened
+        // the file, a truncated or unreadable one reconciled clean.
         write(List.of(new RecordIndexEntry(1, "a"), new RecordIndexEntry(2, "b"),
                 new RecordIndexEntry(3, "c")));
 
-        assertThat(extractor.countRecords(dataFile())).isEqualTo(3);
-        assertThat(fallback.calls.get()).isZero();
+        assertThat(extractor.countRecords(dataFile()))
+                .as("counted from the file, not from the index")
+                .isEqualTo(7);
+        assertThat(fallback.calls.get()).isEqualTo(1);
+    }
+
+    @Test
+    void anUnreadableFileStillSurfacesEvenWithAnIndexPresent() throws Exception {
+        // UNREADABLE_FILE is raised from this read alone. While the count came
+        // from the index there was no read, so the condition was undetectable.
+        write(List.of(new RecordIndexEntry(1, "a")));
+        fallback.failWith(new IOException("block missing"));
+
+        assertThatThrownBy(() -> extractor.countRecords(dataFile()))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("block missing");
     }
 
     @Test
@@ -107,9 +130,18 @@ class RecordIndexIdentityExtractorTest {
             return Set.of();   // what the production key actually yields
         }
 
+        private volatile IOException failure;
+
+        void failWith(IOException e) {
+            this.failure = e;
+        }
+
         @Override
-        public int countRecords(String filePath) {
+        public int countRecords(String filePath) throws IOException {
             calls.incrementAndGet();
+            if (failure != null) {
+                throw failure;
+            }
             return 7;
         }
     }

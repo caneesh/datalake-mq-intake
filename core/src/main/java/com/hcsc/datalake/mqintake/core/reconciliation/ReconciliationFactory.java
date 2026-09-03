@@ -27,6 +27,28 @@ public final class ReconciliationFactory {
     }
 
     /**
+     * Builds the identity reader the scheduler runs with.
+     *
+     * <p>Named separately from {@link #createScheduler} so it can be tested on
+     * its own. This chain is what production reconciliation actually uses, and
+     * it was previously reachable only through the scheduler — so the
+     * reconciliation service tests wired a different chain by hand and the two
+     * drifted apart unnoticed. Whatever else changes here, a test must be able
+     * to ask this method what production gets.
+     *
+     * <p>Identity comes from the sidecar index where a binding writes one,
+     * falling back to the file reader — which, under the production key, finds
+     * nothing and says so. The record COUNT always comes from reading the
+     * file; see {@link RecordIndexIdentityExtractor}.
+     */
+    static RecordIndexIdentityExtractor createIdentityReader(FileSystem fileSystem,
+                                                             Configuration hadoopConf) {
+        return new RecordIndexIdentityExtractor(
+                new RecordIndexReader(fileSystem),
+                new SequenceFileIdentityReader(hadoopConf));
+    }
+
+    /**
      * Builds a scheduler ready to {@code start()}.
      *
      * @param metricsLookup resolves a binding's metrics so discrepancies can
@@ -42,12 +64,8 @@ public final class ReconciliationFactory {
 
         AuditRecordReader auditReader = new AuditRecordReader(fileSystem, auditBasePath);
 
-        // Identity comes from the sidecar index where a binding writes one,
-        // falling back to the file reader — which, under the production key,
-        // finds nothing and says so.
-        RecordIndexIdentityExtractor identityReader = new RecordIndexIdentityExtractor(
-                new RecordIndexReader(fileSystem),
-                new SequenceFileIdentityReader(hadoopConf));
+        RecordIndexIdentityExtractor identityReader =
+                createIdentityReader(fileSystem, hadoopConf);
 
         PartitionReconciliationService service = new PartitionReconciliationService(
                 fileSystem,

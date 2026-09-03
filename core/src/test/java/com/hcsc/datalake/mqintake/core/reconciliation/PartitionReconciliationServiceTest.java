@@ -284,6 +284,25 @@ class PartitionReconciliationServiceTest {
         return PartitionPath.compute(basePath, PARTITION_INSTANT);
     }
 
+    /**
+     * Writes a fixture in the ABANDONED Option A layout — {@code Text} keys
+     * carrying {@code payload_guid=…}, {@code BytesWritable} values.
+     *
+     * <p><strong>This is not the production layout</strong>, which is a
+     * {@code LongWritable} byte offset and a {@code Text} payload, pinned by
+     * {@code ProductionLayoutFingerprintTest} at header length 129. It is kept
+     * only because {@code SequenceFileIdentityReader} parses identity out of
+     * the KEY, so it is the sole layout in which these identity-classification
+     * tests can exercise anything at all.
+     *
+     * <p>The consequence, which is the point of this comment: every assertion
+     * in this class about identity — SOLE_COPY, DUPLICATE, quarantine — is
+     * proven against a file format production does not write. Those paths have
+     * no production-layout coverage until identity can be read from the
+     * payload rather than the key. {@code ReconciliationFactoryTest} covers
+     * the production wiring and layout for the count path, which is the half
+     * that has been fixed.
+     */
     private void writeSeqFile(String filename, String... identities) throws Exception {
         Path dir = new Path(partitionPath());
         fileSystem.mkdirs(dir);
