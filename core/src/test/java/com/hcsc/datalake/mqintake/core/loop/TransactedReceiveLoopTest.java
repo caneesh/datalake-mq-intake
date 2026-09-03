@@ -8,6 +8,7 @@ import com.hcsc.datalake.mqintake.core.config.BindingMode;
 import com.hcsc.datalake.mqintake.core.failure.DegradationStrategy;
 import com.hcsc.datalake.mqintake.core.failure.DegradedModeManager;
 import com.hcsc.datalake.mqintake.core.hdfs.PartitionPath;
+import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
 import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
 import com.hcsc.datalake.mqintake.core.tracker.TrackerMessageBuilder;
@@ -473,6 +474,90 @@ class TransactedReceiveLoopTest {
         config.getBatch().setIntervalMs(30000);
         config.setListenerThreads(1);
         return config;
+    }
+
+    // --- Health reporting for an infrastructure stall ---
+
+    @Test
+    void repeatedInfrastructureRollbacksReportTheListenerStalled() throws Exception {
+        // An HDFS failure classifies as infrastructure, which by design never
+        // enters degraded batch mode -- and degraded-mode entry was the loop's
+        // only route to the health manager for a batch failure. So a binding
+        // could roll back forever with /actuator/health reporting UP. This is
+        // the path that closes that.
+        BindingConfig config = createLandOnlyConfig(1);
+        BindingHealthManager health = new BindingHealthManager();
+        health.recordHealthy(config.getId());
+
+        batchWriter.setFailOnNextWrite(true, "Failed to write batch to HDFS: NameNode in safemode");
+        sendMessages(8);
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, null, health, null, null,
+                "test-instance", RECEIVE_TIMEOUT_MS);
+        Future<?> future = executor.submit(loop);
+
+        try {
+            waitForRollbacks(loop, 5, 5000);
+            long deadline = System.currentTimeMillis() + 3000;
+            while (health.getStatus(config.getId()) != BindingHealthManager.HealthStatus.DEGRADED
+                    && System.currentTimeMillis() < deadline) {
+                Thread.sleep(50);
+            }
+
+            assertThat(health.getStatus(config.getId()))
+                    .as("a listener that has rolled back repeatedly is not healthy")
+                    .isEqualTo(BindingHealthManager.HealthStatus.DEGRADED);
+            assertThat(health.getStalledListenerCount(config.getId())).isEqualTo(1);
+            assertThat(health.getHealthSnapshot(config.getId()).getDegradedReason())
+                    .contains("consecutive batches rolled back");
+
+            // The landing path comes back: the listener commits and health follows.
+            batchWriter.setFailOnNextWrite(false);
+            waitForCommits(loop, 1, 5000);
+
+            deadline = System.currentTimeMillis() + 3000;
+            while (health.getStatus(config.getId()) != BindingHealthManager.HealthStatus.HEALTHY
+                    && System.currentTimeMillis() < deadline) {
+                Thread.sleep(50);
+            }
+            assertThat(health.getStatus(config.getId())).isEqualTo(BindingHealthManager.HealthStatus.HEALTHY);
+            assertThat(health.getStalledListenerCount(config.getId())).isZero();
+        } finally {
+            loop.stop();
+            future.get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void aSingleRollbackDoesNotDisturbHealth() throws Exception {
+        // One rollback is ordinary -- the messages go back on the queue and the
+        // next attempt succeeds. Reporting on the first would flap on every
+        // transient blip.
+        BindingConfig config = createLandOnlyConfig(1);
+        BindingHealthManager health = new BindingHealthManager();
+        health.recordHealthy(config.getId());
+
+        batchWriter.setFailOnNextWrite(true, "Failed to write batch to HDFS: transient");
+        sendMessages(1);
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, batchWriter, null, null, null, health, null, null,
+                "test-instance", RECEIVE_TIMEOUT_MS);
+        Future<?> future = executor.submit(loop);
+
+        try {
+            waitForRollbacks(loop, 1, 3000);
+            batchWriter.setFailOnNextWrite(false);
+            waitForCommits(loop, 1, 5000);
+
+            assertThat(loop.getRollbackCount()).isGreaterThanOrEqualTo(1);
+            assertThat(health.getStatus(config.getId())).isEqualTo(BindingHealthManager.HealthStatus.HEALTHY);
+            assertThat(health.getStalledListenerCount(config.getId())).isZero();
+        } finally {
+            loop.stop();
+            future.get(2, TimeUnit.SECONDS);
+        }
     }
 
     // --- Partition window placement ---

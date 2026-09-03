@@ -53,6 +53,61 @@ class BindingHealthManagerTest {
                 .isEqualTo(BindingHealthManager.HealthStatus.DEGRADED);
     }
 
+    // --- Stalled listeners (infrastructure rollback loops) ---
+
+    @Test
+    void aStalledListenerMakesTheBindingDegraded() {
+        healthManager.recordHealthy("rms");
+
+        healthManager.recordListenerStalled("rms", "recv-rms-1", "HDFS unwritable");
+
+        assertThat(healthManager.getStatus("rms")).isEqualTo(BindingHealthManager.HealthStatus.DEGRADED);
+        assertThat(healthManager.getStalledListenerCount("rms")).isEqualTo(1);
+        assertThat(healthManager.getHealthSnapshot("rms").getDegradedReason())
+                .contains("HDFS unwritable");
+    }
+
+    @Test
+    void oneListenerRecoveringDoesNotClearItsSiblingsStall() {
+        healthManager.recordListenerStalled("rms", "recv-rms-1", "HDFS unwritable");
+        healthManager.recordListenerStalled("rms", "recv-rms-2", "HDFS unwritable");
+
+        healthManager.recordListenerProgressing("rms", "recv-rms-1");
+
+        // The binding is still committing nothing on listener 2. A single flag
+        // would have read healthy here.
+        assertThat(healthManager.getStatus("rms")).isEqualTo(BindingHealthManager.HealthStatus.DEGRADED);
+        assertThat(healthManager.getStalledListenerCount("rms")).isEqualTo(1);
+
+        healthManager.recordListenerProgressing("rms", "recv-rms-2");
+
+        assertThat(healthManager.getStatus("rms")).isEqualTo(BindingHealthManager.HealthStatus.HEALTHY);
+        assertThat(healthManager.getStalledListenerCount("rms")).isZero();
+    }
+
+    @Test
+    void progressFromAListenerThatWasNeverStalledLeavesHealthAlone() {
+        // Every committed batch calls this. Without the guard it would clear a
+        // DEGRADED state that degraded batch mode set, on the very next commit.
+        healthManager.recordDegraded("rms", "degraded batch mode: isolating a poison message");
+
+        healthManager.recordListenerProgressing("rms", "recv-rms-1");
+
+        assertThat(healthManager.getStatus("rms")).isEqualTo(BindingHealthManager.HealthStatus.DEGRADED);
+        assertThat(healthManager.getHealthSnapshot("rms").getDegradedReason())
+                .contains("poison message");
+    }
+
+    @Test
+    void stallsAreTrackedPerBindingNotGlobally() {
+        healthManager.recordHealthy("claims");
+        healthManager.recordListenerStalled("rms", "recv-rms-1", "tracker queue full");
+
+        assertThat(healthManager.getStatus("rms")).isEqualTo(BindingHealthManager.HealthStatus.DEGRADED);
+        assertThat(healthManager.getStatus("claims")).isEqualTo(BindingHealthManager.HealthStatus.HEALTHY);
+        assertThat(healthManager.getStalledListenerCount("claims")).isZero();
+    }
+
     @Test
     void recordStoppedSetsStoppedStatus() {
         healthManager.recordStopped("rms");

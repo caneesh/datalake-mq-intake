@@ -61,6 +61,24 @@ public class TransactedReceiveLoop implements Runnable {
      */
     private static final int UNRECOGNISED_FAULTS_BEFORE_FORCED_RECOVERY = 10;
 
+    /**
+     * Consecutive rolled-back batches before this listener is reported stalled
+     * to the health manager.
+     *
+     * <p>One rollback is ordinary: the messages go back on the queue and the
+     * next attempt usually succeeds. A run of them is not, and the failures
+     * that produce a run — an unreachable tracker queue, an unwritable HDFS
+     * path, an audit store refusing records — all classify as infrastructure,
+     * which by design never enters degraded batch mode. That was the only
+     * route from this loop to the health manager for a batch failure, so a
+     * binding could roll back indefinitely with the endpoint reporting UP.
+     *
+     * <p>Five rather than one to avoid flapping on a transient blip, and
+     * rather than fifty because the point is to be visible before anyone has
+     * to notice by hand. At RMS's cadence this is seconds, not minutes.
+     */
+    private static final int CONSECUTIVE_BATCH_FAILURES_BEFORE_STALLED = 5;
+
     private final BindingConfig config;
     private final Connection connection;
     private final BatchWriter batchWriter;
@@ -97,6 +115,15 @@ public class TransactedReceiveLoop implements Runnable {
 
     /** Loop-thread-confined; see UNRECOGNISED_FAULTS_BEFORE_FORCED_RECOVERY. */
     private int consecutiveUnrecognisedFaults = 0;
+
+    /** Loop-thread-confined; see CONSECUTIVE_BATCH_FAILURES_BEFORE_STALLED. */
+    private int consecutiveBatchFailures = 0;
+
+    /** Whether this listener's stall has already been reported, so it is reported once. */
+    private boolean reportedStalled = false;
+
+    /** Distinguishes this listener from its siblings in health reporting. */
+    private volatile String listenerId = "unstarted";
 
     /** Drives the log cadence in recordTrackerSuppressed; the metric is the signal. */
     private final AtomicLong suppressedTrackers = new AtomicLong(0);
@@ -191,6 +218,7 @@ public class TransactedReceiveLoop implements Runnable {
         loopThread = Thread.currentThread();
         String threadName = "recv-" + config.getId() + "-" + Thread.currentThread().getId();
         Thread.currentThread().setName(threadName);
+        listenerId = threadName;
 
         log.info("Starting receive loop for binding '{}' on thread {}",
                 config.getId(), threadName);
@@ -502,6 +530,43 @@ public class TransactedReceiveLoop implements Runnable {
         handleFailure(e, batchMessageIds);
         rollbackQuietly();
         metrics.recordRollback();
+        noteBatchFailure(e);
+    }
+
+    /**
+     * A batch failed. Health is left alone until a RUN of failures shows this
+     * listener is not getting through at all — see
+     * {@link #CONSECUTIVE_BATCH_FAILURES_BEFORE_STALLED}.
+     */
+    private void noteBatchFailure(Throwable e) {
+        consecutiveBatchFailures++;
+        if (reportedStalled
+                || consecutiveBatchFailures < CONSECUTIVE_BATCH_FAILURES_BEFORE_STALLED) {
+            return;
+        }
+        reportedStalled = true;
+        log.error("Binding '{}': {} consecutive batches rolled back on listener {} — reporting "
+                        + "this listener stalled. Nothing is lost, every message is back on the "
+                        + "queue, but this listener is committing nothing: {}",
+                config.getId(), consecutiveBatchFailures, listenerId, e.getMessage());
+        if (healthManager != null) {
+            healthManager.recordListenerStalled(config.getId(), listenerId,
+                    consecutiveBatchFailures + " consecutive batches rolled back; last failure: "
+                            + e.getMessage());
+        }
+    }
+
+    /** A batch committed: this listener is getting through again. */
+    private void noteBatchProgress() {
+        consecutiveBatchFailures = 0;
+        if (!reportedStalled) {
+            return;
+        }
+        reportedStalled = false;
+        log.info("Binding '{}': listener {} is committing again", config.getId(), listenerId);
+        if (healthManager != null) {
+            healthManager.recordListenerProgressing(config.getId(), listenerId);
+        }
     }
 
     /**
@@ -653,6 +718,7 @@ public class TransactedReceiveLoop implements Runnable {
 
     private void handleSuccess() {
         metrics.setHealthy(true);
+        noteBatchProgress();
         if (degradedModeManager == null) {
             return;
         }

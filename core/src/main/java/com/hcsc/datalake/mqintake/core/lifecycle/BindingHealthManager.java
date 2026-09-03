@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -24,6 +25,17 @@ public class BindingHealthManager {
     private static final Logger log = LoggerFactory.getLogger(BindingHealthManager.class);
 
     private final Map<String, BindingHealth> healthByBinding = new ConcurrentHashMap<>();
+
+    /**
+     * Listeners that cannot complete a unit of work, keyed by binding.
+     *
+     * <p>Tracked per listener rather than as one flag per binding because a
+     * binding's listener threads report independently. With a single flag, the
+     * first thread to recover would clear a stall its siblings are still in,
+     * and the endpoint would read healthy while most of the binding was
+     * committing nothing.
+     */
+    private final Map<String, Set<String>> stalledListeners = new ConcurrentHashMap<>();
 
     /**
      * Records a healthy state for a binding.
@@ -71,6 +83,69 @@ public class BindingHealthManager {
         }
         health.status = HealthStatus.DEGRADED;
         health.degradedReason = reason;
+    }
+
+    /**
+     * Records that one of a binding's listeners is rolling back repeatedly and
+     * committing nothing.
+     *
+     * <p>This is the reporting path for an infrastructure failure that keeps
+     * failing: an unreachable tracker queue, an unwritable HDFS path, an audit
+     * store that will not accept a record. Such a failure classifies as
+     * infrastructure, which by design never enters degraded batch mode — so
+     * before this existed it reached the health manager through no path at
+     * all, and a binding could roll back indefinitely while
+     * {@code /actuator/health} reported UP.
+     *
+     * <p>DEGRADED rather than UNHEALTHY on purpose. UNHEALTHY on a
+     * single-binding application aggregates to DOWN, which maps to 503 and
+     * restarts the pod — and a restart fixes none of the causes above. It
+     * would trade a visible stall for a crash loop.
+     *
+     * @param bindingId  the binding identifier
+     * @param listenerId identifies the listener thread, so siblings do not
+     *                   clear each other's stalls
+     * @param reason     what is failing, for the health endpoint's detail
+     */
+    public void recordListenerStalled(String bindingId, String listenerId, String reason) {
+        Objects.requireNonNull(bindingId, "bindingId required");
+        Objects.requireNonNull(listenerId, "listenerId required");
+        Set<String> stalled =
+                stalledListeners.computeIfAbsent(bindingId, k -> ConcurrentHashMap.newKeySet());
+        stalled.add(listenerId);
+        recordDegraded(bindingId, reason + " [" + stalled.size() + " listener(s) stalled]");
+    }
+
+    /**
+     * Records that a listener has committed again.
+     *
+     * <p>Returns without touching health when this listener was not stalled,
+     * which is the normal case on every committed batch. That guard is what
+     * keeps an ordinary commit from clearing a DEGRADED state some other
+     * mechanism set — degraded batch mode, most obviously.
+     *
+     * <p>Health is restored only when the LAST stalled listener recovers.
+     *
+     * @param bindingId  the binding identifier
+     * @param listenerId the listener that is committing again
+     */
+    public void recordListenerProgressing(String bindingId, String listenerId) {
+        Set<String> stalled = stalledListeners.get(bindingId);
+        if (stalled == null || !stalled.remove(listenerId)) {
+            return;
+        }
+        if (stalled.isEmpty()) {
+            log.info("Binding '{}': every stalled listener is committing again", bindingId);
+            recordHealthy(bindingId);
+        } else {
+            recordDegraded(bindingId, stalled.size() + " listener(s) still stalled");
+        }
+    }
+
+    /** How many of a binding's listeners are currently unable to commit. */
+    public int getStalledListenerCount(String bindingId) {
+        Set<String> stalled = stalledListeners.get(bindingId);
+        return stalled == null ? 0 : stalled.size();
     }
 
     /**
