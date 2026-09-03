@@ -38,6 +38,14 @@ import java.time.Instant;
  * batch_interval_ms is tuned, and keeps a window's data in one file rather than
  * spread across whichever partitions were current at each flush.
  *
+ * <p><strong>Confined to one listener thread.</strong> A trigger is created
+ * inside the receive loop's own {@code runLoop()} and only ever passed as a
+ * parameter — it is never a field and never shared. That confinement is why
+ * every mutable field here is plain: no volatile, no atomics, no locks.
+ * Hoisting an instance to a field to "share it across the binding" would
+ * compile and look reasonable, and would silently corrupt every counter, so
+ * treat this the way {@code ListenerSession} treats its own invariant.
+ *
  * <p><strong>The interval measures from the first message, not from reset.</strong>
  * Otherwise an idle gap longer than the interval counts against the next
  * message, which flushes it alone the moment it arrives — again one file per
@@ -152,8 +160,12 @@ public class FlushTrigger {
      * ask for it. Do not wire it into placement without that decision.
      *
      * <p>Before a batch has opened this is the reset instant.
+     *
+     * <p>Package-private: nothing in production reads it, and a public
+     * accessor named for the batch's own window is an invitation to wire it
+     * back into placement. The tests in this package are its only callers.
      */
-    public Instant getBatchAnchor() {
+    Instant getBatchAnchor() {
         return batchAnchor;
     }
 
@@ -207,18 +219,36 @@ public class FlushTrigger {
     }
 
     /**
-     * Checks if the time trigger has expired.
-     * Used for flushing partial batches on timeout.
-     * Always false when the interval is disabled (0 or less).
+     * Whether the interval alone has elapsed, ignoring every other trigger and
+     * ignoring whether the batch has any messages.
+     *
+     * <p>Not a flush decision — {@link #shouldFlush()} is. The loop once
+     * called this directly and stopped when the partition boundary had to be
+     * noticed on idle polls too; what remains is an observation point for the
+     * tests that pin interval anchoring, which is why it is package-private
+     * rather than deleted. Always false when the interval is disabled.
      */
-    public boolean isTimeoutExpired() {
+    boolean isTimeoutExpired() {
         return maxBatchIntervalMs > 0 && getElapsedMs() >= maxBatchIntervalMs;
     }
 
     /**
-     * Returns elapsed time since batch started.
+     * Elapsed time since the batch opened.
+     *
+     * <p><strong>Wall clock, not monotonic.</strong> An NTP step backwards
+     * makes this negative and the TIME trigger stops firing until the clock
+     * catches up; a step forwards fires it early. Unreachable today because
+     * both feeds set {@code batch.interval-ms: 0}, which disables the TIME
+     * trigger — but the shipped configuration invites a positive value for a
+     * freshness SLA (READINESS_REVIEW.md §F.5), and that is the point at which
+     * this needs a monotonic source.
+     *
+     * <p>The partition window deliberately does NOT share this problem in the
+     * same way: {@code batchWindowId} must come from the wall clock, because
+     * partitions are wall-clock buckets. A step there causes one extra file,
+     * not a stalled trigger.
      */
-    public long getElapsedMs() {
+    long getElapsedMs() {
         return clock.millis() - batchStartTimeMs;
     }
 
