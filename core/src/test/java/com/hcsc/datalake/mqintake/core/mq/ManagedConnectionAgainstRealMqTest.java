@@ -131,24 +131,43 @@ class ManagedConnectionAgainstRealMqTest {
     }
 
     @Test
-    void aWrongQueueManagerNameIsRetriedRatherThanFailingFast() {
-        // Documents CURRENT behaviour, and it is not what the code intends.
-        //
-        // isConfigurationError() lists MQRC_Q_MGR_NAME_ERROR among the
-        // conditions retrying cannot fix, but it searches only
-        // e.getMessage() — and the IBM MQ client puts the MQRC constant in the
-        // LINKED exception, leaving the top-level message as "Failed to connect
-        // to queue manager 'X'...". So the constant is never seen and the
-        // attempt is retried to exhaustion. Measured: ~1.3s against ~0.2s for a
-        // refused connection.
-        //
-        // Left as it is, not fixed. The cost is a bounded delay on a
-        // misconfiguration that fails either way, and this is the connection
-        // path for both applications. The same class of defect is already
-        // recorded for session faults in READINESS_REVIEW.md §D″ item 2;
-        // SessionFaultPolicy searches the message, the linked exception AND the
-        // error code, which is the shape this would need.
+    void aWrongQueueManagerNameFailsFastRatherThanRetrying() {
+        // The reason code that says so lives only in the LINKED exception:
+        // IBM MQ reports every failed connect as JMSWMQ0018 with the same
+        // top-level message, and puts reason '2058' ('MQRC_Q_MGR_NAME_ERROR')
+        // in the linked MQException. Matching the top-level message alone
+        // never saw it, so this retried to exhaustion.
         MqConnectionManager manager = manager(config(LIVE_PORT, "NO.SUCH.QM", 3), withCredentials());
+
+        assertThatThrownBy(() -> manager.getConnection(ID))
+                .isInstanceOf(MqConnectionManager.MqConnectionException.class)
+                .hasMessageContaining("Configuration error")
+                .hasMessageNotContaining("after 3 attempts");
+    }
+
+    @Test
+    void aChannelMissingFromTheQueueManagerFailsFast() {
+        // The list previously named MQRC_CHANNEL_NOT_FOUND, which IBM MQ does
+        // not emit — a channel absent from the queue manager reports 2540
+        // MQRC_UNKNOWN_CHANNEL_NAME. So this entry matched nothing twice over:
+        // wrong constant, and only the top-level message was searched.
+        MqConnectionConfig config = config(LIVE_PORT, "QM1", 3);
+        config.setChannel("NO.SUCH.CHANNEL");
+
+        MqConnectionManager manager = manager(config, withCredentials());
+
+        assertThatThrownBy(() -> manager.getConnection(ID))
+                .isInstanceOf(MqConnectionManager.MqConnectionException.class)
+                .hasMessageNotContaining("after 3 attempts");
+    }
+
+    @Test
+    void anUnreachableListenerIsStillRetried() {
+        // The guard on the fix. MQRC_HOST_NOT_AVAILABLE (2538) arrives in the
+        // same linked position as the configuration reasons, so a matcher that
+        // over-reached would turn a queue manager that is merely still
+        // starting into a hard startup failure. It must keep retrying.
+        MqConnectionManager manager = manager(config(DEAD_PORT, "QM1", 3), withCredentials());
 
         assertThatThrownBy(() -> manager.getConnection(ID))
                 .isInstanceOf(MqConnectionManager.MqConnectionException.class)

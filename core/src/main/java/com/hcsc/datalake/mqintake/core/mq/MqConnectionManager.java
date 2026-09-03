@@ -1,6 +1,7 @@
 package com.hcsc.datalake.mqintake.core.mq;
 
 import com.hcsc.datalake.mqintake.core.config.MqConnectionConfig;
+import com.hcsc.datalake.mqintake.core.loop.recovery.JmsFaultMatcher;
 import com.ibm.mq.jms.MQConnectionFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -215,6 +216,50 @@ public class MqConnectionManager implements MqConnectionProvider {
             return factory.createConnection(c.getUsername(), c.getPassword());
         }
 
+        /**
+         * Reasons no amount of retrying will fix.
+         *
+         * <p>{@code MQRC_UNKNOWN_CHANNEL_NAME} rather than
+         * {@code MQRC_CHANNEL_NOT_FOUND}: the latter was in this list and is
+         * not a reason code IBM MQ emits, so it never matched anything. A
+         * channel missing from the queue manager reports 2540
+         * MQRC_UNKNOWN_CHANNEL_NAME.
+         *
+         * <p>Deliberately absent: {@code MQRC_HOST_NOT_AVAILABLE} (2538) and
+         * {@code MQRC_CHANNEL_NOT_AVAILABLE} (2537). Both are transient — a
+         * listener not up yet, every channel instance busy — and both must
+         * keep retrying. Adding either would turn a queue manager restart into
+         * a startup failure.
+         */
+        private static final String[] NOT_WORTH_RETRYING = {
+                "MQRC_UNKNOWN_OBJECT_NAME",
+                "MQRC_NOT_AUTHORIZED",
+                "MQRC_SECURITY_ERROR",
+                "MQRC_Q_MGR_NAME_ERROR",
+                "MQRC_UNKNOWN_CHANNEL_NAME",
+        };
+
+        /**
+         * Searches the exception's own message AND its linked exception.
+         *
+         * <p>The linked half is the half that works. IBM MQ reports a failed
+         * connect as {@code JMSWMQ0018: Failed to connect to queue manager
+         * 'X'...} with error code {@code JMSWMQ0018} — identical for a wrong
+         * queue-manager name, a wrong channel and an unreachable listener. The
+         * reason code that distinguishes them lives only in the linked
+         * {@code MQException}: {@code ... reason '2058'
+         * ('MQRC_Q_MGR_NAME_ERROR')}. Matching on the top-level message alone,
+         * as this did, therefore never recognised any of the conditions listed
+         * above, and every misconfiguration was retried to exhaustion.
+         *
+         * <p>The error code is not matched on for the same reason: JMSWMQ0018
+         * covers all three cases and would make transient failures look like
+         * configuration ones.
+         */
+        private static final JmsFaultMatcher CONFIGURATION_FAULT =
+                JmsFaultMatcher.messageContains(NOT_WORTH_RETRYING)
+                        .or(JmsFaultMatcher.linkedMessageContains(NOT_WORTH_RETRYING));
+
         private boolean isConfigurationError(JMSException e) {
             // A credential that will not resolve is a configuration problem,
             // not a transient one. Retrying cannot fix it and would only delay
@@ -222,15 +267,7 @@ public class MqConnectionManager implements MqConnectionProvider {
             if (e instanceof MqCredentialException) {
                 return true;
             }
-
-            String message = e.getMessage();
-            if (message == null) return false;
-
-            return message.contains("MQRC_UNKNOWN_OBJECT_NAME") ||
-                    message.contains("MQRC_NOT_AUTHORIZED") ||
-                    message.contains("MQRC_SECURITY_ERROR") ||
-                    message.contains("MQRC_Q_MGR_NAME_ERROR") ||
-                    message.contains("MQRC_CHANNEL_NOT_FOUND");
+            return CONFIGURATION_FAULT.matches(e);
         }
 
         synchronized void close() {
