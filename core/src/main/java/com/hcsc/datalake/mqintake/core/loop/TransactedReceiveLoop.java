@@ -257,7 +257,7 @@ public class TransactedReceiveLoop implements Runnable {
             }
         }
 
-        drainOnShutdown(batch, flushTrigger);
+        drainOnShutdown(batch);
     }
 
     /**
@@ -269,17 +269,6 @@ public class TransactedReceiveLoop implements Runnable {
         Message message = listenerSession.consumer().receive(receiveTimeoutMs);
 
         if (message != null) {
-            // A message arriving after the window turned belongs to the NEXT
-            // partition, so the accumulated batch is flushed BEFORE it joins:
-            // the flush is then stamped with its own window, and this message
-            // opens a batch anchored to the new one. Adding first and flushing
-            // afterwards would put both windows' messages in one file under
-            // one of the two partitions. A no-op until the batch has opened,
-            // so the first message of a batch never triggers it.
-            if (flushTrigger.isPartitionBoundaryCrossed()) {
-                flushBatch(batch, flushTrigger);
-            }
-
             batch.add(message);
             flushTrigger.trackMessage(message);
             // In-flight batch depth. One atomic store per message,
@@ -375,7 +364,7 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     /** Lands whatever is still accumulated when the loop stops. */
-    private void drainOnShutdown(List<Message> batch, FlushTrigger flushTrigger) {
+    private void drainOnShutdown(List<Message> batch) {
         // stop() interrupts this thread to break the blocking receive(). The
         // drain below has to commit, and the IBM MQ client can fail in-flight
         // calls when the calling thread is still marked interrupted — which
@@ -390,7 +379,7 @@ public class TransactedReceiveLoop implements Runnable {
         log.info("Draining {} messages on shutdown for binding '{}'",
                 batch.size(), config.getId());
         try {
-            processBatch(batch, flushTrigger.getBatchAnchor());
+            processBatch(batch);
         } catch (Exception e) {
             log.warn("Failed to drain batch on shutdown for binding '{}': {}",
                     config.getId(), e.getMessage());
@@ -400,9 +389,7 @@ public class TransactedReceiveLoop implements Runnable {
 
     /** Processes the accumulated batch and resets the accumulation state. */
     private void flushBatch(List<Message> batch, FlushTrigger flushTrigger) {
-        // Anchor read BEFORE reset(): reset re-anchors the trigger to now,
-        // which for a partition-triggered flush is already the next window.
-        processBatch(batch, flushTrigger.getBatchAnchor());
+        processBatch(batch);
         batch.clear();
         flushTrigger.reset();
         metrics.setCurrentBatchSize(0);
@@ -424,7 +411,7 @@ public class TransactedReceiveLoop implements Runnable {
         return config.getBatch().getSize();
     }
 
-    private void processBatch(List<Message> batch, java.time.Instant partitionInstant) {
+    private void processBatch(List<Message> batch) {
         int batchSize = batch.size();
         log.debug("Processing batch of {} messages for binding '{}'",
                 batchSize, config.getId());
@@ -457,8 +444,7 @@ public class TransactedReceiveLoop implements Runnable {
                 }
             }
 
-            BatchWriter.BatchWriteResult writeResult =
-                    writeBatchToHdfs(cleanMessages, partitionInstant);
+            BatchWriter.BatchWriteResult writeResult = writeBatchToHdfs(cleanMessages);
 
             // ABC balance, before anything is sent or committed: every message
             // taken off the queue must be observed either in the file (the
@@ -601,12 +587,10 @@ public class TransactedReceiveLoop implements Runnable {
      * dominates batch time and the first thing to look at when throughput
      * drops.
      */
-    private BatchWriter.BatchWriteResult writeBatchToHdfs(List<Message> cleanMessages,
-                                                          java.time.Instant partitionInstant)
+    private BatchWriter.BatchWriteResult writeBatchToHdfs(List<Message> cleanMessages)
             throws BatchWriter.BatchWriteException {
         long flushStartNanos = System.nanoTime();
-        BatchWriter.BatchWriteResult writeResult =
-                batchWriter.write(config.getId(), cleanMessages, partitionInstant);
+        BatchWriter.BatchWriteResult writeResult = batchWriter.write(config.getId(), cleanMessages);
         metrics.recordFlushLatency(Duration.ofNanos(System.nanoTime() - flushStartNanos));
         return writeResult;
     }

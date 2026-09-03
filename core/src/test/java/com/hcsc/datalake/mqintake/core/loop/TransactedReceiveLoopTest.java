@@ -7,7 +7,6 @@ import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.BindingMode;
 import com.hcsc.datalake.mqintake.core.failure.DegradationStrategy;
 import com.hcsc.datalake.mqintake.core.failure.DegradedModeManager;
-import com.hcsc.datalake.mqintake.core.hdfs.PartitionPath;
 import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
 import com.hcsc.datalake.mqintake.core.serializer.RecordSerializer;
@@ -489,8 +488,10 @@ class TransactedReceiveLoopTest {
         BindingHealthManager health = new BindingHealthManager();
         health.recordHealthy(config.getId());
 
-        batchWriter.setFailOnNextWrite(true, "Failed to write batch to HDFS: NameNode in safemode");
-        sendMessages(8);
+        // Exactly enough failures to cross the threshold, then the writer
+        // recovers on its own — no rollback storm for the broker to lose.
+        batchWriter.failNextWrites(5, "Failed to write batch to HDFS: NameNode in safemode");
+        sendMessages(6);
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
                 config, connection, batchWriter, null, null, null, health, null, null,
@@ -512,8 +513,8 @@ class TransactedReceiveLoopTest {
             assertThat(health.getHealthSnapshot(config.getId()).getDegradedReason())
                     .contains("consecutive batches rolled back");
 
-            // The landing path comes back: the listener commits and health follows.
-            batchWriter.setFailOnNextWrite(false);
+            // The writer has already recovered; the next batch commits and
+            // health follows it.
             waitForCommits(loop, 1, 5000);
 
             deadline = System.currentTimeMillis() + 3000;
@@ -538,7 +539,7 @@ class TransactedReceiveLoopTest {
         BindingHealthManager health = new BindingHealthManager();
         health.recordHealthy(config.getId());
 
-        batchWriter.setFailOnNextWrite(true, "Failed to write batch to HDFS: transient");
+        batchWriter.failNextWrites(1, "Failed to write batch to HDFS: transient");
         sendMessages(1);
 
         TransactedReceiveLoop loop = new TransactedReceiveLoop(
@@ -548,7 +549,6 @@ class TransactedReceiveLoopTest {
 
         try {
             waitForRollbacks(loop, 1, 3000);
-            batchWriter.setFailOnNextWrite(false);
             waitForCommits(loop, 1, 5000);
 
             assertThat(loop.getRollbackCount()).isGreaterThanOrEqualTo(1);
@@ -566,56 +566,12 @@ class TransactedReceiveLoopTest {
     private static final long WINDOW = 15L * 60L * 1000L;
 
     @Test
-    void batchIsStampedWithItsOwnWindowNotTheFlushWindow() throws Exception {
-        // The partition trigger fires on the first poll AFTER the window
-        // closes, so the flush always happens in the NEXT window. Before the
-        // anchor was threaded through, the writer read its own clock at that
-        // moment and filed every partition-triggered batch one window late —
-        // which, with batch_interval_ms 0 and a low-volume feed, is every
-        // batch.
-        MutableClock clock = new MutableClock(WINDOW * 1000 + 60_000);
-
-        BindingConfig config = createLandOnlyConfig(1000);
-        config.getBatch().setIntervalMs(0);   // size is never reached; only the boundary flushes
-
-        TransactedReceiveLoop loop = new TransactedReceiveLoop(
-                config, connection, batchWriter, null, null, null, null, null, null,
-                "test-instance", RECEIVE_TIMEOUT_MS, null, null, null, clock);
-        Future<?> future = executor.submit(loop);
-
-        try {
-            sendMessages(2);
-            waitForQueueEmpty(SOURCE_QUEUE, 2000);   // both are in the batch
-
-            // Window closes. The idle poll notices and flushes.
-            clock.set(WINDOW * 1001 + 500);
-            waitForCommits(loop, 1, 3000);
-
-            // A message in the new window, flushed when that window closes.
-            sendMessages(1);
-            waitForQueueEmpty(SOURCE_QUEUE, 2000);
-            clock.set(WINDOW * 1002 + 500);
-            waitForCommits(loop, 2, 3000);
-        } finally {
-            loop.stop();
-            future.get(2, TimeUnit.SECONDS);
-        }
-
-        List<CountingBatchWriter.Written> writes = batchWriter.getWritten();
-        assertThat(writes).hasSize(2);
-
-        assertThat(writes.get(0).getMessageCount()).isEqualTo(2);
-        assertThat(PartitionPath.windowId(writes.get(0).getPartitionInstant()))
-                .as("first batch belongs to the window it accumulated in, not the one it flushed in")
-                .isEqualTo(1000L);
-
-        assertThat(writes.get(1).getMessageCount()).isEqualTo(1);
-        assertThat(PartitionPath.windowId(writes.get(1).getPartitionInstant()))
-                .isEqualTo(1001L);
-    }
-
-    @Test
     void oneBatchNeverSpansTwoWindows() throws Exception {
+        // The partition trigger's invariant, on the idle-poll path: a quiet
+        // batch is flushed when its window closes rather than waiting for the
+        // next message, so each window's messages land in their own batch.
+        // Which window the file is FILED under is a separate decision — the
+        // writer files by flush time, see §F.6.
         MutableClock clock = new MutableClock(WINDOW * 2000);
 
         BindingConfig config = createLandOnlyConfig(1000);
@@ -641,12 +597,9 @@ class TransactedReceiveLoopTest {
             future.get(2, TimeUnit.SECONDS);
         }
 
-        List<CountingBatchWriter.Written> writes = batchWriter.getWritten();
-        assertThat(writes).hasSize(2);
-        assertThat(writes.get(0).getMessageCount()).isEqualTo(3);
-        assertThat(writes.get(1).getMessageCount()).isEqualTo(4);
-        assertThat(PartitionPath.windowId(writes.get(0).getPartitionInstant()))
-                .isNotEqualTo(PartitionPath.windowId(writes.get(1).getPartitionInstant()));
+        assertThat(batchWriter.getBatchSizes())
+                .as("each window's messages land in their own batch, never mixed")
+                .containsExactly(3, 4);
     }
 
     /** A clock a test can move across a partition boundary without waiting. */
@@ -1114,7 +1067,7 @@ class TransactedReceiveLoopTest {
 
         // Always fails, so healthy=false is the final state rather than a
         // value a later successful redelivery would overwrite.
-        BatchWriter alwaysFails = (bindingId, messages, partitionInstant) -> {
+        BatchWriter alwaysFails = (bindingId, messages) -> {
             throw new BatchWriter.BatchWriteException("HDFS down");
         };
 

@@ -94,62 +94,31 @@ class SequenceFileBatchWriterTest {
     }
 
     @Test
-    void batchLandsInItsOwnWindowNotTheFlushWindow() throws Exception {
-        // The partition trigger fires on the first poll AFTER the window
-        // closes, so at write time the clock is already in the next window.
-        // The file must still land in the window its messages belong to.
+    void aBatchIsFiledUnderTheWindowItWasWrittenIn_notTheOneItAccumulatedIn() throws Exception {
+        // Pins READINESS_REVIEW.md §F.6. A PARTITION-triggered flush fires just
+        // AFTER its window closes, so the file lands under the FOLLOWING
+        // window. That is deliberate: filing under the window the batch opened
+        // in writes into a partition that has just closed, and a downstream job
+        // that sweeps once at close would miss the file. A consistent offset is
+        // recoverable; a missed file is not.
+        //
+        // This test exists so the behaviour is not re-reported as a bug and
+        // "fixed" -- reversing it is a contract decision with the downstream
+        // consumers, not a code change.
         TestClock clock = new TestClock(
                 ZonedDateTime.of(2025, 8, 22, 10, 15, 0, 500_000_000, ZoneOffset.UTC).toInstant());
 
         String basePath = tempDir.resolve("data").toString();
         SequenceFileBatchWriter writer = createWriter(basePath, clock);
 
-        Instant batchAnchor =
-                ZonedDateTime.of(2025, 8, 22, 10, 3, 0, 0, ZoneOffset.UTC).toInstant();
-
-        BatchWriter.BatchWriteResult result =
-                writer.write("test-binding", createMessages(3), batchAnchor);
+        // Messages that all arrived in 10:00-10:14 (quarter=0), flushed half a
+        // second after that window closed.
+        BatchWriter.BatchWriteResult result = writer.write("test-binding", createMessages(3));
 
         assertThat(result.getFilePath())
-                .as("partition comes from the batch anchor, not the write clock")
-                .contains("hour=10/quarter=0")
-                .doesNotContain("quarter=1");
+                .as("filed forward, into the window that is still open")
+                .contains("hour=10/quarter=1");
         assertThat(fileSystem.exists(new Path(result.getFilePath()))).isTrue();
-    }
-
-    @Test
-    void anchorAcrossADayBoundaryStaysInThePreviousDay() throws Exception {
-        // The worst case for the flush-time bug: a batch that filled just
-        // before midnight and flushed just after would land a whole day out.
-        TestClock clock = new TestClock(
-                ZonedDateTime.of(2025, 8, 23, 0, 0, 1, 0, ZoneOffset.UTC).toInstant());
-
-        String basePath = tempDir.resolve("data").toString();
-        SequenceFileBatchWriter writer = createWriter(basePath, clock);
-
-        Instant batchAnchor =
-                ZonedDateTime.of(2025, 8, 22, 23, 50, 0, 0, ZoneOffset.UTC).toInstant();
-
-        BatchWriter.BatchWriteResult result =
-                writer.write("test-binding", createMessages(2), batchAnchor);
-
-        assertThat(result.getFilePath())
-                .contains("year=2025/month=08/day=22/hour=23/quarter=3");
-    }
-
-    @Test
-    void anchorlessWriteStillUsesTheWriterClock() throws Exception {
-        // The two-argument convenience keeps its old behaviour for callers
-        // with no batch to anchor to; only the loop is required to anchor.
-        TestClock clock = new TestClock(
-                ZonedDateTime.of(2025, 8, 22, 10, 20, 0, 0, ZoneOffset.UTC).toInstant());
-
-        String basePath = tempDir.resolve("data").toString();
-        SequenceFileBatchWriter writer = createWriter(basePath, clock);
-
-        BatchWriter.BatchWriteResult result = writer.write("test-binding", createMessages(1));
-
-        assertThat(result.getFilePath()).contains("hour=10/quarter=1");
     }
 
     @Test
@@ -540,10 +509,9 @@ class SequenceFileBatchWriterTest {
         }
 
         @Override
-        public BatchWriteResult write(String bindingId, List<Message> messages,
-                                     Instant partitionInstant) throws BatchWriteException {
-            partitionPathUsed = PartitionPath.compute(basePath,
-                    partitionInstant != null ? partitionInstant : Instant.now(writerClock));
+        public BatchWriteResult write(String bindingId, List<Message> messages)
+                throws BatchWriteException {
+            partitionPathUsed = PartitionPath.compute(basePath, Instant.now(writerClock));
 
             // Check partition before write completes (during our write)
             try {
@@ -557,7 +525,7 @@ class SequenceFileBatchWriterTest {
                 // Ignore
             }
 
-            return super.write(bindingId, messages, partitionInstant);
+            return super.write(bindingId, messages);
         }
     }
 

@@ -219,8 +219,7 @@ class SessionRecoveryTest {
         final AtomicInteger written = new AtomicInteger();
 
         @Override
-        public BatchWriteResult write(String bindingId, List<Message> messages,
-                                     java.time.Instant partitionInstant) {
+        public BatchWriteResult write(String bindingId, List<Message> messages) {
             written.addAndGet(messages.size());
             return new BatchWriteResult("/fake/file.seq", messages.size(), 1_000);
         }

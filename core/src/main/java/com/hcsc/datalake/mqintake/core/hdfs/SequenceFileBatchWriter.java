@@ -139,23 +139,36 @@ public class SequenceFileBatchWriter implements BatchWriter {
     }
 
     /**
-     * Writes into the partition current on this writer's clock.
+     * Writes the batch into the partition current at flush time.
      *
-     * <p>Overrides the interface default so this writer's injected clock is
-     * honoured rather than the wall clock. Anchorless, so it carries the
-     * one-window-late placement described on
-     * {@link BatchWriter#write(String, List, Instant)} — the receive loop
-     * supplies an anchor and does not come through here.
+     * <p><strong>Forward-filing, and it is a decision rather than an
+     * oversight.</strong> A batch is bounded to one partition window, and the
+     * PARTITION trigger fires on the first poll <em>after</em> that window
+     * closes — so a batch that accumulated in window N is written about a
+     * second into window N+1, and lands under N+1. The label is the window the
+     * file was written in, not the one its messages arrived in.
+     *
+     * <p>The alternative — filing under the window the batch opened in — was
+     * considered and NOT adopted (READINESS_REVIEW.md §F.6): it writes into a
+     * partition that has just closed, and a downstream job that sweeps a
+     * partition once at close and never revisits would miss the file
+     * entirely. A consistent one-window offset is recoverable; a missed file
+     * is indistinguishable from loss. Filing forward keeps every write landing
+     * in a still-open partition.
+     *
+     * <p>The cost, accepted knowingly: a file in window N may hold messages
+     * received in the closing moments of N-1, and for a low-volume feed like
+     * RMS — where PARTITION is the usual trigger — that is the normal case
+     * rather than an edge. The legacy MDB has no equivalent skew, because it
+     * writes one message per file at receive time.
+     *
+     * <p>Reversing this is a contract decision belonging to the downstream
+     * consumers, not a code fix. {@code FlushTrigger.getBatchAnchor()} already
+     * exposes the batch's own window if that decision ever changes.
      */
     @Override
     public BatchWriteResult write(String bindingId, List<Message> messages)
             throws BatchWriteException {
-        return write(bindingId, messages, Instant.now(clock));
-    }
-
-    @Override
-    public BatchWriteResult write(String bindingId, List<Message> messages,
-                                  Instant partitionInstant) throws BatchWriteException {
         if (messages.isEmpty()) {
             throw new BatchWriteException("Cannot write empty batch");
         }
@@ -165,13 +178,8 @@ public class SequenceFileBatchWriter implements BatchWriter {
             throw new BatchWriteException("No base path configured for binding: " + bindingId);
         }
 
-        // The partition is the window the MESSAGES belong to, supplied by the
-        // caller. The filename keeps the write instant: it only has to be
-        // unique and to say when the file was produced, and a batch that
-        // waited out its window is more traceable stamped with when it landed.
         Instant now = Instant.now(clock);
-        String partitionPath = PartitionPath.compute(basePath,
-                partitionInstant != null ? partitionInstant : now);
+        String partitionPath = PartitionPath.compute(basePath, now);
 
         long batchSeq = batchSequence.incrementAndGet();
         String filename = PartitionPath.filename(bindingId, instanceId, now.toEpochMilli(), batchSeq);

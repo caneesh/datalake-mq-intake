@@ -140,16 +140,18 @@ public class FlushTrigger {
     }
 
     /**
-     * The instant this batch opened, which is the partition window its
-     * messages belong to.
+     * The instant this batch opened — the partition window its messages
+     * arrived in.
      *
-     * <p>This is what the writer must stamp the file with — <em>not</em> the
-     * flush instant. A batch bounded to one window is usually flushed just
-     * <em>after</em> that window closes (the partition trigger fires on the
-     * first poll past the boundary), so a writer reading its own clock would
-     * file every partition-triggered batch one window late. Before a batch has
-     * opened this is the reset instant, which is the window a batch starting
-     * now would belong to.
+     * <p><strong>Not what the file is filed under.</strong> The writer files
+     * by flush time, so a partition-triggered batch lands in the following
+     * window; that is a deliberate contract decision, explained on
+     * {@code SequenceFileBatchWriter.write} and in READINESS_REVIEW.md §F.6.
+     * This accessor exposes the batch's own window for diagnostics, and so
+     * that reversing §F.6 stays a small change if the downstream consumers
+     * ask for it. Do not wire it into placement without that decision.
+     *
+     * <p>Before a batch has opened this is the reset instant.
      */
     public Instant getBatchAnchor() {
         return batchAnchor;

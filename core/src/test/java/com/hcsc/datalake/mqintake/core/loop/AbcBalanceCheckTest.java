@@ -317,8 +317,7 @@ class AbcBalanceCheckTest {
         }
 
         @Override
-        public BatchWriteResult write(String bindingId, List<Message> messages,
-                                     java.time.Instant partitionInstant) {
+        public BatchWriteResult write(String bindingId, List<Message> messages) {
             int observed = messages.size() - shortfall;
             return new BatchWriteResult("/fake/year=2026/rms_abc_1.seq", observed, 1_000);
         }

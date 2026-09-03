@@ -271,6 +271,9 @@ class FlushTriggerTest {
 
     @Test
     void anchorIsTheBatchOpenInstantNotTheFlushInstant() {
+        // The anchor records the window the messages ARRIVED in. The file is
+        // filed under the window it is WRITTEN in (§F.6) -- these differ by
+        // design, and this pins the accessor's meaning, not the placement.
         TestClock clock = new TestClock();
         FlushTrigger trigger = new FlushTrigger(Integer.MAX_VALUE, Long.MAX_VALUE, 0, clock);
 
@@ -284,13 +287,12 @@ class FlushTriggerTest {
 
         // ...and is flushed just after window 100 closes, which is how the
         // partition trigger always fires. The anchor must still describe
-        // window 100: it is what the writer stamps the file with, and reading
-        // the clock at this point would file the batch one window late.
+        // window 100 even though the file will be filed under 101.
         clock.set(WINDOW * 101 + 500);
         assertThat(trigger.getActiveTrigger()).isEqualTo(FlushTrigger.Trigger.PARTITION);
         assertThat(trigger.getBatchAnchor()).isEqualTo(opened);
         assertThat(PartitionPath.windowId(trigger.getBatchAnchor()))
-                .as("the anchor's window is the batch's window, not the flush's")
+                .as("the anchor is the batch's own window, whatever the file is filed under")
                 .isEqualTo(100L)
                 .isNotEqualTo(PartitionPath.windowId(clock.instant()));
     }
@@ -313,6 +315,70 @@ class FlushTriggerTest {
         clock.advance(30_000);
         trigger.trackMessage(100);
         assertThat(PartitionPath.windowId(trigger.getBatchAnchor())).isEqualTo(101L);
+    }
+
+    @Test
+    void aClockThatMovesBetweenReadsStillAnchorsToOneWindow() {
+        // reset()/openBatch() used to read the clock twice — once for the
+        // interval start, once for the window id. A boundary falling between
+        // the two reads anchored the batch to window N+1 while its first
+        // message arrived in N, so the partition trigger would not fire until
+        // N+2 and the batch spanned two windows. Both values now come from a
+        // single reading.
+        // A full window per read, so ANY two reads taken while anchoring one
+        // batch land in different windows.
+        SteppingClock clock = new SteppingClock(WINDOW * 100, WINDOW);
+        FlushTrigger trigger = new FlushTrigger(Integer.MAX_VALUE, Long.MAX_VALUE, 0, clock);
+
+        trigger.reset();
+        trigger.trackMessage(100);
+
+        long anchorWindow = PartitionPath.windowId(trigger.getBatchAnchor());
+        clock.freezeAt(anchorWindow * WINDOW + 1);   // still inside the anchor's own window
+
+        assertThat(trigger.getActiveTrigger())
+                .as("a batch must not flush while the clock is still in the window it opened in")
+                .isEqualTo(FlushTrigger.Trigger.NONE);
+    }
+
+    /**
+     * A clock that advances on every read, so a window boundary can fall
+     * between two reads taken while anchoring one batch.
+     */
+    private static class SteppingClock extends Clock {
+        private final AtomicLong now;
+        private final long stepMillis;
+        private volatile boolean frozen;
+
+        SteppingClock(long startMillis, long stepMillis) {
+            this.now = new AtomicLong(startMillis);
+            this.stepMillis = stepMillis;
+        }
+
+        void freezeAt(long millis) {
+            now.set(millis);
+            frozen = true;
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneId.of("UTC");
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return Instant.ofEpochMilli(millis());
+        }
+
+        @Override
+        public long millis() {
+            return frozen ? now.get() : now.getAndAdd(stepMillis);
+        }
     }
 
     @Test

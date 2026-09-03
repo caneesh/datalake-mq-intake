@@ -230,7 +230,7 @@ class ClaimsBisectionIntegrationTest {
                 });
 
         // Every write fails the way a landing-path outage does.
-        BatchWriter unwritable = (bindingId, messages, partitionInstant) -> {
+        BatchWriter unwritable = (bindingId, messages) -> {
             throw new BatchWriter.BatchWriteException(
                     "Failed to write batch to HDFS: NameNode in safemode");
         };
@@ -408,8 +408,7 @@ class ClaimsBisectionIntegrationTest {
         final Set<String> writtenBodies = ConcurrentHashMap.newKeySet();
 
         @Override
-        public BatchWriteResult write(String bindingId, List<Message> messages,
-                                     java.time.Instant partitionInstant)
+        public BatchWriteResult write(String bindingId, List<Message> messages)
                 throws BatchWriteException {
             try {
                 for (Message m : messages) {
