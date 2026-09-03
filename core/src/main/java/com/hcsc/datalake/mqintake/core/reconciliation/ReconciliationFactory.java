@@ -29,8 +29,9 @@ public final class ReconciliationFactory {
     /**
      * Builds the identity reader the scheduler runs with.
      *
-     * <p>Named separately from {@link #createScheduler} so it can be tested on
-     * its own. This chain is what production reconciliation actually uses, and
+     * <p>Named separately from {@link #createScheduler}, and public, so tests
+     * — including integration tests in the binding modules — bind against the
+     * chain production runs rather than assembling a lookalike. This chain is what production reconciliation actually uses, and
      * it was previously reachable only through the scheduler — so the
      * reconciliation service tests wired a different chain by hand and the two
      * drifted apart unnoticed. Whatever else changes here, a test must be able
@@ -41,8 +42,8 @@ public final class ReconciliationFactory {
      * nothing and says so. The record COUNT always comes from reading the
      * file; see {@link RecordIndexIdentityExtractor}.
      */
-    static RecordIndexIdentityExtractor createIdentityReader(FileSystem fileSystem,
-                                                             Configuration hadoopConf) {
+    public static RecordIndexIdentityExtractor createIdentityReader(FileSystem fileSystem,
+                                                                    Configuration hadoopConf) {
         return new RecordIndexIdentityExtractor(
                 new RecordIndexReader(fileSystem),
                 new SequenceFileIdentityReader(hadoopConf));

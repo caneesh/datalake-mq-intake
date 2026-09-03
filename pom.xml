@@ -41,6 +41,14 @@
         <hadoop.version>3.3.6</hadoop.version>
 
         <!-- Testing -->
+        <jacoco.version>0.8.11</jacoco.version>
+        <!--
+          The floor a build fails below. Set on INSTRUCTION rather than LINE:
+          line coverage counts a multi-condition `if` as covered once any
+          branch runs it, which flatters a codebase whose risk lives in
+          failure branches.
+        -->
+        <jacoco.min.coverage>0.80</jacoco.min.coverage>
         <junit-jupiter.version>5.10.2</junit-jupiter.version>
         <activemq.version>5.18.3</activemq.version>
         <mockito.version>5.11.0</mockito.version>
@@ -131,6 +139,51 @@
     </dependencyManagement>
 
     <build>
+        <plugins>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals><goal>prepare-agent</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>test</phase>
+                        <goals><goal>report</goal></goals>
+                    </execution>
+                    <!--
+                      The floor, enforced. Measuring coverage without failing
+                      below it makes the number a comment: it drifts down one
+                      untested class at a time and nobody sees the moment it
+                      crossed. BUNDLE scope so a single sparse class does not
+                      block a build, which would push people to write tests
+                      that raise a ratio rather than tests that catch a bug.
+                    -->
+                    <execution>
+                        <id>check-coverage</id>
+                        <phase>verify</phase>
+                        <goals><goal>check</goal></goals>
+                        <configuration>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>INSTRUCTION</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${jacoco.min.coverage}</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+
         <pluginManagement>
             <plugins>
                 <plugin>
@@ -150,6 +203,11 @@
                     <groupId>org.springframework.boot</groupId>
                     <artifactId>spring-boot-maven-plugin</artifactId>
                     <version>${spring-boot.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.jacoco</groupId>
+                    <artifactId>jacoco-maven-plugin</artifactId>
+                    <version>${jacoco.version}</version>
                 </plugin>
             </plugins>
         </pluginManagement>
