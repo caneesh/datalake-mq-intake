@@ -28,6 +28,18 @@ public final class AuditPaths {
         return bindingDir(auditBasePath, bindingId) + "/" + DATE_FORMAT.format(date);
     }
 
+    /**
+     * The binding's pending-partition backlog — partitions reconciliation
+     * examined but could not resolve, kept so they are re-examined after they
+     * age out of the lookback window and across restarts.
+     *
+     * <p>Under the binding directory rather than a date directory: it is
+     * per binding and rewritten in place, not one file per day.
+     */
+    public static String pendingFile(String auditBasePath, String bindingId) {
+        return bindingDir(auditBasePath, bindingId) + "/_pending-partitions";
+    }
+
     /** The record file the emitter writes. */
     public static String recordFile(String auditBasePath, String bindingId, LocalDate date,
                                     String auditFilename) {

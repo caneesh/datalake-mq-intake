@@ -106,24 +106,156 @@ class ReconciliationSchedulerTest {
     }
 
     @Test
-    void aDifferentBindingIsNotBlockedByAnotherStillRunning() throws Exception {
+    void aBlockedBindingDoesNotHoldUpAnother() throws Exception {
+        // Rewritten. The previous version created its own Thread and released
+        // the first binding BEFORE invoking the second, so it proved only that
+        // both were called — it could not have failed while a single scheduler
+        // thread ran every binding in turn.
+        //
+        // This one goes through start(), so the production dispatch decides
+        // the outcome, and it never releases the first binding: the second has
+        // to complete while the first is still blocked.
         IntakeProperties properties = properties(true);
         properties.getReconciliation().setLookbackWindows(1);
 
-        CountDownLatch inside = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        BlockingService service = new BlockingService(inside, release);
+        CountDownLatch rmsInside = new CountDownLatch(1);
+        CountDownLatch neverReleased = new CountDownLatch(1);
+        CountDownLatch claimsFinished = new CountDownLatch(1);
+
+        PartitionReconciler service = (bindingId, basePath, instant, identityApproved,
+                                       quarantine, metrics) -> {
+            if ("rms".equals(bindingId)) {
+                rmsInside.countDown();
+                try {
+                    neverReleased.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            } else {
+                claimsFinished.countDown();
+            }
+            return PartitionReconciliationService.ReconciliationReport
+                    .notReady(bindingId, "partition", "stub");
+        };
+
         ReconciliationScheduler scheduler = scheduler(service, properties);
+        try {
+            scheduler.start();
 
-        Thread first = new Thread(() -> scheduler.runBindingQuietly(properties.getBindings().get(0)));
-        first.start();
-        assertThat(inside.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(rmsInside.await(5, TimeUnit.SECONDS))
+                    .as("the first binding reached the blocking call").isTrue();
+            assertThat(claimsFinished.await(5, TimeUnit.SECONDS))
+                    .as("the second binding must run while the first is still blocked")
+                    .isTrue();
+        } finally {
+            neverReleased.countDown();
+            scheduler.close();
+        }
+    }
 
-        release.countDown();
-        scheduler.runBindingQuietly(properties.getBindings().get(1));
-        first.join(5000);
+    @Test
+    void aPartitionThatAgedOutOfTheLookbackIsStillReconciled() throws Exception {
+        // The defect: work was rebuilt from the last N closed windows only, so
+        // an unresolved partition left the schedule once it aged past them —
+        // its discrepancy intact, nothing looking at it again. isRetryLater()
+        // was set for exactly this and had no consumer.
+        IntakeProperties properties = properties(true);
+        properties.getReconciliation().setLookbackWindows(1);
+        properties.setBindings(new ArrayList<>(List.of(binding("rms", true))));
 
-        assertThat(service.calls.get()).isEqualTo(2);
+        java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("pending-it");
+        org.apache.hadoop.conf.Configuration conf = new org.apache.hadoop.conf.Configuration();
+        conf.set("fs.defaultFS", "file:///");
+        try (org.apache.hadoop.fs.FileSystem fs =
+                     org.apache.hadoop.fs.FileSystem.getLocal(conf)) {
+
+            PendingPartitions pending =
+                    new PendingPartitions(fs, dir.resolve("audit").toString());
+            Instant stale = FIXED.instant().minus(java.time.Duration.ofHours(3));
+            pending.retain("rms", stale);
+
+            java.util.Set<Instant> examined =
+                    java.util.concurrent.ConcurrentHashMap.newKeySet();
+            PartitionReconciler service = (bindingId, basePath, instant, identityApproved,
+                                           quarantine, metrics) -> {
+                examined.add(instant);
+                return PartitionReconciliationService.ReconciliationReport
+                        .notReady(bindingId, "partition", "stub");
+            };
+
+            ReconciliationScheduler scheduler = new ReconciliationScheduler(
+                    service, properties, id -> null, FIXED, pending);
+            scheduler.runBindingQuietly(properties.getBindings().get(0));
+
+            assertThat(examined)
+                    .as("three hours old, far outside a single lookback window")
+                    .contains(stale);
+        }
+    }
+
+    @Test
+    void aResolvedPartitionLeavesTheBacklog() throws Exception {
+        IntakeProperties properties = properties(true);
+        properties.getReconciliation().setLookbackWindows(1);
+        properties.setBindings(new ArrayList<>(List.of(binding("rms", true))));
+
+        java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("pending-it");
+        org.apache.hadoop.conf.Configuration conf = new org.apache.hadoop.conf.Configuration();
+        conf.set("fs.defaultFS", "file:///");
+        try (org.apache.hadoop.fs.FileSystem fs =
+                     org.apache.hadoop.fs.FileSystem.getLocal(conf)) {
+
+            PendingPartitions pending =
+                    new PendingPartitions(fs, dir.resolve("audit").toString());
+            Instant stale = FIXED.instant().minus(java.time.Duration.ofHours(3));
+            pending.retain("rms", stale);
+
+            // A clean report — retryLater false — retires it.
+            PartitionReconciler service = (bindingId, basePath, instant, identityApproved,
+                                           quarantine, metrics) ->
+                    new PartitionReconciliationService.ReconciliationReport(
+                            bindingId, "partition",
+                            PartitionReconciliationService.ReconciliationStatus.CLEAN,
+                            List.of(), 0, 0, 0, 0, false, null);
+
+            ReconciliationScheduler scheduler = new ReconciliationScheduler(
+                    service, properties, id -> null, FIXED, pending);
+            scheduler.runBindingQuietly(properties.getBindings().get(0));
+
+            assertThat(pending.pending("rms")).doesNotContain(stale);
+        }
+    }
+
+    @Test
+    void aNotReadyBindingDoesNotAccumulateABacklogForever() throws Exception {
+        // NOT_READY sets retryLater, but it means the BINDING has no approved
+        // identity — a standing property, not something another pass on this
+        // partition could change. Enqueuing it would add every window and
+        // retire none.
+        IntakeProperties properties = properties(true);
+        properties.getReconciliation().setLookbackWindows(2);
+        properties.setBindings(new ArrayList<>(List.of(binding("rms", true))));
+
+        java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("pending-it");
+        org.apache.hadoop.conf.Configuration conf = new org.apache.hadoop.conf.Configuration();
+        conf.set("fs.defaultFS", "file:///");
+        try (org.apache.hadoop.fs.FileSystem fs =
+                     org.apache.hadoop.fs.FileSystem.getLocal(conf)) {
+
+            PendingPartitions pending =
+                    new PendingPartitions(fs, dir.resolve("audit").toString());
+            PartitionReconciler service = (bindingId, basePath, instant, identityApproved,
+                                           quarantine, metrics) ->
+                    PartitionReconciliationService.ReconciliationReport
+                            .notReady(bindingId, "partition", "no approved identity");
+
+            ReconciliationScheduler scheduler = new ReconciliationScheduler(
+                    service, properties, id -> null, FIXED, pending);
+            scheduler.runBindingQuietly(properties.getBindings().get(0));
+            scheduler.runBindingQuietly(properties.getBindings().get(0));
+
+            assertThat(pending.pending("rms")).isEmpty();
+        }
     }
 
     @Test

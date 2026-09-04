@@ -77,6 +77,7 @@ public final class ReconciliationFactory {
                 clock,
                 instanceId);
 
-        return new ReconciliationScheduler(service, properties, metricsLookup, clock);
+        return new ReconciliationScheduler(service, properties, metricsLookup, clock,
+                new PendingPartitions(fileSystem, auditBasePath));
     }
 }

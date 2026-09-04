@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -62,15 +63,41 @@ public class ReconciliationScheduler implements AutoCloseable {
 
     private volatile ScheduledExecutorService scheduler;
 
+    /**
+     * Where a binding's work actually runs.
+     *
+     * <p>The class has always documented that one binding's slow or failing
+     * reconciliation must not delay another's, and did not honour it: a single
+     * scheduled thread called every binding in turn, so the first to block
+     * held up the rest of the pass and the next pass behind it. Sized to the
+     * binding count so each has a thread of its own, and capped so the pool is
+     * bounded whatever the configuration.
+     */
+    private volatile ExecutorService bindingWorkers;
+
+    /** Partitions carried over from earlier passes; see PendingPartitions. */
+    private final PendingPartitions pendingPartitions;
+
+    static final int MAX_BINDING_WORKERS = 8;
+
     public ReconciliationScheduler(PartitionReconciler reconciliationService,
                                    IntakeProperties properties,
                                    Function<String, BindingMetrics> metricsLookup,
                                    Clock clock) {
+        this(reconciliationService, properties, metricsLookup, clock, null);
+    }
+
+    public ReconciliationScheduler(PartitionReconciler reconciliationService,
+                                   IntakeProperties properties,
+                                   Function<String, BindingMetrics> metricsLookup,
+                                   Clock clock,
+                                   PendingPartitions pendingPartitions) {
         this.reconciliationService =
                 Objects.requireNonNull(reconciliationService, "reconciliationService required");
         this.properties = Objects.requireNonNull(properties, "properties required");
         this.metricsLookup = Objects.requireNonNull(metricsLookup, "metricsLookup required");
         this.clock = Objects.requireNonNull(clock, "clock required");
+        this.pendingPartitions = pendingPartitions;
     }
 
     /** Starts the schedule, unless reconciliation is disabled. */
@@ -87,6 +114,16 @@ public class ReconciliationScheduler implements AutoCloseable {
                     config.getIntervalMs());
             return;
         }
+
+        int workerCount = Math.min(
+                Math.max(1, properties.getBindings().size()), MAX_BINDING_WORKERS);
+        java.util.concurrent.atomic.AtomicInteger workerNumber =
+                new java.util.concurrent.atomic.AtomicInteger();
+        bindingWorkers = Executors.newFixedThreadPool(workerCount, r -> {
+            Thread t = new Thread(r, "reconcile-worker-" + workerNumber.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        });
 
         scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "reconcile");
@@ -112,6 +149,12 @@ public class ReconciliationScheduler implements AutoCloseable {
         ScheduledExecutorService s = scheduler;
         if (s != null) {
             s.shutdownNow();
+        }
+        ExecutorService workers = bindingWorkers;
+        if (workers != null) {
+            workers.shutdownNow();
+        }
+        if (s != null || workers != null) {
             log.info("Reconciliation scheduler stopped");
         }
     }
@@ -123,8 +166,26 @@ public class ReconciliationScheduler implements AutoCloseable {
      */
     private void runAllBindingsQuietly() {
         try {
+            ExecutorService workers = bindingWorkers;
             for (BindingConfig binding : properties.getBindings()) {
-                runBindingQuietly(binding);
+                if (workers == null) {
+                    // No pool: start() was never called, which is the shape
+                    // tests use when driving a single pass directly.
+                    runBindingQuietly(binding);
+                    continue;
+                }
+                try {
+                    // Submitted, not called. The scheduler thread must return
+                    // promptly whatever any one binding is doing — otherwise a
+                    // binding blocked on an HDFS read holds up every binding
+                    // behind it and the next pass too. Overlap is still
+                    // prevented per binding by the in-progress flag, so a slow
+                    // binding cannot pile up beneath itself either.
+                    workers.execute(() -> runBindingQuietly(binding));
+                } catch (java.util.concurrent.RejectedExecutionException e) {
+                    log.debug("Reconciliation worker pool is shutting down — skipping "
+                            + "binding '{}' this pass", binding.getId());
+                }
             }
         } catch (Throwable t) {
             log.error("Reconciliation pass failed: {}", t.getMessage(), t);
@@ -169,7 +230,16 @@ public class ReconciliationScheduler implements AutoCloseable {
         IntakeProperties.ReconciliationProperties config = properties.getReconciliation();
         BindingMetrics metrics = metricsLookup.apply(binding.getId());
 
-        for (Instant window : recentWindows(config.getLookbackWindows())) {
+        // The recent windows PLUS anything an earlier pass could not resolve.
+        // A LinkedHashSet so a partition carried over that is also still
+        // recent is reconciled once, not twice.
+        java.util.Set<Instant> windows =
+                new java.util.LinkedHashSet<>(recentWindows(config.getLookbackWindows()));
+        if (pendingPartitions != null) {
+            windows.addAll(pendingPartitions.pending(binding.getId()));
+        }
+
+        for (Instant window : windows) {
             PartitionReconciliationService.ReconciliationReport report =
                     reconciliationService.reconcilePartition(
                             binding.getId(),
@@ -182,7 +252,33 @@ public class ReconciliationScheduler implements AutoCloseable {
                             config.isQuarantineDuplicates(),
                             metrics);
 
+            trackPending(binding.getId(), window, report);
             report(binding.getId(), report);
+        }
+    }
+
+    /**
+     * Carries a partition forward when it could not be resolved, and drops it
+     * once it was.
+     *
+     * <p>NOT_READY is excluded deliberately. It means the binding has no
+     * approved identity — a standing property of the binding, not something a
+     * later pass on this partition could change — so every window would enter
+     * the backlog and none would ever leave. SKIPPED_GRACE_PERIOD and ERROR
+     * are both genuinely worth another look.
+     */
+    private void trackPending(String bindingId, Instant window,
+                              PartitionReconciliationService.ReconciliationReport report) {
+        if (pendingPartitions == null) {
+            return;
+        }
+        boolean worthAnotherPass = report.isRetryLater()
+                && report.getStatus()
+                    != PartitionReconciliationService.ReconciliationStatus.NOT_READY;
+        if (worthAnotherPass) {
+            pendingPartitions.retain(bindingId, window);
+        } else {
+            pendingPartitions.resolved(bindingId, window);
         }
     }
 
