@@ -88,7 +88,9 @@ public class IntakeRuntimeManager implements SmartLifecycle {
                                  BindingHealthManager healthManager,
                                  ProductionMode productionMode,
                                  InstanceId instanceId,
-                                 @Autowired(required = false) TrackerMessageBuilderFactory trackerBuilderFactory) {
+                                 @Autowired(required = false) TrackerMessageBuilderFactory trackerBuilderFactory,
+                                 @Autowired(required = false)
+                                 com.hcsc.datalake.mqintake.core.security.KerberosManager kerberosManager) {
         this.productionMode = productionMode;
         this.instanceId = instanceId;
         this.properties = properties;
@@ -100,6 +102,20 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         this.trackerBuilderFactory = trackerBuilderFactory;
 
         this.metricsRegistry = new MetricsRegistry();
+        // The gauge read a counter nothing incremented. Real relogin failures
+        // land on KerberosManager's own counter; MetricsRegistry has a
+        // separate one whose recordKerberosReloginFailure() has no production
+        // caller, so mq_intake_kerberos_relogin_failures published 0.0 for the
+        // life of the process however many relogins failed — an alert that
+        // could never fire, which reads as a healthy identity.
+        //
+        // Wired here rather than in the bridge because this class owns the
+        // registry. Absent when Kerberos is disabled, in which case the gauge
+        // keeps reporting the registry's own zero, which is then true.
+        if (kerberosManager != null) {
+            this.metricsRegistry.setKerberosReloginFailureSupplier(
+                    kerberosManager::getReloginFailureCount);
+        }
         this.healthManager = healthManager;
     }
 

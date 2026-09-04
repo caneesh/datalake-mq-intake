@@ -177,9 +177,59 @@ class PartitionReconciliationServiceTest {
         // Retrospective audit record exists and reconciles on the next run:
         AuditRecordReader reader = new AuditRecordReader(fileSystem, auditBasePath);
         var records = reader.readForDate("rms",
-                LONG_AFTER.atZone(ZoneOffset.UTC).toLocalDate());
+                LONG_AFTER.atZone(ZoneOffset.UTC).toLocalDate()).records();
         assertThat(records)
                 .anySatisfy(r -> assertThat(r.getFilename()).isEqualTo("solecopy.seq"));
+    }
+
+    @Test
+    void aCorruptAuditWhoseDataFileIsAlsoMissingMustNotReconcileClean() throws Exception {
+        // Both sides of the comparison disappear: the audit record is skipped
+        // because it cannot be parsed, and its data file is not on disk, so
+        // nothing is left to be missing. Before the scan reported what it
+        // could not read, this returned zero discrepancies and
+        // retryLater=false — a clean verdict over a partition nobody could
+        // actually check.
+        writeRawAudit("audit_corrupt.json", "{\"binding_id\":\"rms\",\"filename\":\"cut");
+
+        var report = reconcile("rms", true, false);
+
+        assertThat(report.getDiscrepancies())
+                .as("an unreadable audit record is itself the finding")
+                .isNotEmpty();
+        assertThat(report.getDiscrepancies())
+                .anySatisfy(d -> assertThat(d.getType())
+                        .isEqualTo(PartitionReconciliationService.DiscrepancyType.UNREADABLE_AUDIT));
+        assertThat(report.isRetryLater()).isTrue();
+    }
+
+    @Test
+    void anUnreadableAuditNamesTheFileSoItCanBeLookedAt() throws Exception {
+        writeRawAudit("audit_broken.json", "not json at all");
+
+        var report = reconcile("rms", true, false);
+
+        assertThat(report.getDiscrepancies())
+                .filteredOn(d -> d.getType()
+                        == PartitionReconciliationService.DiscrepancyType.UNREADABLE_AUDIT)
+                .singleElement()
+                .satisfies(d -> assertThat(d.getFilename()).contains("audit_broken.json"));
+    }
+
+    @Test
+    void readableRecordsAreStillCheckedAlongsideACorruptOne() throws Exception {
+        // The skip must stay a skip: one corrupt record used to abort the whole
+        // binding's pass. Everything else is still reconciled — the corrupt one
+        // is reported in addition, not instead.
+        writeSeqFile("file1.seq", "guid-1", "guid-2");
+        writeAudit("file1.seq", 2);
+        writeRawAudit("audit_corrupt.json", "{\"binding_id\":\"rms\",\"filename\":\"cut");
+
+        var report = reconcile("rms", true, false);
+
+        assertThat(report.getDiscrepancies())
+                .extracting(d -> d.getType())
+                .containsOnly(PartitionReconciliationService.DiscrepancyType.UNREADABLE_AUDIT);
     }
 
     @Test
@@ -317,6 +367,19 @@ class PartitionReconciliationServiceTest {
                 writer.append(key, new BytesWritable(("payload-" + identity)
                         .getBytes(StandardCharsets.UTF_8)));
             }
+        }
+    }
+
+    /** Drops an unparseable file into the audit directory the reader scans. */
+    private void writeRawAudit(String name, String content) throws Exception {
+        java.time.LocalDate date = PARTITION_INSTANT.atZone(ZoneOffset.UTC).toLocalDate();
+        org.apache.hadoop.fs.Path dir = new org.apache.hadoop.fs.Path(
+                com.hcsc.datalake.mqintake.core.audit.AuditPaths.dateDir(
+                        auditBasePath, "rms", date));
+        fileSystem.mkdirs(dir);
+        try (org.apache.hadoop.fs.FSDataOutputStream out =
+                     fileSystem.create(new org.apache.hadoop.fs.Path(dir, name), true)) {
+            out.write(content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
     }
 

@@ -158,10 +158,33 @@ public class PartitionReconciliationService implements PartitionReconciler {
         // Enumerate audit records for this partition (commit may land just
         // after midnight for a late partition, so read both days)
         LocalDate date = partitionInstant.atZone(ZoneOffset.UTC).toLocalDate();
+        AuditRecordReader.AuditScan onDate = auditReader.readForDate(bindingId, date);
+        AuditRecordReader.AuditScan nextDay = auditReader.readForDate(bindingId, date.plusDays(1));
+
         List<ParsedAuditRecord> auditRecords = new ArrayList<>();
-        auditRecords.addAll(auditReader.readForDate(bindingId, date));
-        auditRecords.addAll(auditReader.readForDate(bindingId, date.plusDays(1)));
+        auditRecords.addAll(onDate.records());
+        auditRecords.addAll(nextDay.records());
         auditRecords.removeIf(r -> !matchesPartition(r.getPartitionPath(), partitionPath));
+
+        // An audit record that could not be read is not the same as one that
+        // does not exist, and the difference decides the verdict. A corrupt
+        // record whose data file is also missing removes BOTH sides from the
+        // comparison, and the partition reconciles clean; with the data file
+        // present it makes an audited file look orphaned, which can end in a
+        // retrospective audit or — once quarantining is enabled — a file move.
+        //
+        // Reported per file rather than as a count: the next action is to look
+        // at the file. retryLater is set too, though acting on it needs the
+        // pending-partition backlog the scheduler does not yet keep, so today
+        // this makes the condition visible rather than self-healing.
+        List<String> unreadableAudits = new ArrayList<>(onDate.unreadable());
+        unreadableAudits.addAll(nextDay.unreadable());
+        for (String path : unreadableAudits) {
+            discrepancies.add(new Discrepancy(DiscrepancyType.UNREADABLE_AUDIT, path,
+                    "Audit record present but unreadable — this partition cannot be "
+                            + "reconciled and must not be reported clean"));
+            retryLater = true;
+        }
 
         int auditedRecordSum = auditRecords.stream().mapToInt(ParsedAuditRecord::getRecordCount).sum();
 
@@ -363,7 +386,9 @@ public class PartitionReconciliationService implements PartitionReconciler {
 
     public enum DiscrepancyType {
         MISSING_FILE, COUNT_MISMATCH, ORPHAN_DUPLICATE,
-        ORPHAN_SOLE_COPY, ORPHAN_INCONCLUSIVE, UNREADABLE_FILE
+        ORPHAN_SOLE_COPY, ORPHAN_INCONCLUSIVE, UNREADABLE_FILE,
+        /** An audit record exists but could not be parsed; the scan is incomplete. */
+        UNREADABLE_AUDIT
     }
 
     public static final class Discrepancy {

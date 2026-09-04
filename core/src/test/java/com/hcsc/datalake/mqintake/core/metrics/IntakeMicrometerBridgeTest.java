@@ -169,6 +169,26 @@ class IntakeMicrometerBridgeTest {
     }
 
     @Test
+    void theKerberosGaugeReflectsRealFailuresNotASeparateCounter() {
+        // The gauge was published correctly and read a counter nothing wrote.
+        // Real relogin failures increment KerberosManager's own counter;
+        // MetricsRegistry has a second one whose recordKerberosReloginFailure()
+        // has no production caller, so this reported 0.0 for the life of the
+        // process however many relogins failed.
+        //
+        // IntakeRuntimeManager now points the registry's supplier at the live
+        // manager. This asserts the VALUE, which the publication test below
+        // does not — that is why the defect survived a test asserting the
+        // meter existed.
+        intakeMetrics.setKerberosReloginFailureSupplier(() -> 7L);
+        intakeMetrics.forBinding("rms");
+        bridge.bindMetrics();
+
+        assertThat(meterRegistry.find("mq_intake_kerberos_relogin_failures").gauge().value())
+                .isEqualTo(7.0);
+    }
+
+    @Test
     void kerberosReloginFailuresArePublishedOncePerProcess() {
         intakeMetrics.forBinding("rms");
         bridge.bindMetrics();

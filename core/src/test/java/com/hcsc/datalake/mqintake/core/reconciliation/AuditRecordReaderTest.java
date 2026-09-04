@@ -57,7 +57,7 @@ class AuditRecordReaderTest {
     void readsBackWhatTheEmitterWrote() throws Exception {
         emitter.emit(record("rms_a_1.seq", "/data/raw/rms/year=2026", 42));
 
-        List<AuditRecordReader.ParsedAuditRecord> records = reader.readForDate("rms", DATE);
+        List<AuditRecordReader.ParsedAuditRecord> records = records("rms", DATE);
 
         assertThat(records).hasSize(1);
         assertThat(records.get(0).getFilename()).isEqualTo("rms_a_1.seq");
@@ -76,7 +76,7 @@ class AuditRecordReaderTest {
                         + "\"record_count\":99999999999999999999,\"partition_path\":\"/data/p\"}\n");
         emitter.emit(record("rms_good_2.seq", "/data/p", 7));
 
-        List<AuditRecordReader.ParsedAuditRecord> records = reader.readForDate("rms", DATE);
+        List<AuditRecordReader.ParsedAuditRecord> records = records("rms", DATE);
 
         assertThat(records)
                 .as("the two healthy records survive the corrupt one")
@@ -89,7 +89,7 @@ class AuditRecordReaderTest {
         emitter.emit(record("rms_ok.seq", "/data/p", 3));
         writeRaw("audit_empty.json", "");
 
-        assertThat(reader.readForDate("rms", DATE)).hasSize(1);
+        assertThat(records("rms", DATE)).hasSize(1);
     }
 
     @Test
@@ -97,14 +97,14 @@ class AuditRecordReaderTest {
         emitter.emit(record("rms_ok.seq", "/data/p", 3));
         writeRaw("audit_truncated.json", "{\"binding_id\":\"rms\",\"filename\":\"cut");
 
-        assertThat(reader.readForDate("rms", DATE)).hasSize(1);
+        assertThat(records("rms", DATE)).hasSize(1);
     }
 
     @Test
     void missingRequiredFieldsAreSkipped() throws Exception {
         writeRaw("audit_nofields.json", "{\"binding_id\":\"rms\"}\n");
 
-        assertThat(reader.readForDate("rms", DATE)).isEmpty();
+        assertThat(records("rms", DATE)).isEmpty();
     }
 
     @Test
@@ -114,7 +114,7 @@ class AuditRecordReaderTest {
         // partition matching, misreading an audited file as an orphan.
         emitter.emit(record("rms_\"quoted\"_1.seq", "/data/p\"q", 9));
 
-        List<AuditRecordReader.ParsedAuditRecord> records = reader.readForDate("rms", DATE);
+        List<AuditRecordReader.ParsedAuditRecord> records = records("rms", DATE);
 
         assertThat(records).hasSize(1);
         assertThat(records.get(0).getFilename()).isEqualTo("rms_\"quoted\"_1.seq");
@@ -123,7 +123,7 @@ class AuditRecordReaderTest {
 
     @Test
     void missingDateDirectoryReadsAsEmpty() throws Exception {
-        assertThat(reader.readForDate("rms", DATE.plusDays(30))).isEmpty();
+        assertThat(records("rms", DATE.plusDays(30))).isEmpty();
     }
 
     // --- helpers ---
@@ -138,6 +138,12 @@ class AuditRecordReaderTest {
                 .instanceId("it-instance")
                 .commitTimestamp(COMMIT)
                 .build();
+    }
+
+    /** The records half of a scan, for assertions that only care about it. */
+    private List<AuditRecordReader.ParsedAuditRecord> records(String bindingId, LocalDate date)
+            throws Exception {
+        return reader.readForDate(bindingId, date).records();
     }
 
     private void writeRaw(String name, String content) throws Exception {

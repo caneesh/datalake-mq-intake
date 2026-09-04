@@ -225,6 +225,53 @@ class PartialStartupRollbackTest {
     }
 
     /** Like {@link #manager}, but the chosen binding fails inside start(). */
+    @Test
+    void theMetricsRegistryReadsKerberosFailuresFromTheLiveManager() {
+        // The gauge published mq_intake_kerberos_relogin_failures from
+        // MetricsRegistry's own counter, whose recordKerberosReloginFailure()
+        // has no production caller — so it read 0.0 forever while real
+        // failures accumulated on KerberosManager. This pins the wiring that
+        // joins them.
+        com.hcsc.datalake.mqintake.core.security.KerberosManager manager =
+                new com.hcsc.datalake.mqintake.core.security.KerberosManager(
+                        "svc@REALM", "/no/such.keytab", 3_600_000L) {
+                    @Override
+                    public long getReloginFailureCount() {
+                        return 7L;
+                    }
+                };
+
+        IntakeRuntimeManager runtime = new IntakeRuntimeManager(
+                new IntakeProperties(), fileSystem, conf, mock(MqConnectionManager.class),
+                config -> TRIVIAL_SERIALIZER,
+                new BindingConfigValidator(
+                        path -> com.hcsc.datalake.mqintake.core.config.HdfsPathValidator
+                                .PathValidationResult.success()),
+                new BindingHealthManager(),
+                ProductionMode.disabled(),
+                com.hcsc.datalake.mqintake.core.config.InstanceId.of("kerberos-test"),
+                null, manager);
+
+        assertThat(runtime.getMetricsRegistry().getKerberosReloginFailures()).isEqualTo(7L);
+    }
+
+    @Test
+    void withoutKerberosTheGaugeKeepsReportingZero() {
+        // Kerberos disabled means no manager bean, and a zero that is true.
+        IntakeRuntimeManager runtime = new IntakeRuntimeManager(
+                new IntakeProperties(), fileSystem, conf, mock(MqConnectionManager.class),
+                config -> TRIVIAL_SERIALIZER,
+                new BindingConfigValidator(
+                        path -> com.hcsc.datalake.mqintake.core.config.HdfsPathValidator
+                                .PathValidationResult.success()),
+                new BindingHealthManager(),
+                ProductionMode.disabled(),
+                com.hcsc.datalake.mqintake.core.config.InstanceId.of("kerberos-test"),
+                null, null);
+
+        assertThat(runtime.getMetricsRegistry().getKerberosReloginFailures()).isZero();
+    }
+
     private IntakeRuntimeManager managerWithStartFailure(IntakeProperties props,
                                                          String failingBindingId,
                                                          List<BindingRuntime> created) {
@@ -236,7 +283,7 @@ class PartialStartupRollbackTest {
                                 .PathValidationResult.success()),
                 new BindingHealthManager(),
                 ProductionMode.disabled(),
-                com.hcsc.datalake.mqintake.core.config.InstanceId.of("rollback-test"), null) {
+                com.hcsc.datalake.mqintake.core.config.InstanceId.of("rollback-test"), null, null) {
             @Override
             void initializeRuntimeFactory() {
                 setRuntimeFactoryForTest(new BindingRuntimeFactory(
@@ -289,7 +336,7 @@ class PartialStartupRollbackTest {
                                     .PathValidationResult.success()),
                     new BindingHealthManager(),
                     ProductionMode.disabled(),
-                    com.hcsc.datalake.mqintake.core.config.InstanceId.of("rollback-test"), null);
+                    com.hcsc.datalake.mqintake.core.config.InstanceId.of("rollback-test"), null, null);
             this.props = props;
             this.created = created;
         }
@@ -376,7 +423,7 @@ class PartialStartupRollbackTest {
                                 .PathValidationResult.success()),
                 new BindingHealthManager(),
                 ProductionMode.disabled(),
-                com.hcsc.datalake.mqintake.core.config.InstanceId.of("rollback-test"), null) {
+                com.hcsc.datalake.mqintake.core.config.InstanceId.of("rollback-test"), null, null) {
             @Override
             void initializeRuntimeFactory() {
                 setRuntimeFactoryForTest(new BindingRuntimeFactory(
