@@ -56,6 +56,18 @@ intake:
     audit-base-path: ${HDFS_AUDIT_BASE_PATH:/data/audit}
     temp-file-max-age-ms: 3600000  # 1 hour
 
+    # How long another instance's staging directory may go without a lease
+    # refresh before this one treats it as abandoned and clears its expired
+    # files. Instance ids carry the PID, so every restart leaves a directory
+    # behind; without reclamation they accumulate for the life of the cluster.
+    #
+    # Generous on purpose, and only the FIRST of two conditions: a file inside
+    # a reclaimed directory must ALSO be older than temp-file-max-age-ms before
+    # it is removed. A running instance refreshes its lease continuously, and a
+    # file being written right now is not an hour old, so a peer that is merely
+    # slow never loses in-flight work.
+    instance-lease-timeout-ms: 3600000  # 1 hour
+
   # RMS is ABC-controlled: reconciliation checks landed data against the
   # audit trail. It reads HDFS only — it holds no JMS session and cannot
   # affect ingestion.

@@ -247,6 +247,19 @@ public class IntakeProperties {
         private long tempFileMaxAgeMs = 3600000; // 1 hour
 
         /**
+         * How long a process instance's staging directory may go without a
+         * lease refresh before another instance treats it as abandoned.
+         *
+         * <p>Generous on purpose. Reclaiming a directory whose owner is merely
+         * slow would delete another process's in-flight staging files, so this
+         * is only the FIRST of two conditions — files inside a reclaimed
+         * directory still have to be older than {@code temp-file-max-age}
+         * before anything is removed. An hour of no heartbeat AND an hour-old
+         * file is not a running instance.
+         */
+        private long instanceLeaseTimeoutMs = 3600000; // 1 hour
+
+        /**
          * Cluster configuration to load: {@code core-site.xml} /
          * {@code hdfs-site.xml} files, or directories containing them
          * (typically {@code /etc/hadoop/conf}).
@@ -311,6 +324,11 @@ public class IntakeProperties {
 
         public String getAuditBasePath() { return auditBasePath; }
         public void setAuditBasePath(String auditBasePath) { this.auditBasePath = auditBasePath; }
+        public long getInstanceLeaseTimeoutMs() { return instanceLeaseTimeoutMs; }
+        public void setInstanceLeaseTimeoutMs(long instanceLeaseTimeoutMs) {
+            this.instanceLeaseTimeoutMs = instanceLeaseTimeoutMs;
+        }
+
         public long getTempFileMaxAgeMs() { return tempFileMaxAgeMs; }
         public void setTempFileMaxAgeMs(long tempFileMaxAgeMs) { this.tempFileMaxAgeMs = tempFileMaxAgeMs; }
         public java.util.List<String> getConfigResources() { return configResources; }

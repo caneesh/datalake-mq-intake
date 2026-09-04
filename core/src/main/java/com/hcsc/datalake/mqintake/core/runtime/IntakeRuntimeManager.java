@@ -77,6 +77,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
     private volatile boolean running = false;
     private volatile BindingRuntimeFactory runtimeFactory;
     private volatile ReconciliationScheduler reconciliationScheduler;
+    private volatile com.hcsc.datalake.mqintake.core.lifecycle.InstanceLease instanceLease;
 
     @Autowired
     public IntakeRuntimeManager(IntakeProperties properties,
@@ -155,6 +156,10 @@ public class IntakeRuntimeManager implements SmartLifecycle {
             validateBindingConfigurations();
             validateSerializers();
             validateAllBindings();
+            // The lease is taken BEFORE the sweep, not after: two instances
+            // starting together must each be able to see the other's claim
+            // before either decides a directory is abandoned.
+            takeInstanceLease();
             cleanupTempFiles();
             initializeRuntimeFactory();
             createAndStartRuntimes();
@@ -219,9 +224,36 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         log.info("All binding configurations validated successfully");
     }
 
+    /** Claims this instance's staging directories for as long as it runs. */
+    private void takeInstanceLease() {
+        java.util.List<String> roots = stagingRoots();
+        if (roots.isEmpty()) {
+            return;
+        }
+        instanceLease = new com.hcsc.datalake.mqintake.core.lifecycle.InstanceLease(
+                fileSystem, instanceId.value(), roots,
+                properties.getHdfs().getInstanceLeaseTimeoutMs());
+        instanceLease.start();
+    }
+
+    /** Every tree this instance stages files under, data and audit alike. */
+    private java.util.List<String> stagingRoots() {
+        java.util.List<String> roots = new ArrayList<>();
+        String auditBasePath = properties.getHdfs().getAuditBasePath();
+        for (BindingConfig binding : properties.getBindings()) {
+            roots.add(binding.getHdfs().getBasePath());
+            if (auditBasePath != null && !auditBasePath.isBlank()) {
+                roots.add(com.hcsc.datalake.mqintake.core.audit.AuditPaths
+                        .bindingDir(auditBasePath, binding.getId()));
+            }
+        }
+        return roots;
+    }
+
     private void cleanupTempFiles() {
         String resolvedInstanceId = this.instanceId.value();
         long maxAge = properties.getHdfs().getTempFileMaxAgeMs();
+        long leaseTimeout = properties.getHdfs().getInstanceLeaseTimeoutMs();
         String auditBasePath = properties.getHdfs().getAuditBasePath();
 
         for (BindingConfig binding : properties.getBindings()) {
@@ -233,6 +265,21 @@ public class IntakeRuntimeManager implements SmartLifecycle {
                 }
             } catch (IOException e) {
                 log.warn("Failed to cleanup temp files for binding '{}': {}",
+                        binding.getId(), e.getMessage());
+            }
+
+            // Directories belonging to instances that are gone. Own directory
+            // above, everyone else's here, and only where a stale lease and an
+            // expired file agree.
+            try {
+                int reclaimed = validator.reclaimAbandonedInstances(
+                        binding.getHdfs().getBasePath(), maxAge, leaseTimeout);
+                if (reclaimed > 0) {
+                    log.info("Reclaimed {} file(s) from abandoned instances for binding '{}'",
+                            reclaimed, binding.getId());
+                }
+            } catch (IOException e) {
+                log.warn("Failed to reclaim abandoned instance directories for binding '{}': {}",
                         binding.getId(), e.getMessage());
             }
 
@@ -251,6 +298,15 @@ public class IntakeRuntimeManager implements SmartLifecycle {
                     }
                 } catch (IOException e) {
                     log.warn("Failed to cleanup audit temp files for binding '{}': {}",
+                            binding.getId(), e.getMessage());
+                }
+                try {
+                    validator.reclaimAbandonedInstances(
+                            com.hcsc.datalake.mqintake.core.audit.AuditPaths
+                                    .bindingDir(auditBasePath, binding.getId()),
+                            maxAge, leaseTimeout);
+                } catch (IOException e) {
+                    log.warn("Failed to reclaim abandoned audit staging for binding '{}': {}",
                             binding.getId(), e.getMessage());
                 }
             }
@@ -452,6 +508,16 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         }
 
         runtimes.clear();
+
+        // Released last, after the drain: while a batch may still be staging a
+        // file, this instance's directory must not look abandoned to a peer.
+        // Dropping it here makes the directory reclaimable immediately on a
+        // clean shutdown rather than after the lease timeout.
+        if (instanceLease != null) {
+            instanceLease.close();
+            instanceLease = null;
+        }
+
         log.info("IntakeRuntimeManager stopped");
     }
 
