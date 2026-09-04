@@ -5,7 +5,7 @@ edit HERE and regenerate, never edit the .docx by hand. A hand-edited binary
 cannot be diffed, cannot be reviewed, and drifts away from its source the first
 time someone opens it in a word processor.
 
-    pip install python-docx
+    pip install -r docs/requirements.txt
     python3 docs/generate-intake-process-doc.py
 
 Deliberately free of any source-system, queue, field or organisation names:
@@ -777,6 +777,36 @@ para(
     "well-understood failure, and will not lose one."
 )
 
-out = "/home/aneesh/projects/datalake-mq-intake/docs/Message-Intake-Process.docx"
+import os
+import zipfile
+
+
+def normalise(path, fixed=(2020, 1, 1, 0, 0, 0)):
+    """Rewrites the .docx with fixed entry timestamps.
+
+    A .docx is a zip, and zip entries carry the modification time of the moment
+    they were written -- so two runs producing identical content still produce
+    different bytes, and the committed binary shows as modified every time
+    anyone regenerates it. That churn is exactly what makes a committed binary
+    unreviewable, which is the problem this generator exists to avoid. The
+    document's CONTENT was already reproducible; only the container was not.
+    """
+    source = zipfile.ZipFile(path)
+    entries = [(info, source.read(info.filename)) for info in source.infolist()]
+    source.close()
+
+    staged = path + ".tmp"
+    with zipfile.ZipFile(staged, "w", zipfile.ZIP_DEFLATED) as out_zip:
+        for info, data in entries:
+            stable = zipfile.ZipInfo(info.filename, date_time=fixed)
+            stable.compress_type = info.compress_type
+            stable.external_attr = info.external_attr
+            out_zip.writestr(stable, data)
+    os.replace(staged, path)
+
+
+here = os.path.dirname(os.path.abspath(__file__))
+out = os.path.join(here, "Message-Intake-Process.docx")
 doc.save(out)
+normalise(out)
 print("written:", out)

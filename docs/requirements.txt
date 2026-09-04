@@ -1,0 +1,14 @@
+# Python dependencies for the documentation generators in this directory.
+#
+# Scoped to docs/ rather than the repository root: this is a Maven project, and
+# a requirements.txt at the top level reads as "this is a Python project" to
+# every tool and every person who looks.
+#
+#     pip install -r docs/requirements.txt
+#     python3 docs/generate-intake-process-doc.py
+#
+# Pinned exactly, for the same reason the build pins its plugin versions. The
+# generated .docx is committed as a binary, so a library upgrade that changes
+# spacing or table rendering shows up as an unreviewable diff on a file nobody
+# intended to touch. Raise this deliberately and regenerate in the same commit.
+python-docx==1.2.0
