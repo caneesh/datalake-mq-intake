@@ -281,17 +281,21 @@ public class RmsTrackerMessageBuilder implements TrackerMessageBuilder {
         static final String[] GREATER_THAN = {">", "&gt;"};
 
         /**
-         * Still missing: the bodies of {@code setReplacedTagData} and
-         * {@code buildResultData}.
+         * The tag-to-value mapping, captured from the legacy source rather
+         * than inferred.
          *
-         * <p>The surrounding algorithm is captured, but {@code buildResultData}
-         * decides which of the four supplied values each of the five tags
-         * receives, and that mapping is not derivable from the call site — it
-         * is passed all four values on every iteration. {@code DestSystem} in
-         * particular does not obviously correspond to the parameter named
-         * {@code destinationStatus}, and {@code CreatedTimeStamp} has no
-         * supplied value at all. Guessing it would produce tracker messages
-         * that look right and carry wrong values.
+         * <p>It had to be captured because it is not derivable from the call
+         * site: {@code buildResultData} is passed all four values on every
+         * iteration and picks per tag. Two of those choices are the reason
+         * guessing would have produced tracker messages that look right and
+         * carry wrong values — {@code DestSystem} takes
+         * {@code destinationStatus}, which reads like a mismatch and is what
+         * the legacy does, and {@code CreatedTimeStamp} takes no supplied
+         * value at all but a timestamp generated at rewrite time.
+         *
+         * <p>Pinned by {@code allFiveTagsAreInjectedWithTheLegacyValueMapping},
+         * so a change to the mapping fails a test rather than diverging
+         * silently.
          */
         static final boolean TAG_VALUE_MAPPING_CAPTURED = true;
 

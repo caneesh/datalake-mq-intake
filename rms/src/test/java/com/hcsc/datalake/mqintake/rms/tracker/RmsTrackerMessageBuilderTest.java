@@ -361,6 +361,93 @@ class RmsTrackerMessageBuilderTest {
     }
 
     @Test
+    void anExistingTagInAnEscapedHeaderIsAlsoRemovedBeforeItIsReAdded() throws Exception {
+        // The escaped tests above all use tags that are NOT in TAG_LIST
+        // (SomeTag, Keep), so the escaped half of the removal branch was never
+        // exercised: deleting it entirely left the suite green. Without it an
+        // escaped header that already carries a tracker tag ends up with the
+        // tag twice — the stale value and the new one — where the legacy
+        // replaces it.
+        String out = rewrite("&lt;MessageHeaderDetailsType&gt;"
+                + "&lt;MesgStatus&gt;STALE&lt;/MesgStatus&gt;"
+                + "&lt;/MessageHeaderDetailsType&gt;");
+
+        assertThat(out).doesNotContain("STALE");
+        assertThat(out.split("&lt;MesgStatus&gt;", -1).length - 1)
+                .as("MesgStatus must appear exactly once, not duplicated")
+                .isEqualTo(1);
+        assertThat(out).contains("&lt;MesgStatus&gt;RCVD&lt;/MesgStatus&gt;");
+    }
+
+    @Test
+    void aRepeatedTagHasEverythingBetweenFirstAndLastOccurrenceRemoved() throws Exception {
+        // A legacy behaviour reproduced on purpose and documented as such, but
+        // held by nothing: setReplacedTagData spans the FIRST start tag to the
+        // LAST end tag, so a tag appearing twice takes everything between them
+        // with it. Narrowing the span to the first end tag — which is what a
+        // reader would "fix" it to — changed no test result.
+        String out = rewrite("<MessageHeaderDetailsType>"
+                + "<MesgStatus>FIRST</MesgStatus>"
+                + "<Between>BETWEEN</Between>"
+                + "<MesgStatus>SECOND</MesgStatus>"
+                + "</MessageHeaderDetailsType>");
+
+        assertThat(out).doesNotContain("FIRST").doesNotContain("SECOND");
+        assertThat(out)
+                .as("the legacy span swallows whatever sits between the two occurrences")
+                .doesNotContain("BETWEEN");
+        assertThat(out.split("<MesgStatus>", -1).length - 1)
+                .as("re-added exactly once").isEqualTo(1);
+    }
+
+    @Test
+    void theLegacyTimestampIsFormattedInTheJvmDefaultZone() throws Exception {
+        // SimpleDateFormat with no explicit zone formats in the JVM default,
+        // which is what the legacy does. Setting UTC instead shifts every
+        // CreatedTimeStamp by the local offset — silently, and only visible to
+        // whoever reads the tracker queue. Nothing held it.
+        String out = rewrite("<MessageHeaderDetailsType></MessageHeaderDetailsType>");
+
+        String stamp = out.substring(
+                out.indexOf("<CreatedTimeStamp>") + "<CreatedTimeStamp>".length(),
+                out.indexOf("</CreatedTimeStamp>"));
+
+        String expected = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss")
+                .format(new java.util.Date());
+        // Same minute is enough: a wrong zone is out by at least 15 minutes,
+        // and every real offset in use is a multiple of that.
+        assertThat(stamp.substring(0, stamp.lastIndexOf(':')))
+                .as("formatted in the default zone, not UTC")
+                .isEqualTo(expected.substring(0, expected.lastIndexOf(':')));
+    }
+
+    @Test
+    void aQuantifierInTheSpanSilentlyLeavesTheStaleTagInPlace() throws Exception {
+        // The other half of the regex hazard, and the worse half. The test
+        // above covers metacharacters that THROW, where the tracker message is
+        // lost. A metacharacter that merely changes what the pattern matches —
+        // a quantifier such as '?' — makes replaceAll match nothing, so the
+        // stale tag is never removed and the message goes out carrying the old
+        // value AND the new one for the same tag.
+        //
+        // Faithful to the legacy, which calls the same replaceAll on the same
+        // span, so this is reproduced rather than introduced. Found by
+        // accident: a '?' in an unrelated test payload.
+        String out = rewrite("<MessageHeaderDetailsType>"
+                + "<MesgStatus>STALE</MesgStatus>"
+                + "<Note>why?</Note>"
+                + "<MesgStatus>ALSO_STALE</MesgStatus>"
+                + "</MessageHeaderDetailsType>");
+
+        assertThat(out)
+                .as("nothing was removed — the quantifier stopped the span matching itself")
+                .contains("STALE");
+        assertThat(out.split("<MesgStatus>", -1).length - 1)
+                .as("so the tag ships three times: two stale, one fresh")
+                .isEqualTo(3);
+    }
+
+    @Test
     void escapedHeadersAreRewrittenInEscapedForm() throws Exception {
         String out = rewrite("&lt;MessageHeaderDetailsType&gt;&lt;Keep&gt;x&lt;/Keep&gt;"
                 + "&lt;/MessageHeaderDetailsType&gt;");
