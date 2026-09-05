@@ -70,6 +70,44 @@ was never seen to fail proves nothing about the bug it claims to cover.
 | Suspects were registered after the degraded-mode flip, letting a concurrent success restore full batch size with the poison in flight | `DegradedModeManagerTest.suspectsAreRegisteredBeforeDegradedModeBecomesVisible` | — |
 | `batch_bytes` counted UTF-16 code units, not the UTF-8 bytes actually written | `FlushTriggerTest.byteTriggerCountsUtf8BytesNotUtf16CodeUnits`, `.utf8ByteCountHandlesSurrogatePairs` | — |
 
+## Defects found by measuring coverage before refactoring
+
+Three refactors were proposed in review. Each began by mutating the existing
+code to find out which invariants the suite actually held, before any code
+moved. That step has now found a real defect every time — none of them was the
+refactor, and none would have been visible from reading the class.
+
+| Defect | Found by | Test | Observed before the fix |
+|---|---|---|---|
+| Message identifiers could stop being collected entirely, silently disabling suspect tracking and with it poison isolation | mutating `TransactedReceiveLoop` before decomposing it | `LoopInvariantCharacterisationTest.aFailedBatchMarksTheIdentifiersItActuallyConsumed` | 67 tests passed with collection removed |
+| The shutdown drain could commit with the thread still marked interrupted, rolling back the final batch on every clean shutdown | same | `.theShutdownDrainCommitsWithTheInterruptFlagCleared` | 67 tests passed with the clear removed |
+| An unwritable landing path passed startup validation, so the service would start, report healthy, and stall on its first batch | mutating `StartupValidator` before splitting it | `StartupValidatorTest.aLandingPathThatExistsButIsNotWritableFailsStartup` | removing `fileSystem.access(path, WRITE)` changed no test result |
+| An incomplete audit scan authorised quarantine, so a correctly-audited file could be MOVED because its audit record was corrupt | testing a review's claim about `PartitionReconciliationService` | `PartitionReconciliationServiceTest.anIncompleteAuditScanMustNotAuthoriseQuarantine` | the file was moved |
+
+The last is the one to remember: reporting a condition and refusing to act on it
+are different guarantees. An earlier fix made the corrupt-audit case VISIBLE —
+`UNREADABLE_AUDIT`, `retryLater` — and left it authorised. Withholding the
+irreversible half needed its own change.
+
+**Two probe failures worth copying as method.** A probe that renames a method
+breaks compilation, and a probe whose target string appears twice silently does
+not apply. Both report "no failures", which means *the tests never ran against a
+mutation* rather than *the mutation is covered*. Always confirm a probe compiled
+and applied before believing a green result.
+
+## Staging area reclamation
+
+Destructive: `StagingAreaReclaimer` deletes files. Both of its safety conditions
+were verified to fail independently, which is what makes the pair safe rather
+than merely likely to be safe.
+
+| Rule | Test | Mutation that breaks it |
+|---|---|---|
+| A live peer's staging files are never touched | `AbandonedInstanceReclamationTest.aLivePeersFilesAreNeverTouched` | ignoring the lease check |
+| A recent file survives even when the lease looks stale | `.aRecentFileSurvivesEvenWhenTheLeaseLooksStale` | ignoring file age inside a reclaimed directory |
+| The own-directory sweep never reaches a sibling | `.ownInstanceCleanupTouchesOnlyItsOwnDirectory` | — |
+| A running instance never reclaims its own directory | `.theRunningInstanceNeverReclaimsItsOwnDirectory` | — |
+
 ## Verifying the receive loop's decomposition
 
 `TransactedReceiveLoop` was split into `BatchAccumulator`,
