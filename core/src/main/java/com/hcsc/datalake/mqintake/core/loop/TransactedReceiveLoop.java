@@ -10,6 +10,7 @@ import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
 import com.hcsc.datalake.mqintake.core.loop.recovery.BackoffPolicy;
 import com.hcsc.datalake.mqintake.core.loop.session.ListenerSession;
 import com.hcsc.datalake.mqintake.core.loop.recovery.SessionFaultPolicy;
+import com.hcsc.datalake.mqintake.core.loop.recovery.SessionRecoveryCoordinator;
 import com.hcsc.datalake.mqintake.core.poison.PoisonMessageHandler;
 import com.hcsc.datalake.mqintake.core.poison.PoisonScreen;
 import com.hcsc.datalake.mqintake.core.tracker.TrackerMessageBuilder;
@@ -23,7 +24,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -45,8 +45,6 @@ public class TransactedReceiveLoop implements Runnable {
 
     private static final Logger log = LoggerFactory.getLogger(TransactedReceiveLoop.class);
 
-    private static final int MAX_RECONNECT_ATTEMPTS = 10;
-
     /**
      * Consecutive unrecognised JMS faults tolerated before the loop stops
      * trusting the fault policy's "not broken" verdict and forces a session
@@ -60,24 +58,6 @@ public class TransactedReceiveLoop implements Runnable {
      * session pays one cheap close/reopen every N faults.
      */
     private static final int UNRECOGNISED_FAULTS_BEFORE_FORCED_RECOVERY = 10;
-
-    /**
-     * Consecutive rolled-back batches before this listener is reported stalled
-     * to the health manager.
-     *
-     * <p>One rollback is ordinary: the messages go back on the queue and the
-     * next attempt usually succeeds. A run of them is not, and the failures
-     * that produce a run — an unreachable tracker queue, an unwritable HDFS
-     * path, an audit store refusing records — all classify as infrastructure,
-     * which by design never enters degraded batch mode. That was the only
-     * route from this loop to the health manager for a batch failure, so a
-     * binding could roll back indefinitely with the endpoint reporting UP.
-     *
-     * <p>Five rather than one to avoid flapping on a transient blip, and
-     * rather than fifty because the point is to be visible before anyone has
-     * to notice by hand. At RMS's cadence this is seconds, not minutes.
-     */
-    private static final int CONSECUTIVE_BATCH_FAILURES_BEFORE_STALLED = 5;
 
     private final BindingConfig config;
     private final Connection connection;
@@ -106,24 +86,20 @@ public class TransactedReceiveLoop implements Runnable {
     private final AtomicLong commitCount = new AtomicLong(0);
     private final AtomicLong rollbackCount = new AtomicLong(0);
     private final AtomicLong messageCount = new AtomicLong(0);
-    private final AtomicInteger reconnectAttempts = new AtomicInteger(0);
-    private final AtomicLong reconnectCount = new AtomicLong(0);
 
     /** This thread's JMS resources; see ListenerSession for the invariant. */
     private final ListenerSession listenerSession;
+
+    /** Rebuilds the session after a fault; owns the retry budget and backoff. */
+    private final SessionRecoveryCoordinator recoveryCoordinator;
+
+    /** Translates what this listener observes into health and metric transitions. */
+    private final LoopStateReporter reporter;
     private volatile Thread loopThread;
 
     /** Loop-thread-confined; see UNRECOGNISED_FAULTS_BEFORE_FORCED_RECOVERY. */
     private int consecutiveUnrecognisedFaults = 0;
 
-    /** Loop-thread-confined; see CONSECUTIVE_BATCH_FAILURES_BEFORE_STALLED. */
-    private int consecutiveBatchFailures = 0;
-
-    /** Whether this listener's stall has already been reported, so it is reported once. */
-    private boolean reportedStalled = false;
-
-    /** Distinguishes this listener from its siblings in health reporting. */
-    private volatile String listenerId = "unstarted";
 
     /** Drives the log cadence in recordTrackerSuppressed; the metric is the signal. */
     private final AtomicLong suppressedTrackers = new AtomicLong(0);
@@ -206,6 +182,10 @@ public class TransactedReceiveLoop implements Runnable {
         this.backoffPolicy = backoffPolicy != null
                 ? backoffPolicy : BackoffPolicy.exponentialWithJitter();
         this.flushClock = flushClock != null ? flushClock : Clock.systemUTC();
+        this.reporter = new LoopStateReporter(config.getId(), healthManager, this.metrics);
+        this.recoveryCoordinator = new SessionRecoveryCoordinator(
+                config.getId(), this.listenerSession, this.faultPolicy, this.backoffPolicy,
+                healthManager, this.metrics, running::get);
 
         if (config.getMode() == BindingMode.TRACKED && trackerMessageBuilder == null) {
             throw new IllegalArgumentException(
@@ -218,7 +198,7 @@ public class TransactedReceiveLoop implements Runnable {
         loopThread = Thread.currentThread();
         String threadName = "recv-" + config.getId() + "-" + Thread.currentThread().getId();
         Thread.currentThread().setName(threadName);
-        listenerId = threadName;
+        reporter.listenerStarted(threadName);
 
         log.info("Starting receive loop for binding '{}' on thread {}",
                 config.getId(), threadName);
@@ -330,7 +310,7 @@ public class TransactedReceiveLoop implements Runnable {
 
         if (faultPolicy.requiresRecovery(e)) {
             consecutiveUnrecognisedFaults = 0;
-            if (!recoverSession()) {
+            if (!recoveryCoordinator.recover()) {
                 log.error("Session recovery failed for binding '{}', stopping loop",
                         config.getId());
                 running.set(false);
@@ -351,7 +331,7 @@ public class TransactedReceiveLoop implements Runnable {
                             + "presumed broken despite the fault policy; forcing recovery",
                     config.getId(), consecutiveUnrecognisedFaults);
             consecutiveUnrecognisedFaults = 0;
-            if (!recoverSession()) {
+            if (!recoveryCoordinator.recover()) {
                 log.error("Forced session recovery failed for binding '{}', stopping loop",
                         config.getId());
                 running.set(false);
@@ -516,44 +496,9 @@ public class TransactedReceiveLoop implements Runnable {
         handleFailure(e, batchMessageIds);
         rollbackQuietly();
         metrics.recordRollback();
-        noteBatchFailure(e);
+        reporter.batchFailed(e);
     }
 
-    /**
-     * A batch failed. Health is left alone until a RUN of failures shows this
-     * listener is not getting through at all — see
-     * {@link #CONSECUTIVE_BATCH_FAILURES_BEFORE_STALLED}.
-     */
-    private void noteBatchFailure(Throwable e) {
-        consecutiveBatchFailures++;
-        if (reportedStalled
-                || consecutiveBatchFailures < CONSECUTIVE_BATCH_FAILURES_BEFORE_STALLED) {
-            return;
-        }
-        reportedStalled = true;
-        log.error("Binding '{}': {} consecutive batches rolled back on listener {} — reporting "
-                        + "this listener stalled. Nothing is lost, every message is back on the "
-                        + "queue, but this listener is committing nothing: {}",
-                config.getId(), consecutiveBatchFailures, listenerId, e.getMessage());
-        if (healthManager != null) {
-            healthManager.recordListenerStalled(config.getId(), listenerId,
-                    consecutiveBatchFailures + " consecutive batches rolled back; last failure: "
-                            + e.getMessage());
-        }
-    }
-
-    /** A batch committed: this listener is getting through again. */
-    private void noteBatchProgress() {
-        consecutiveBatchFailures = 0;
-        if (!reportedStalled) {
-            return;
-        }
-        reportedStalled = false;
-        log.info("Binding '{}': listener {} is committing again", config.getId(), listenerId);
-        if (healthManager != null) {
-            healthManager.recordListenerProgressing(config.getId(), listenerId);
-        }
-    }
 
     /**
      * Routes poison messages to the backout queue and returns the screen
@@ -658,7 +603,7 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     private void handleFailure(Throwable e, List<String> failedBatchMessageIds) {
-        metrics.setHealthy(false);
+        reporter.unhealthy();
         if (degradedModeManager == null) {
             return;
         }
@@ -673,12 +618,10 @@ public class TransactedReceiveLoop implements Runnable {
                 degradedModeManager.recordFailure(e, failedBatchMessageIds);
         log.debug("Failure classified as {} for binding '{}'",
                 result.getFailureClass(), config.getId());
-        metrics.setSuspectCount(degradedModeManager.getSuspectCount());
+        reporter.suspects(degradedModeManager.getSuspectCount());
 
-        if (result.enteredDegradedMode() && healthManager != null) {
-            healthManager.recordDegraded(config.getId(),
-                    "Entered degraded mode due to " + result.getFailureClass() + " failure");
-            metrics.recordDegradedModeEntry();
+        if (result.enteredDegradedMode()) {
+            reporter.enteredDegradedMode(result.getFailureClass());
         }
     }
 
@@ -701,18 +644,16 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     private void handleSuccess() {
-        metrics.setHealthy(true);
-        noteBatchProgress();
+        reporter.healthy();
+        reporter.batchProgressed();
         if (degradedModeManager == null) {
             return;
         }
 
-        metrics.setSuspectCount(degradedModeManager.getSuspectCount());
+        reporter.suspects(degradedModeManager.getSuspectCount());
 
-        boolean exitedDegradedMode = degradedModeManager.recordSuccess();
-        if (exitedDegradedMode && healthManager != null) {
-            healthManager.recordHealthy(config.getId());
-            metrics.recordDegradedModeExit();
+        if (degradedModeManager.recordSuccess()) {
+            reporter.exitedDegradedMode();
         }
     }
 
@@ -936,115 +877,6 @@ public class TransactedReceiveLoop implements Runnable {
         listenerSession.close();
     }
 
-    /** The outcome of one recovery attempt. */
-    private enum RecoveryOutcome {
-        /** The session is open again; the receive loop can resume. */
-        RECOVERED,
-        /** This attempt failed but the next one might not. */
-        RETRY,
-        /** Stop recovering: budget exhausted, fatal fault, or shutting down. */
-        GIVE_UP
-    }
-
-    /**
-     * Attempts to recover the session with bounded exponential backoff.
-     *
-     * <p>Iterative on purpose. The previous version retried by recursing,
-     * which was safe only because the budget is a hardcoded 10 — each level's
-     * stack frame stays live for the entire remaining backoff. The moment the
-     * budget becomes configurable (a natural next step), recursion depth
-     * scales with it. Same behaviour, loop instead of stack.
-     *
-     * @return true if recovery succeeded, false if recovery failed after max
-     *         attempts, hit a fatal fault, or was interrupted
-     */
-    private boolean recoverSession() {
-        RecoveryOutcome outcome;
-        do {
-            outcome = recoverOnce();
-        } while (outcome == RecoveryOutcome.RETRY);
-        return outcome == RecoveryOutcome.RECOVERED;
-    }
-
-    /** One recovery attempt: close, back off, reopen. */
-    private RecoveryOutcome recoverOnce() {
-        int attempts = reconnectAttempts.incrementAndGet();
-
-        if (attempts > MAX_RECONNECT_ATTEMPTS) {
-            log.error("Max reconnect attempts ({}) exceeded for binding '{}'",
-                    MAX_RECONNECT_ATTEMPTS, config.getId());
-            if (healthManager != null) {
-                healthManager.recordUnhealthy(config.getId(),
-                        new RuntimeException("Max reconnect attempts exceeded"));
-            }
-            metrics.recordReconnectFailure();
-            return RecoveryOutcome.GIVE_UP;
-        }
-
-        log.warn("Attempting session recovery for binding '{}' (attempt {}/{})",
-                config.getId(), attempts, MAX_RECONNECT_ATTEMPTS);
-
-        // Update health to RECOVERING
-        if (healthManager != null) {
-            healthManager.recordRecovering(config.getId(),
-                    String.format("Session reconnect attempt %d/%d", attempts, MAX_RECONNECT_ATTEMPTS));
-        }
-
-        // Close existing resources
-        listenerSession.close();
-
-        // Calculate backoff with jitter
-        long backoffMs = backoffPolicy.backoffFor(attempts).toMillis();
-
-        log.debug("Waiting {}ms before reconnect attempt {} for binding '{}'",
-                backoffMs, attempts, config.getId());
-
-        try {
-            Thread.sleep(backoffMs);
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            log.info("Reconnect wait interrupted for binding '{}'", config.getId());
-            return RecoveryOutcome.GIVE_UP;
-        }
-
-        // Check if we should still be running
-        if (!running.get() || Thread.currentThread().isInterrupted()) {
-            log.info("Recovery aborted - loop stopping for binding '{}'", config.getId());
-            return RecoveryOutcome.GIVE_UP;
-        }
-
-        try {
-            listenerSession.open();
-            // Fresh budget for the next incident. Plain state now — the
-            // accessor and the next recovery read it — not the success signal
-            // it once doubled as.
-            reconnectAttempts.set(0);
-            reconnectCount.incrementAndGet();
-            log.info("Session recovered successfully for binding '{}' after {} attempt(s)",
-                    config.getId(), attempts);
-
-            metrics.recordReconnect();
-
-            // Restore health to HEALTHY after successful recovery
-            if (healthManager != null) {
-                healthManager.recordHealthy(config.getId());
-            }
-
-            return RecoveryOutcome.RECOVERED;
-        } catch (JMSException e) {
-            log.error("Session recovery attempt {} failed for binding '{}': {}",
-                    attempts, config.getId(), e.getMessage());
-
-            if (faultPolicy.isFatal(e)) {
-                log.error("Non-recoverable error detected for binding '{}', stopping recovery",
-                        config.getId());
-                return RecoveryOutcome.GIVE_UP;
-            }
-
-            return RecoveryOutcome.RETRY;
-        }
-    }
-
     public boolean isRunning() {
         return running.get();
     }
@@ -1066,10 +898,10 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     public long getReconnectCount() {
-        return reconnectCount.get();
+        return recoveryCoordinator.getReconnectCount();
     }
 
     public int getCurrentReconnectAttempts() {
-        return reconnectAttempts.get();
+        return recoveryCoordinator.getCurrentAttempts();
     }
 }
