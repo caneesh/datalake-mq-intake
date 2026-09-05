@@ -72,7 +72,7 @@ was never seen to fail proves nothing about the bug it claims to cover.
 
 ## Defects found by measuring coverage before refactoring
 
-Five refactors were proposed in review. Each began by mutating the existing
+Six refactors were proposed in review. Each began by mutating the existing
 code to find out which invariants the suite actually held, before any code
 moved. The step has produced three different outcomes, and all three are worth
 having:
@@ -87,6 +87,11 @@ having:
   for its own sake; assessing it surfaced a defect in what the class does *not*
   do, recorded under reconciliation-stall detection below.
 
+The sixth (`RmsTrackerMessageBuilder`) landed in the second category and the
+first at once: four unheld invariants, plus a stale javadoc asserting the
+opposite of the production gate it documents. Recorded under the tracker header
+rewrite below.
+
 A clean probe result is evidence in its own right, where a green suite is not.
 
 | Defect | Found by | Test | Observed before the fix |
@@ -96,6 +101,7 @@ A clean probe result is evidence in its own right, where a green suite is not.
 | An unwritable landing path passed startup validation, so the service would start, report healthy, and stall on its first batch | mutating `StartupValidator` before splitting it | `StartupValidatorTest.aLandingPathThatExistsButIsNotWritableFailsStartup` | removing `fileSystem.access(path, WRITE)` changed no test result |
 | An incomplete audit scan authorised quarantine, so a correctly-audited file could be MOVED because its audit record was corrupt | testing a review's claim about `PartitionReconciliationService` | `PartitionReconciliationServiceTest.anIncompleteAuditScanMustNotAuthoriseQuarantine` | the file was moved |
 | Reconciliation could stop for the life of the process with no signal of any kind | assessing a review's claim about `ReconciliationScheduler` | `ReconciliationSchedulerTest.aBindingWhoseWorkersAreAllBlockedIsReportedStalledInsteadOfGoingSilent` | no log line, no metric movement, no health change |
+| The javadoc on `TAG_VALUE_MAPPING_CAPTURED` described the mapping as un-captured while the constant read true, so it asserted the opposite of the RMS production startup gate it feeds | reading `RmsTrackerMessageBuilder` before extracting from it | — (documentation; the gate itself is held, see below) | a reader would conclude the tracker contract was incomplete |
 
 The last is the one to remember: reporting a condition and refusing to act on it
 are different guarantees. An earlier fix made the corrupt-audit case VISIBLE —
@@ -268,6 +274,67 @@ non-flaky over five consecutive runs.
 The seven pre-existing invariants (overlap prevention, per-binding dispatch,
 pending-partition retention, lookback window selection, failure containment,
 worker pool sizing) were re-probed after this change and all still bite.
+
+## The RMS tracker header rewrite
+
+`HeaderRewriter` reproduces a legacy EJBHelper algorithm, so almost every line
+of it is a decision to match old behaviour rather than to write good code. That
+makes it the one place in the codebase where "this looks wrong" is not a reason
+to change anything — and it makes the tests the only record of which oddities
+are deliberate.
+
+Twenty-seven tests existed before this work. Nine probes found four of them
+unheld, all in behaviour the code documents as intentional:
+
+| Mutation | Before | Now pinned by |
+|---|---|---|
+| escaped tag form no longer removed before re-adding | **not caught** | `anExistingTagInAnEscapedHeaderIsAlsoRemovedBeforeItIsReAdded` |
+| span runs first-start to FIRST-end instead of last-end | **not caught** | `aRepeatedTagHasEverythingBetweenFirstAndLastOccurrenceRemoved` |
+| legacy timestamp formatted in UTC | **not caught** | `theLegacyTimestampIsFormattedInTheJvmDefaultZone` |
+| contract gate always reports ready | **not caught** | — see the equivalent-mutant note below |
+| TAG_LIST order, value mapping, regex `replaceAll`, injection point, tag removal | caught | pre-existing tests |
+
+The escaped one is the find worth remembering. Every escaped-form test used tags
+that are *not* in `TAG_LIST` (`SomeTag`, `Keep`), so the escaped half of the
+removal branch was never exercised — a real header already carrying a tracker
+tag would have shipped it twice, stale value and fresh, and the suite would have
+stayed green.
+
+**A fifth gap turned up by accident.** A `?` in an unrelated test payload made
+`replaceAll` match nothing, leaving the stale tag in place. That is the "match
+unexpectedly" half of the regex hazard the code documents; the existing test
+covered only the half that throws. Both are faithful to the legacy, which calls
+the same `replaceAll` on the same span, so it is pinned rather than fixed — but
+the two halves fail differently, and the difference matters at cutover: a throw
+loses the tracker message, an unexpected match sends one carrying both the old
+and the new value. Pinned by `aQuantifierInTheSpanSilentlyLeavesTheStaleTagInPlace`.
+
+### Verifying the extraction
+
+`HeaderRewriter` moved to its own class — a pure function with no JMS, no
+session and no IO. `TrackerFields` deliberately stayed nested: promoting it
+would put a second public type of that name beside `core.config.TrackerFields`,
+the mutable YAML-bound bean `RmsConfiguration` converts from.
+
+Ten probes across the new boundary, all caught: TAG_LIST order, the value
+mapping, literal `replace` versus the legacy regex `replaceAll`, the injection
+point, both halves of tag removal, the span, the timestamp zone, an evidence
+constant flipped false, and the builder passing the header through unrewritten.
+
+**Equivalent mutants are not coverage gaps.** Mutating
+`isTrackerContractReady()` to `return true` changed no test result, which reads
+exactly like an uncovered invariant. It is not one: with every evidence constant
+already true, `return true` and `return gaps.isEmpty()` are the same function,
+so the probe tested nothing. The meaningful probe is to flip the constants the
+gate reads — which fails 2 and 7 tests. Before recording a probe as a gap, check
+that the mutation actually changes behaviour on some input.
+
+**Two malformed probes, for the record.** After de-indenting the extracted class
+one level, a probe still targeting the old indentation matched zero times; and
+one probe replaced a line with itself. Both were re-run correctly rather than
+counted — the same failure mode as the compile-error and duplicate-target probes
+recorded above, and the same lesson: confirm a probe applied before believing a
+green result.
 
 ## Backout-depth monitoring
 
