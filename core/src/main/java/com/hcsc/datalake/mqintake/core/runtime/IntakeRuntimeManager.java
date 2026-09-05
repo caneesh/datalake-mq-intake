@@ -32,6 +32,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 
 /**
  * Manages the runtime lifecycle for all configured bindings.
@@ -71,6 +72,16 @@ public class IntakeRuntimeManager implements SmartLifecycle {
 
     private final MetricsRegistry metricsRegistry;
     private final BindingHealthManager healthManager;
+
+    /**
+     * Builds the two collaborators that need live infrastructure.
+     *
+     * <p>Injected rather than constructed inline so a test can supply its own
+     * without subclassing this class. Both default to the real thing; see the
+     * package-private constructor.
+     */
+    private final Supplier<BindingRuntimeFactory> runtimeFactorySupplier;
+    private final Supplier<ReconciliationScheduler> reconciliationSchedulerSupplier;
     private final Map<String, BindingRuntime> runtimes = new ConcurrentHashMap<>();
     private final List<String> startupErrors = Collections.synchronizedList(new ArrayList<>());
 
@@ -92,6 +103,42 @@ public class IntakeRuntimeManager implements SmartLifecycle {
                                  @Autowired(required = false) TrackerMessageBuilderFactory trackerBuilderFactory,
                                  @Autowired(required = false)
                                  com.hcsc.datalake.mqintake.core.security.KerberosManager kerberosManager) {
+        this(properties, fileSystem, hadoopConf, mqConnectionManager, serializerFactory,
+                bindingConfigValidator, healthManager, productionMode, instanceId,
+                trackerBuilderFactory, kerberosManager, null, null);
+    }
+
+    /**
+     * The constructor everything else runs through, with both
+     * infrastructure-bound collaborators injectable.
+     *
+     * <p>Either supplier may be null, which means "build the real one". The
+     * real ones cannot be passed in from a test: a
+     * {@link BindingRuntimeFactory} needs a live MQ connection manager, and
+     * {@link ReconciliationFactory} needs a live filesystem, so both are built
+     * here from state this class already holds — but building them is now the
+     * default rather than the only option. That is what closes the two seams
+     * this class used to leave open: package-private methods a test subclass
+     * overrode, which made a subclass of the production lifecycle root part of
+     * the test harness.
+     *
+     * <p>Suppliers rather than instances because both are built during
+     * {@link #start()}, after validation has passed, and a manager that is
+     * constructed but never started must not have created either.
+     */
+    IntakeRuntimeManager(IntakeProperties properties,
+                         FileSystem fileSystem,
+                         Configuration hadoopConf,
+                         MqConnectionProvider mqConnectionManager,
+                         RecordSerializerFactory serializerFactory,
+                         BindingConfigValidator bindingConfigValidator,
+                         BindingHealthManager healthManager,
+                         ProductionMode productionMode,
+                         InstanceId instanceId,
+                         TrackerMessageBuilderFactory trackerBuilderFactory,
+                         com.hcsc.datalake.mqintake.core.security.KerberosManager kerberosManager,
+                         Supplier<BindingRuntimeFactory> runtimeFactorySupplier,
+                         Supplier<ReconciliationScheduler> reconciliationSchedulerSupplier) {
         this.productionMode = productionMode;
         this.instanceId = instanceId;
         this.properties = properties;
@@ -118,6 +165,13 @@ public class IntakeRuntimeManager implements SmartLifecycle {
                     kerberosManager::getReloginFailureCount);
         }
         this.healthManager = healthManager;
+
+        // Bound to this instance here, not called here: both run during
+        // start().
+        this.runtimeFactorySupplier = runtimeFactorySupplier != null
+                ? runtimeFactorySupplier : this::defaultRuntimeFactory;
+        this.reconciliationSchedulerSupplier = reconciliationSchedulerSupplier != null
+                ? reconciliationSchedulerSupplier : this::defaultReconciliationScheduler;
     }
 
     @Override
@@ -315,27 +369,20 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         }
     }
 
-    /**
-     * Builds the factory used to create binding runtimes.
-     *
-     * <p>Package-private and overridable so startup-rollback behaviour can be
-     * tested with a factory that fails for a chosen binding. Constructing the
-     * real factory requires a live MQ connection manager, which would put the
-     * rollback path out of reach of any test.
-     */
-    /** Installs the factory an overridden {@link #initializeRuntimeFactory()} wants to use. */
-    void setRuntimeFactoryForTest(BindingRuntimeFactory factory) {
-        this.runtimeFactory = factory;
+    /** Obtains the factory used to create binding runtimes. */
+    private void initializeRuntimeFactory() {
+        this.runtimeFactory = runtimeFactorySupplier.get();
     }
 
-    void initializeRuntimeFactory() {
+    /** The real factory: everything a binding runtime needs, from live infrastructure. */
+    private BindingRuntimeFactory defaultRuntimeFactory() {
         AuditRecordEmitter auditEmitter = new HdfsAuditRecordEmitter(
                 fileSystem,
                 properties.getHdfs().getAuditBasePath(),
                 instanceId.value(),
                 Clock.systemUTC());
 
-        this.runtimeFactory = new BindingRuntimeFactory(
+        return new BindingRuntimeFactory(
                 fileSystem,
                 hadoopConf,
                 mqConnectionManager,
@@ -391,21 +438,20 @@ public class IntakeRuntimeManager implements SmartLifecycle {
      * it holds no JMS session, and every failure inside it is contained. A
      * mechanism that checks ingestion must never be able to stop it.
      */
-    /**
-     * Package-private and overridable for the same reason as
-     * {@link #initializeRuntimeFactory()}: the late-startup rollback path must
-     * be testable, and nothing in the real method can be made to throw on
-     * demand.
-     */
-    void startReconciliation() {
-        reconciliationScheduler = ReconciliationFactory.createScheduler(
+    private void startReconciliation() {
+        reconciliationScheduler = reconciliationSchedulerSupplier.get();
+        reconciliationScheduler.start();
+    }
+
+    /** The real scheduler, read-only over the same filesystem the bindings write to. */
+    private ReconciliationScheduler defaultReconciliationScheduler() {
+        return ReconciliationFactory.createScheduler(
                 fileSystem,
                 hadoopConf,
                 properties,
                 instanceId.value(),
                 metricsRegistry::getBindingMetrics,
                 Clock.systemUTC());
-        reconciliationScheduler.start();
     }
 
     private void createAndStartRuntimes() {

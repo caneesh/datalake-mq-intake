@@ -174,12 +174,8 @@ class InstanceLeaseLifecycleTest {
                         path -> HdfsPathValidator.PathValidationResult.success()),
                 new BindingHealthManager(),
                 ProductionMode.disabled(),
-                InstanceId.of(INSTANCE), null, null) {
-            @Override
-            void initializeRuntimeFactory() {
-                setRuntimeFactoryForTest(inertRuntimeFactory());
-            }
-        };
+                InstanceId.of(INSTANCE), null, null,
+                this::inertRuntimeFactory, null);
     }
 
     /**

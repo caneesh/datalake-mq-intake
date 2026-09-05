@@ -9,6 +9,7 @@ import com.hcsc.datalake.mqintake.core.config.ProductionMode;
 import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.loop.TransactedReceiveLoop;
 import com.hcsc.datalake.mqintake.core.mq.MqConnectionManager;
+import com.hcsc.datalake.mqintake.core.reconciliation.ReconciliationScheduler;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -25,6 +26,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -185,8 +187,16 @@ class PartialStartupRollbackTest {
         // stop() — without this rollback the bindings were left consuming
         // inside an application whose startup had failed.
         List<BindingRuntime> created = new ArrayList<>();
-        IntakeRuntimeManager manager = new FailsAfterBindingsStart(
-                properties("a", "b"), created);
+        IntakeRuntimeManager manager = manager(
+                properties("a", "b"),
+                () -> factoryOf(binding -> {
+                    BindingRuntime runtime = blockingRuntime(binding);
+                    created.add(runtime);
+                    return runtime;
+                }),
+                () -> {
+                    throw new IllegalStateException("reconciliation exploded");
+                });
 
         assertThatThrownBy(manager::start)
                 .isInstanceOf(RuntimeException.class)
@@ -275,35 +285,14 @@ class PartialStartupRollbackTest {
     private IntakeRuntimeManager managerWithStartFailure(IntakeProperties props,
                                                          String failingBindingId,
                                                          List<BindingRuntime> created) {
-        return new IntakeRuntimeManager(
-                props, fileSystem, conf, mock(MqConnectionManager.class),
-                config -> TRIVIAL_SERIALIZER,
-                new BindingConfigValidator(
-                        path -> com.hcsc.datalake.mqintake.core.config.HdfsPathValidator
-                                .PathValidationResult.success()),
-                new BindingHealthManager(),
-                ProductionMode.disabled(),
-                com.hcsc.datalake.mqintake.core.config.InstanceId.of("rollback-test"), null, null) {
-            @Override
-            void initializeRuntimeFactory() {
-                setRuntimeFactoryForTest(new BindingRuntimeFactory(
-                        fileSystem, conf, mock(MqConnectionManager.class),
-                        config -> TRIVIAL_SERIALIZER, null,
-                        new com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry(),
-                        new BindingHealthManager(), null, "test") {
-                    @Override
-                    public BindingRuntime create(BindingConfig binding)
-                            throws BindingRuntimeCreationException {
-                        if (binding.getId().equals(failingBindingId)) {
-                            return failsOnStartRuntime(binding);
-                        }
-                        BindingRuntime runtime = blockingRuntime(binding);
-                        created.add(runtime);
-                        return runtime;
-                    }
-                });
+        return manager(props, () -> factoryOf(binding -> {
+            if (binding.getId().equals(failingBindingId)) {
+                return failsOnStartRuntime(binding);
             }
-        };
+            BindingRuntime runtime = blockingRuntime(binding);
+            created.add(runtime);
+            return runtime;
+        }), null);
     }
 
     /** A runtime whose start() throws, as if task submission had been refused. */
@@ -321,47 +310,6 @@ class PartialStartupRollbackTest {
                         new java.util.concurrent.RejectedExecutionException("no threads left"));
             }
         };
-    }
-
-    /** Every binding starts fine; the step after them throws. */
-    private class FailsAfterBindingsStart extends IntakeRuntimeManager {
-        private final List<BindingRuntime> created;
-        private final IntakeProperties props;
-
-        FailsAfterBindingsStart(IntakeProperties props, List<BindingRuntime> created) {
-            super(props, fileSystem, conf, mock(MqConnectionManager.class),
-                    config -> TRIVIAL_SERIALIZER,
-                    new BindingConfigValidator(
-                            path -> com.hcsc.datalake.mqintake.core.config.HdfsPathValidator
-                                    .PathValidationResult.success()),
-                    new BindingHealthManager(),
-                    ProductionMode.disabled(),
-                    com.hcsc.datalake.mqintake.core.config.InstanceId.of("rollback-test"), null, null);
-            this.props = props;
-            this.created = created;
-        }
-
-        @Override
-        void initializeRuntimeFactory() {
-            setRuntimeFactoryForTest(new BindingRuntimeFactory(
-                    fileSystem, conf, mock(MqConnectionManager.class),
-                    config -> TRIVIAL_SERIALIZER, null,
-                    new com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry(),
-                    new BindingHealthManager(), null, "test") {
-                @Override
-                public BindingRuntime create(BindingConfig binding)
-                        throws BindingRuntimeCreationException {
-                    BindingRuntime runtime = blockingRuntime(binding);
-                    created.add(runtime);
-                    return runtime;
-                }
-            });
-        }
-
-        @Override
-        void startReconciliation() {
-            throw new IllegalStateException("reconciliation exploded");
-        }
     }
 
     // --- harness ---
@@ -415,6 +363,31 @@ class PartialStartupRollbackTest {
      */
     private IntakeRuntimeManager manager(IntakeProperties props, String failingBindingId,
                                          List<BindingRuntime> created) {
+        return manager(props, () -> factoryOf(binding -> {
+            if (binding.getId().equals(failingBindingId)) {
+                throw new BindingRuntimeFactory.BindingRuntimeCreationException(
+                        "simulated failure for binding '" + binding.getId() + "'");
+            }
+            BindingRuntime runtime = blockingRuntime(binding);
+            created.add(runtime);
+            return runtime;
+        }), null);
+    }
+
+    /**
+     * A manager wired to test collaborators instead of a test subclass.
+     *
+     * <p>The real runtime factory needs a live MQ connection manager and the
+     * real reconciliation scheduler a live filesystem, which is why both are
+     * injectable at all; passing them here is what lets this test stop
+     * extending the production lifecycle root.
+     *
+     * @param reconciliation null to use the real scheduler, which is inert
+     *                       while reconciliation is disabled
+     */
+    private IntakeRuntimeManager manager(IntakeProperties props,
+                                         Supplier<BindingRuntimeFactory> runtimeFactory,
+                                         Supplier<ReconciliationScheduler> reconciliation) {
         return new IntakeRuntimeManager(
                 props, fileSystem, conf, mock(MqConnectionManager.class),
                 config -> TRIVIAL_SERIALIZER,
@@ -423,28 +396,30 @@ class PartialStartupRollbackTest {
                                 .PathValidationResult.success()),
                 new BindingHealthManager(),
                 ProductionMode.disabled(),
-                com.hcsc.datalake.mqintake.core.config.InstanceId.of("rollback-test"), null, null) {
+                com.hcsc.datalake.mqintake.core.config.InstanceId.of("rollback-test"),
+                null, null, runtimeFactory, reconciliation);
+    }
+
+    /** A factory that creates runtimes the way the caller says, and nothing else. */
+    private BindingRuntimeFactory factoryOf(RuntimeCreator creator) {
+        return new BindingRuntimeFactory(
+                fileSystem, conf, mock(MqConnectionManager.class),
+                config -> TRIVIAL_SERIALIZER, null,
+                new com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry(),
+                new BindingHealthManager(), null, "test") {
             @Override
-            void initializeRuntimeFactory() {
-                setRuntimeFactoryForTest(new BindingRuntimeFactory(
-                        fileSystem, conf, mock(MqConnectionManager.class),
-                        config -> TRIVIAL_SERIALIZER, null,
-                        new com.hcsc.datalake.mqintake.core.metrics.MetricsRegistry(),
-                        new BindingHealthManager(), null, "test") {
-                    @Override
-                    public BindingRuntime create(BindingConfig binding)
-                            throws BindingRuntimeCreationException {
-                        if (binding.getId().equals(failingBindingId)) {
-                            throw new BindingRuntimeCreationException(
-                                    "simulated failure for binding '" + binding.getId() + "'");
-                        }
-                        BindingRuntime runtime = blockingRuntime(binding);
-                        created.add(runtime);
-                        return runtime;
-                    }
-                });
+            public BindingRuntime create(BindingConfig binding)
+                    throws BindingRuntimeCreationException {
+                return creator.create(binding);
             }
         };
+    }
+
+    /** Like the factory's create(), including the failure it is allowed to signal. */
+    @FunctionalInterface
+    private interface RuntimeCreator {
+        BindingRuntime create(BindingConfig binding)
+                throws BindingRuntimeFactory.BindingRuntimeCreationException;
     }
 
     /** A runtime whose listener blocks until released, so it is genuinely alive. */
