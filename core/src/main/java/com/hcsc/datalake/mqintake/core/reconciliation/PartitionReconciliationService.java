@@ -179,6 +179,21 @@ public class PartitionReconciliationService implements PartitionReconciler {
         // this makes the condition visible rather than self-healing.
         List<String> unreadableAudits = new ArrayList<>(onDate.unreadable());
         unreadableAudits.addAll(nextDay.unreadable());
+
+        // An incomplete scan withholds authority to MUTATE, not just to
+        // conclude. Quarantine moves a file, and the decision rests on the
+        // audit records read for this partition: a record that could not be
+        // parsed leaves the file it described looking unaudited, which is
+        // precisely what makes something a quarantine candidate. Acting on
+        // that moves a correctly-audited file because its AUDIT RECORD was
+        // corrupt.
+        //
+        // Reporting is unaffected — the discrepancy is still raised and
+        // retryLater still set. Only the irreversible half is withheld, until
+        // a later pass can read everything.
+        boolean auditScanComplete = unreadableAudits.isEmpty();
+        boolean mayQuarantine = quarantineDuplicates && auditScanComplete;
+
         for (String path : unreadableAudits) {
             discrepancies.add(new Discrepancy(DiscrepancyType.UNREADABLE_AUDIT, path,
                     "Audit record present but unreadable — this partition cannot be "
@@ -244,7 +259,7 @@ public class PartitionReconciliationService implements PartitionReconciler {
 
             if (result.getClassification() == FileClassification.DUPLICATE) {
                 String detail = "All identities present in audited files";
-                if (quarantineDuplicates) {
+                if (mayQuarantine) {
                     // Contained like the unreadable-file case above: one failed
                     // quarantine rename (permission gap, stale target) used to
                     // escape as an IOException that aborted the whole
@@ -260,6 +275,10 @@ public class PartitionReconciliationService implements PartitionReconciler {
                                 + "), file left in place, retrying next pass";
                         retryLater = true;
                     }
+                } else if (quarantineDuplicates) {
+                    detail += " — quarantine WITHHELD: the audit scan for this partition was "
+                            + "incomplete, so this file may only look unaudited";
+                    retryLater = true;
                 } else {
                     detail += " — quarantine candidate (no action taken)";
                 }

@@ -116,6 +116,38 @@ class PartitionReconciliationServiceTest {
     }
 
     @Test
+    void anIncompleteAuditScanMustNotAuthoriseQuarantine() throws Exception {
+        // Quarantine MOVES a file, and the decision rests on the audit records
+        // read for the partition. If one of those could not be parsed, the
+        // comparison is missing evidence — and the file it was skipped for
+        // then looks unaudited, which is exactly what makes something a
+        // quarantine candidate.
+        //
+        // So a correctly-audited file could be moved because its AUDIT RECORD
+        // was corrupt, not because anything was wrong with the file. An
+        // unreadable scan already sets retryLater; it must also withhold
+        // authority to mutate anything.
+        writeSeqFile("audited.seq", "guid-1", "guid-2");
+        writeAudit("audited.seq", 2);
+        writeSeqFile("orphan.seq", "guid-1", "guid-2");
+        writeRawAudit("audit_corrupt.json", "{\"binding_id\":\"rms\",\"filename\":\"cut");
+
+        ReconciliationReport report = reconcile("rms", true, true);   // quarantine ENABLED
+
+        assertThat(fileSystem.exists(new Path(partitionPath(), "orphan.seq")))
+                .as("nothing may be moved while the audit scan is incomplete")
+                .isTrue();
+        assertThat(fileSystem.exists(new Path(basePath + "/_quarantine/orphan.seq"))).isFalse();
+
+        // Still reported, and still retried — withholding the action must not
+        // withhold the finding.
+        assertThat(report.getDiscrepancies())
+                .anySatisfy(d -> assertThat(d.getType())
+                        .isEqualTo(DiscrepancyType.UNREADABLE_AUDIT));
+        assertThat(report.isRetryLater()).isTrue();
+    }
+
+    @Test
     void duplicateOrphanQuarantineIsAMoveNotADelete() throws Exception {
         // Audited file holds guid-1, guid-2; orphan holds the same identities
         writeSeqFile("audited.seq", "guid-1", "guid-2");
