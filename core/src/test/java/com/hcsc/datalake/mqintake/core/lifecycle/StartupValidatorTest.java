@@ -40,6 +40,54 @@ class StartupValidatorTest {
         }
     }
 
+    @Test
+    void aLandingPathThatExistsButIsNotWritableFailsStartup() throws Exception {
+        // The check that stands between a misconfigured deployment and a
+        // service that starts, reports healthy, and then stalls on its first
+        // batch. IntakeRuntimeManager validates precisely so the process
+        // refuses to start instead of failing later, when the only symptom is
+        // a queue that stops draining.
+        //
+        // Untested until now because the local filesystem grants write access
+        // to everything, so removing fileSystem.access(...) entirely changed
+        // no test result. This denies it explicitly.
+        String base = testBasePath + "/unwritable";
+        fileSystem.mkdirs(new Path(base));
+
+        StartupValidator denied = new StartupValidator(
+                new WriteDeniedFileSystem(fileSystem, base), "test-instance");
+
+        List<String> errors = denied.validateBindings(List.of(createBinding("rms", base)));
+
+        assertThat(errors)
+                .as("an unwritable landing path must be a startup error, named")
+                .isNotEmpty();
+        assertThat(String.join(" | ", errors))
+                .contains("not writable")
+                .contains(base);
+    }
+
+    /** Grants everything the local filesystem does, except write on one path. */
+    private static class WriteDeniedFileSystem extends org.apache.hadoop.fs.FilterFileSystem {
+        private final String deniedPath;
+
+        WriteDeniedFileSystem(FileSystem delegate, String deniedPath) {
+            super(delegate);
+            this.deniedPath = deniedPath;
+        }
+
+        @Override
+        public void access(Path path, org.apache.hadoop.fs.permission.FsAction mode)
+                throws org.apache.hadoop.security.AccessControlException, java.io.IOException {
+            if (mode == org.apache.hadoop.fs.permission.FsAction.WRITE
+                    && path.toString().endsWith(deniedPath)) {
+                throw new org.apache.hadoop.security.AccessControlException(
+                        "Permission denied: user=svc, path=" + path);
+            }
+            super.access(path, mode);
+        }
+    }
+
     private BindingConfig createBinding(String id, String hdfsBasePath) {
         BindingConfig config = new BindingConfig();
         config.setId(id);
@@ -118,39 +166,6 @@ class StartupValidatorTest {
 
         Path tmpPath = new Path(testBasePath + "/_tmp/test-instance");
         assertThat(fileSystem.exists(tmpPath)).isTrue();
-    }
-
-    @Test
-    void cleanupRemovesStaleFilesForOwnInstanceOnly() throws Exception {
-        String ownTmpDir = testBasePath + "/_tmp/test-instance";
-        String otherTmpDir = testBasePath + "/_tmp/other-instance";
-        fileSystem.mkdirs(new Path(ownTmpDir));
-        fileSystem.mkdirs(new Path(otherTmpDir));
-
-        Path ownFile = new Path(ownTmpDir + "/stale.seq");
-        Path otherFile = new Path(otherTmpDir + "/stale.seq");
-        fileSystem.create(ownFile).close();
-        fileSystem.create(otherFile).close();
-
-        int deleted = validator.cleanupInstanceTempFiles(testBasePath, 0);
-
-        assertThat(deleted).isEqualTo(1);
-        assertThat(fileSystem.exists(ownFile)).isFalse();
-        assertThat(fileSystem.exists(otherFile)).isTrue();
-    }
-
-    @Test
-    void cleanupDoesNotDeleteRecentFiles() throws Exception {
-        String tmpDir = testBasePath + "/_tmp/test-instance";
-        fileSystem.mkdirs(new Path(tmpDir));
-
-        Path recentFile = new Path(tmpDir + "/recent.seq");
-        fileSystem.create(recentFile).close();
-
-        int deleted = validator.cleanupInstanceTempFiles(testBasePath, 3600000);
-
-        assertThat(deleted).isEqualTo(0);
-        assertThat(fileSystem.exists(recentFile)).isTrue();
     }
 
     @Test

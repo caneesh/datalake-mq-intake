@@ -257,9 +257,11 @@ public class IntakeRuntimeManager implements SmartLifecycle {
         String auditBasePath = properties.getHdfs().getAuditBasePath();
 
         for (BindingConfig binding : properties.getBindings()) {
-            StartupValidator validator = new StartupValidator(fileSystem, resolvedInstanceId);
+            com.hcsc.datalake.mqintake.core.lifecycle.StagingAreaReclaimer reclaimer =
+                    new com.hcsc.datalake.mqintake.core.lifecycle.StagingAreaReclaimer(
+                            fileSystem, resolvedInstanceId);
             try {
-                int deleted = validator.cleanupInstanceTempFiles(binding.getHdfs().getBasePath(), maxAge);
+                int deleted = reclaimer.cleanupInstanceTempFiles(binding.getHdfs().getBasePath(), maxAge);
                 if (deleted > 0) {
                     log.info("Cleaned up {} stale temp files for binding '{}'", deleted, binding.getId());
                 }
@@ -272,7 +274,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
             // above, everyone else's here, and only where a stale lease and an
             // expired file agree.
             try {
-                int reclaimed = validator.reclaimAbandonedInstances(
+                int reclaimed = reclaimer.reclaimAbandonedInstances(
                         binding.getHdfs().getBasePath(), maxAge, leaseTimeout);
                 if (reclaimed > 0) {
                     log.info("Reclaimed {} file(s) from abandoned instances for binding '{}'",
@@ -288,7 +290,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
             // stage and rename leaves debris nothing ever removes.
             if (auditBasePath != null && !auditBasePath.isBlank()) {
                 try {
-                    int deleted = validator.cleanupInstanceTempFiles(
+                    int deleted = reclaimer.cleanupInstanceTempFiles(
                             com.hcsc.datalake.mqintake.core.audit.AuditPaths
                                     .bindingDir(auditBasePath, binding.getId()),
                             maxAge);
@@ -301,7 +303,7 @@ public class IntakeRuntimeManager implements SmartLifecycle {
                             binding.getId(), e.getMessage());
                 }
                 try {
-                    validator.reclaimAbandonedInstances(
+                    reclaimer.reclaimAbandonedInstances(
                             com.hcsc.datalake.mqintake.core.audit.AuditPaths
                                     .bindingDir(auditBasePath, binding.getId()),
                             maxAge, leaseTimeout);

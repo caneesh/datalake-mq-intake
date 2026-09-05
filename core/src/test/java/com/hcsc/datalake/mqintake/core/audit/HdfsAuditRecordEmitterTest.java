@@ -148,8 +148,8 @@ class HdfsAuditRecordEmitterTest {
         Path stale = new Path(tmpDir, "audit_stale.json.tmp");
         fileSystem.create(stale, true).close();
 
-        com.hcsc.datalake.mqintake.core.lifecycle.StartupValidator validator =
-                new com.hcsc.datalake.mqintake.core.lifecycle.StartupValidator(
+        com.hcsc.datalake.mqintake.core.lifecycle.StagingAreaReclaimer validator =
+                new com.hcsc.datalake.mqintake.core.lifecycle.StagingAreaReclaimer(
                         fileSystem, "inst-sweep");
         int deleted = validator.cleanupInstanceTempFiles(testBasePath + "/rms", 0);
 

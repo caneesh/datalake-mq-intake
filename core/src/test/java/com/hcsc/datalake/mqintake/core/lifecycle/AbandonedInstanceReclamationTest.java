@@ -38,7 +38,7 @@ class AbandonedInstanceReclamationTest {
 
     private FileSystem fs;
     private String basePath;
-    private StartupValidator validator;   // acting as instance "current"
+    private StagingAreaReclaimer reclaimer;   // acting as instance "current"
 
     @BeforeEach
     void setUp() throws Exception {
@@ -46,7 +46,7 @@ class AbandonedInstanceReclamationTest {
         conf.set("fs.defaultFS", "file:///");
         fs = FileSystem.getLocal(conf);
         basePath = tempDir.resolve("data").toString();
-        validator = new StartupValidator(fs, "current");
+        reclaimer = new StagingAreaReclaimer(fs, "current");
     }
 
     @AfterEach
@@ -65,7 +65,7 @@ class AbandonedInstanceReclamationTest {
         Path stale = stagedFile("host-111", "batch.seq", ageMs(Duration.ofHours(9)));
         leaseAged("host-111", Duration.ofHours(9));
 
-        int reclaimed = validator.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
+        int reclaimed = reclaimer.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
 
         assertThat(reclaimed).isEqualTo(1);
         assertThat(fs.exists(stale)).isFalse();
@@ -78,7 +78,7 @@ class AbandonedInstanceReclamationTest {
         Path stale = stagedFile("host-111", "batch.seq", ageMs(Duration.ofHours(2)));
         // no lease file at all
 
-        validator.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
+        reclaimer.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
 
         assertThat(fs.exists(stale)).isFalse();
     }
@@ -88,9 +88,38 @@ class AbandonedInstanceReclamationTest {
         stagedFile("host-111", "batch.seq", ageMs(Duration.ofHours(9)));
         leaseAged("host-111", Duration.ofHours(9));
 
-        validator.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
+        reclaimer.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
 
         assertThat(fs.exists(new Path(PartitionPath.tempDir(basePath, "host-111")))).isFalse();
+    }
+
+    @Test
+    void ownInstanceCleanupTouchesOnlyItsOwnDirectory() throws Exception {
+        // Moved here from StartupValidatorTest, which is the point of the
+        // split: this was never a validation test. The own-directory sweep
+        // applies file age ALONE, with no lease check, so it must never reach
+        // a sibling — reclaimAbandonedInstances is the only path that may,
+        // and only with a stale lease as well.
+        Path ours = stagedFile("current", "stale.seq", ageMs(Duration.ofHours(9)));
+        Path theirs = stagedFile("other-instance", "stale.seq", ageMs(Duration.ofHours(9)));
+
+        int deleted = reclaimer.cleanupInstanceTempFiles(basePath, 0);
+
+        assertThat(deleted).isEqualTo(1);
+        assertThat(fs.exists(ours)).isFalse();
+        assertThat(fs.exists(theirs))
+                .as("another instance's file is not this sweep's business")
+                .isTrue();
+    }
+
+    @Test
+    void ownInstanceCleanupKeepsFilesInsideTheMaxAge() throws Exception {
+        Path recent = stagedFile("current", "recent.seq", ageMs(Duration.ofMinutes(1)));
+
+        int deleted = reclaimer.cleanupInstanceTempFiles(basePath, Duration.ofHours(1).toMillis());
+
+        assertThat(deleted).isZero();
+        assertThat(fs.exists(recent)).isTrue();
     }
 
     // --- what must NOT be reclaimed ---
@@ -102,7 +131,7 @@ class AbandonedInstanceReclamationTest {
         Path theirs = stagedFile("host-222", "in-flight.seq", ageMs(Duration.ofHours(9)));
         leaseAged("host-222", Duration.ZERO);
 
-        int reclaimed = validator.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
+        int reclaimed = reclaimer.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
 
         assertThat(reclaimed).isZero();
         assertThat(fs.exists(theirs))
@@ -119,7 +148,7 @@ class AbandonedInstanceReclamationTest {
         Path fresh = stagedFile("host-333", "being-written.seq", ageMs(Duration.ofMinutes(2)));
         leaseAged("host-333", Duration.ofHours(9));
 
-        int reclaimed = validator.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
+        int reclaimed = reclaimer.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
 
         assertThat(reclaimed).isZero();
         assertThat(fs.exists(fresh)).isTrue();
@@ -131,7 +160,7 @@ class AbandonedInstanceReclamationTest {
         // wrote its first. Recent writes mean somebody is home.
         Path fresh = stagedFile("host-444", "recent.seq", ageMs(Duration.ofMinutes(5)));
 
-        int reclaimed = validator.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
+        int reclaimed = reclaimer.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
 
         assertThat(reclaimed).isZero();
         assertThat(fs.exists(fresh)).isTrue();
@@ -144,7 +173,7 @@ class AbandonedInstanceReclamationTest {
         // the rule twice and could delete a file this instance is writing.
         Path ours = stagedFile("current", "ours.seq", ageMs(Duration.ofHours(9)));
 
-        int reclaimed = validator.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
+        int reclaimed = reclaimer.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
 
         assertThat(reclaimed).isZero();
         assertThat(fs.exists(ours)).isTrue();
@@ -156,7 +185,7 @@ class AbandonedInstanceReclamationTest {
         Path recent = stagedFile("host-555", "recent.seq", ageMs(Duration.ofMinutes(1)));
         leaseAged("host-555", Duration.ofHours(9));
 
-        int reclaimed = validator.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
+        int reclaimed = reclaimer.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT);
 
         assertThat(reclaimed).isEqualTo(1);
         assertThat(fs.exists(old)).isFalse();
@@ -168,7 +197,7 @@ class AbandonedInstanceReclamationTest {
 
     @Test
     void missingStagingRootIsNotAnError() throws Exception {
-        assertThat(validator.reclaimAbandonedInstances(
+        assertThat(reclaimer.reclaimAbandonedInstances(
                 tempDir.resolve("never-written").toString(), MAX_AGE, LEASE_TIMEOUT)).isZero();
     }
 
@@ -182,13 +211,13 @@ class AbandonedInstanceReclamationTest {
                 fs, "host-666", List.of(basePath), LEASE_TIMEOUT);
         lease.renew();
 
-        assertThat(validator.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT))
+        assertThat(reclaimer.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT))
                 .as("held").isZero();
         assertThat(fs.exists(theirs)).isTrue();
 
         lease.close();   // a clean shutdown drops the lease
 
-        assertThat(validator.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT))
+        assertThat(reclaimer.reclaimAbandonedInstances(basePath, MAX_AGE, LEASE_TIMEOUT))
                 .as("released").isEqualTo(1);
         assertThat(fs.exists(theirs)).isFalse();
     }
