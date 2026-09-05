@@ -19,12 +19,22 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * Covers {@code MqConnectionManager.ManagedConnection} against a real queue
  * manager, through the public API only.
  *
- * <p><strong>No production code was changed to make this testable.</strong>
- * The obvious route — extracting {@code buildConnectionFactory()} behind an
- * interface — would put a seam in the path that establishes every MQ
- * connection for both applications, and this class is reachable without one.
- * Everything below drives {@link MqConnectionManager#getConnection(String)}
- * and varies only configuration.
+ * <p>Everything below drives {@link MqConnectionManager#getConnection(String)}
+ * and varies only configuration, so it exercises the production
+ * {@code IbmMqConnectionOpener} end to end — which is what makes the seam
+ * behind it acceptable rather than a path only tests take.
+ *
+ * <p><strong>This file used to say no production code had been changed to
+ * make it testable, and that a seam in the connect path was not worth it.
+ * That was reversed deliberately, on evidence.</strong> Five mutations of the
+ * connection path — the retry budget, the fault classification, the
+ * linked-exception matcher, the channel on the IBM factory, and the
+ * shared-connection rule — each left the default build green, because the only
+ * coverage was here and here is skipped unless {@code MQ_USER} is set. The
+ * argument for avoiding a seam was that this class was reachable without one.
+ * It is; but not in any build without a broker, which is every ordinary one.
+ * {@code ManagedConnectionTest} now covers all five with no MQ at all, and
+ * these tests remain the proof that the production opener still works.
  *
  * <p>The class read 0% before this, which was a measurement artifact rather
  * than the truth: it is executed by {@code PreflightAgainstRealMqTest}, but

@@ -1,8 +1,7 @@
 package com.hcsc.datalake.mqintake.core.mq;
 
 import com.hcsc.datalake.mqintake.core.config.MqConnectionConfig;
-import com.hcsc.datalake.mqintake.core.loop.recovery.JmsFaultMatcher;
-import com.ibm.mq.jms.MQConnectionFactory;
+import com.hcsc.datalake.mqintake.core.loop.recovery.BackoffPolicy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -95,192 +94,13 @@ public class MqConnectionManager implements MqConnectionProvider {
         if (config == null) {
             throw new MqConnectionException("No configuration found for connection: " + connectionId);
         }
-        return new ManagedConnection(config, credentialProvider);
-    }
-
-    /**
-     * Wrapper around a JMS Connection with reconnection support.
-     */
-    private static class ManagedConnection {
-        private final MqConnectionConfig config;
-        private final CredentialProvider credentialProvider;
-        private volatile Connection connection;
-        private volatile MQConnectionFactory factory;
-
-        ManagedConnection(MqConnectionConfig config, CredentialProvider credentialProvider) {
-            this.config = config;
-            this.credentialProvider = credentialProvider;
-        }
-
-        synchronized Connection getConnection() throws MqConnectionException {
-            if (connection != null) {
-                return connection;
-            }
-
-            return connect();
-        }
-
-        private Connection connect() throws MqConnectionException {
-            int attempts = 0;
-            int maxAttempts = config.getReconnectAttempts();
-            JMSException lastException = null;
-
-            while (attempts < maxAttempts) {
-                attempts++;
-                try {
-                    if (Thread.currentThread().isInterrupted()) {
-                        throw new MqConnectionException("Connection attempt interrupted");
-                    }
-
-                    if (factory == null) {
-                        factory = buildConnectionFactory();
-                    }
-
-                    connection = createConnection();
-                    connection.start();
-
-                    log.info("Connected to MQ: id={}, host={}, queueManager={}",
-                            config.getId(), config.getHost(), config.getQueueManager());
-
-                    return connection;
-
-                } catch (JMSException e) {
-                    lastException = e;
-                    log.warn("Connection attempt {} of {} failed for {}: {}",
-                            attempts, maxAttempts, config.getId(), e.getMessage());
-
-                    if (isConfigurationError(e)) {
-                        throw new MqConnectionException(
-                                "Configuration error connecting to " + config.getId() + ": " + e.getMessage(), e);
-                    }
-
-                    if (attempts < maxAttempts) {
-                        try {
-                            Thread.sleep(config.getReconnectDelayMs());
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                            throw new MqConnectionException("Connection attempt interrupted", ie);
-                        }
-                    }
-                }
-            }
-
-            throw new MqConnectionException(
-                    "Failed to connect to " + config.getId() + " after " + maxAttempts + " attempts",
-                    lastException);
-        }
-
-        private MQConnectionFactory buildConnectionFactory() throws JMSException {
-            MQConnectionFactory mqFactory = new MQConnectionFactory();
-            mqFactory.setHostName(config.getHost());
-            mqFactory.setPort(config.getPort());
-            mqFactory.setQueueManager(config.getQueueManager());
-            mqFactory.setChannel(config.getChannel());
-
-            mqFactory.setTransportType(
-                    MqTransportType.fromConfig(config.getTransportType()).wmqConstant());
-
-            log.debug("Built MQConnectionFactory for {}: host={}, port={}, queueManager={}, channel={}",
-                    config.getId(), config.getHost(), config.getPort(),
-                    config.getQueueManager(), config.getChannel());
-
-            return mqFactory;
-        }
-
-        /**
-         * Opens the JMS connection, failing closed on credentials.
-         *
-         * <p>A configured {@code credential-ref} is a statement that this
-         * queue manager must be reached as a specific identity. If the lookup
-         * then fails, the only safe outcome is no connection. Falling back to
-         * an unauthenticated connect — the previous behaviour, behind a
-         * warning — silently downgrades the security posture at the worst
-         * possible moment: a credential store outage or a rotation that
-         * removed the entry. Where the queue manager permits anonymous binds
-         * it would connect with different authority than intended, and where
-         * it does not, the real cause would be buried under an MQ auth error.
-         */
-        private Connection createConnection() throws JMSException {
-            Optional<CredentialProvider.Credentials> creds =
-                    resolveCredentials(config.getCredentialRef(), config.getId(), credentialProvider);
-
-            if (creds.isEmpty()) {
-                log.debug("No credential-ref configured for {} — connecting without credentials",
-                        config.getId());
-                return factory.createConnection();
-            }
-
-            CredentialProvider.Credentials c = creds.get();
-            log.debug("Creating authenticated connection for {} as user {}",
-                    config.getId(), c.getUsername());
-            return factory.createConnection(c.getUsername(), c.getPassword());
-        }
-
-        /**
-         * Reasons no amount of retrying will fix.
-         *
-         * <p>{@code MQRC_UNKNOWN_CHANNEL_NAME} rather than
-         * {@code MQRC_CHANNEL_NOT_FOUND}: the latter was in this list and is
-         * not a reason code IBM MQ emits, so it never matched anything. A
-         * channel missing from the queue manager reports 2540
-         * MQRC_UNKNOWN_CHANNEL_NAME.
-         *
-         * <p>Deliberately absent: {@code MQRC_HOST_NOT_AVAILABLE} (2538) and
-         * {@code MQRC_CHANNEL_NOT_AVAILABLE} (2537). Both are transient — a
-         * listener not up yet, every channel instance busy — and both must
-         * keep retrying. Adding either would turn a queue manager restart into
-         * a startup failure.
-         */
-        private static final String[] NOT_WORTH_RETRYING = {
-                "MQRC_UNKNOWN_OBJECT_NAME",
-                "MQRC_NOT_AUTHORIZED",
-                "MQRC_SECURITY_ERROR",
-                "MQRC_Q_MGR_NAME_ERROR",
-                "MQRC_UNKNOWN_CHANNEL_NAME",
-        };
-
-        /**
-         * Searches the exception's own message AND its linked exception.
-         *
-         * <p>The linked half is the half that works. IBM MQ reports a failed
-         * connect as {@code JMSWMQ0018: Failed to connect to queue manager
-         * 'X'...} with error code {@code JMSWMQ0018} — identical for a wrong
-         * queue-manager name, a wrong channel and an unreachable listener. The
-         * reason code that distinguishes them lives only in the linked
-         * {@code MQException}: {@code ... reason '2058'
-         * ('MQRC_Q_MGR_NAME_ERROR')}. Matching on the top-level message alone,
-         * as this did, therefore never recognised any of the conditions listed
-         * above, and every misconfiguration was retried to exhaustion.
-         *
-         * <p>The error code is not matched on for the same reason: JMSWMQ0018
-         * covers all three cases and would make transient failures look like
-         * configuration ones.
-         */
-        private static final JmsFaultMatcher CONFIGURATION_FAULT =
-                JmsFaultMatcher.messageContains(NOT_WORTH_RETRYING)
-                        .or(JmsFaultMatcher.linkedMessageContains(NOT_WORTH_RETRYING));
-
-        private boolean isConfigurationError(JMSException e) {
-            // A credential that will not resolve is a configuration problem,
-            // not a transient one. Retrying cannot fix it and would only delay
-            // the real error reaching the operator.
-            if (e instanceof MqCredentialException) {
-                return true;
-            }
-            return CONFIGURATION_FAULT.matches(e);
-        }
-
-        synchronized void close() {
-            if (connection != null) {
-                try {
-                    connection.close();
-                    log.info("Closed MQ connection: {}", config.getId());
-                } catch (JMSException e) {
-                    log.warn("Error closing MQ connection {}: {}", config.getId(), e.getMessage());
-                }
-                connection = null;
-            }
-        }
+        // Fixed delay, which is what this has always used. The policy is a
+        // parameter so a test can retry without sleeping; switching the
+        // default to the exponential-with-jitter policy the session recovery
+        // uses would be a behaviour change, not a refactor.
+        return new ManagedConnection(config,
+                new IbmMqConnectionOpener(config, credentialProvider),
+                BackoffPolicy.fixed(java.time.Duration.ofMillis(config.getReconnectDelayMs())));
     }
 
     /**
