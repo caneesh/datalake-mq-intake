@@ -72,16 +72,22 @@ was never seen to fail proves nothing about the bug it claims to cover.
 
 ## Defects found by measuring coverage before refactoring
 
-Four refactors were proposed in review. Each began by mutating the existing
+Five refactors were proposed in review. Each began by mutating the existing
 code to find out which invariants the suite actually held, before any code
-moved. Three of the four turned up a real defect — none of them was the
-refactor, and none would have been visible from reading the class.
+moved. The step has produced three different outcomes, and all three are worth
+having:
 
-The fourth (`IntakeRuntimeManager`) turned up no defect: the code was correct,
-but two of its invariants were held by nothing, which is a different problem
-with the same cause and is recorded under the lifecycle decomposition below.
-Measuring first is worth doing for that outcome too — a clean probe result is
-evidence, where a green suite on its own is not.
+- **A real defect** (three times). None of them was the refactor, and none
+  would have been visible from reading the class.
+- **Correct code with unheld invariants** (`IntakeRuntimeManager`). No defect,
+  but two invariants nothing was testing — recorded under the lifecycle
+  decomposition below.
+- **A well-covered class with a gap beside it** (`ReconciliationScheduler`).
+  All seven probed invariants held, so the refactor would have been structure
+  for its own sake; assessing it surfaced a defect in what the class does *not*
+  do, recorded under reconciliation-stall detection below.
+
+A clean probe result is evidence in its own right, where a green suite is not.
 
 | Defect | Found by | Test | Observed before the fix |
 |---|---|---|---|
@@ -89,6 +95,7 @@ evidence, where a green suite on its own is not.
 | The shutdown drain could commit with the thread still marked interrupted, rolling back the final batch on every clean shutdown | same | `.theShutdownDrainCommitsWithTheInterruptFlagCleared` | 67 tests passed with the clear removed |
 | An unwritable landing path passed startup validation, so the service would start, report healthy, and stall on its first batch | mutating `StartupValidator` before splitting it | `StartupValidatorTest.aLandingPathThatExistsButIsNotWritableFailsStartup` | removing `fileSystem.access(path, WRITE)` changed no test result |
 | An incomplete audit scan authorised quarantine, so a correctly-audited file could be MOVED because its audit record was corrupt | testing a review's claim about `PartitionReconciliationService` | `PartitionReconciliationServiceTest.anIncompleteAuditScanMustNotAuthoriseQuarantine` | the file was moved |
+| Reconciliation could stop for the life of the process with no signal of any kind | assessing a review's claim about `ReconciliationScheduler` | `ReconciliationSchedulerTest.aBindingWhoseWorkersAreAllBlockedIsReportedStalledInsteadOfGoingSilent` | no log line, no metric movement, no health change |
 
 The last is the one to remember: reporting a condition and refusing to act on it
 are different guarantees. An earlier fix made the corrupt-audit case VISIBLE —
@@ -202,6 +209,65 @@ Post-extraction probes, each caught by the test that names it:
 | `close()` drops the lease reference without releasing it | 1 failure |
 | shutdown never releases the staging claim | 1 failure |
 | late-startup failure leaves the bindings running | 1 failure |
+
+## Reconciliation stall detection
+
+Reconciliation could stop entirely and say nothing. The "still running —
+skipping this run" warning lives inside `runBindingQuietly`, so it fires only
+for a task that got a worker thread. Once every worker is blocked on HDFS — the
+correlated case, since all bindings read the same cluster — later passes queue
+behind them on the pool's unbounded queue and log nothing. The only
+reconciliation metric was a discrepancy counter, which stays flat precisely
+because no comparison is being made.
+
+The signal is a per-binding timestamp of the last completed pass, read two ways.
+Both compute from the timestamp rather than being reported by the scheduler
+thread, so they stay true when that thread is itself what died — the other route
+to silence, which the class guards against but could not report.
+
+| Behaviour | Test | Why it matters |
+|---|---|---|
+| A binding whose workers are all blocked is reported stalled | `.aBindingWhoseWorkersAreAllBlockedIsReportedStalledInsteadOfGoingSilent` | the failure that produces no log line of its own |
+| The age is wired through to the binding gauge | `.theAgeIsWiredThroughToTheBindingGauge` | asserts the wiring, not the value — see the Kerberos gauge that published 0.0 forever |
+| A completed pass clears the stall | `.aCompletedPassClearsTheStall` | an incident that never closes is an alert that gets muted |
+| The stall is reported once per incident, and recovery reported too | `.theStallIsReportedOncePerIncidentAndClearedWhenPassesResume` | — |
+| Disabled reconciliation is never reported as stalled | `.reconciliationBeingDisabledIsNeverReportedAsStalled` | switched off and stuck are different conditions |
+| A stopped scheduler is not stalled either | `.aSchedulerThatHasBeenStoppedIsNotReportedAsStalled` | the process can still be scraped on its way out |
+
+Probes, each caught by the test that names it:
+
+| Mutation | Result |
+|---|---|
+| the age gauge is never wired to the binding's metrics | 1 failure |
+| a completed pass does not refresh the timestamp | 2 failures |
+| the timestamp is never seeded at start | 5 failures |
+| a stopped scheduler still reports stalled | 1 failure |
+| the stall is never reported on the scheduler thread | 1 failure |
+
+**Two methodology lessons, both from probes that came back wrong.**
+
+*A test can pass for the wrong reason.* The first disabled-reconciliation test
+asserted `isStalled` was false with reconciliation off — and would have passed
+with the guard deleted, because the timestamps are never seeded in that path, so
+the age is -1 and the answer is false regardless. The probe
+`[disabled reconciliation reports as stalled]` came back **not caught**, which is
+what exposed it. The case the guard actually covers is a *stopped* scheduler,
+which now has its own test.
+
+*A log line is not a tested behaviour.* Deleting the stall check from the pass
+changed no test result, because every assertion was on the queryable state. The
+transition is now observable through `hasReportedStall()` — state rather than a
+log-capturing appender, which this project does not otherwise use.
+
+**A note on timing-dependent tests.** Three of these drive passes by hand and run
+at a 60s interval. At the harness default of 50ms the background schedule
+completes a pass mid-assertion and refreshes the very timestamp under test — a
+race that passes far more often than it fails, which is the worst kind. Verified
+non-flaky over five consecutive runs.
+
+The seven pre-existing invariants (overlap prevention, per-binding dispatch,
+pending-partition retention, lookback window selection, failure containment,
+worker pool sizing) were re-probed after this change and all still bite.
 
 ## Backout-depth monitoring
 
