@@ -286,28 +286,28 @@ class RmsTrackerMessageBuilderTest {
         // The placeholder used "</MessageHeaderDetailsType>". The real element is
         // MessageHeaderDetailsType — a one-word difference that would make every
         // splice miss and silently append at the end of the header instead.
-        assertThat(RmsTrackerMessageBuilder.HeaderRewriter.ROOT_END_TAG)
+        assertThat(HeaderRewriter.ROOT_END_TAG)
                 .isEqualTo("</MessageHeaderDetailsType>");
-        assertThat(RmsTrackerMessageBuilder.HeaderRewriter.ROOT_END_TAG_ESCAPED)
+        assertThat(HeaderRewriter.ROOT_END_TAG_ESCAPED)
                 .isEqualTo("&lt;/MessageHeaderDetailsType&gt;");
     }
 
     @Test
     void tagListMatchesTheLegacyOrderAndContents() {
-        assertThat(RmsTrackerMessageBuilder.HeaderRewriter.TAG_LIST)
+        assertThat(HeaderRewriter.TAG_LIST)
                 .containsExactly("ReportingSystem", "SourceSystem", "DestSystem",
                         "MesgStatus", "CreatedTimeStamp");
     }
 
     @Test
     void tagsAreBuiltInBothRawAndEscapedForms() {
-        assertThat(RmsTrackerMessageBuilder.HeaderRewriter.completeStartTag("MesgStatus", 0))
+        assertThat(HeaderRewriter.completeStartTag("MesgStatus", 0))
                 .isEqualTo("<MesgStatus>");
-        assertThat(RmsTrackerMessageBuilder.HeaderRewriter.completeEndTag("MesgStatus", 0))
+        assertThat(HeaderRewriter.completeEndTag("MesgStatus", 0))
                 .isEqualTo("</MesgStatus>");
-        assertThat(RmsTrackerMessageBuilder.HeaderRewriter.completeStartTag("MesgStatus", 1))
+        assertThat(HeaderRewriter.completeStartTag("MesgStatus", 1))
                 .isEqualTo("&lt;MesgStatus&gt;");
-        assertThat(RmsTrackerMessageBuilder.HeaderRewriter.completeEndTag("MesgStatus", 1))
+        assertThat(HeaderRewriter.completeEndTag("MesgStatus", 1))
                 .isEqualTo("&lt;/MesgStatus&gt;");
     }
 
