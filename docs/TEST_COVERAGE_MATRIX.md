@@ -6,7 +6,7 @@ same four assurance levels as `READINESS_REVIEW.md`:
 | Level | Meaning |
 |---|---|
 | **real-MQ** | Exercised on the production path against an actual IBM MQ queue manager |
-| **prod-path** | Exercised on the production path (real `BindingRuntimeFactory` → `BindingRuntime` → `TransactedReceiveLoop` → `SequenceFileBatchWriter` → JMS transaction → tracker → audit → health), with embedded ActiveMQ standing in for MQ |
+| **prod-path** | Exercised on the production path (real `BindingRuntimeFactory` → `BindingRuntime` → `TransactedReceiveLoop` → `BatchAccumulator` → `BatchTransactionProcessor` → `SequenceFileBatchWriter` → JMS transaction → tracker → audit → health), with embedded ActiveMQ standing in for MQ |
 | **unit** | Component-level only; the production path is not driven end to end |
 | **pending** | Not automatable here; requires real infrastructure |
 
@@ -23,9 +23,9 @@ real-MQ pass for anything touching those.
 | 1 | Kill/fail while batch only in memory | prod-path | `ProductionPathIntegrationTest.gracefulShutdownWithInFlightBatchLosesNothing` | Drain either commits or rolls back; identity set proves zero loss in both outcomes. Component-level: `TransactedReceiveLoopTest.failureMidBatchRollsBackAllMessages`. |
 | 2 | Failure during `_tmp` SequenceFile write | prod-path | `ProductionPathIntegrationTest.tmpWriteFailureRollsBackThenRedeliveryLandsEverything` | Injected serialization failure inside the real writer; `_tmp` left clean; redelivery lands every identity. |
 | 3 | Failure after rename, before MQ commit | prod-path | `ProductionPathIntegrationTest.failureAfterRenameBeforeCommitYieldsPermittedDuplicateNotLoss` | File visible, MQ rolled back → design-permitted duplicate, zero loss (§12.1). Duplicate is then classified by `PartitionReconciliationServiceTest.duplicateOrphanQuarantineIsAMoveNotADelete`. |
-| 4 | Failure after MQ commit, before audit | unit | `TransactedReceiveLoopTest.auditFailureDoesNotUndoCommittedTransaction` | Commit survives an audit outage. The resulting crash window is closed by `PartitionReconciliationServiceTest.soleCopyOrphanIsKeptAndRetrospectivelyAudited`. |
-| 5 | Failure between RMS tracker send and commit | unit | `TransactedReceiveLoopTest.trackerFailureRollsBackWhenConfiguredToFailTheBatch`; `.trackerFailureDoesNotRollBackByDefault` | Two policies, both covered. Default is MDB parity — the failure is logged and counted and the batch commits. Under `fail_batch_on_tracker_error` the tracker puts and source gets roll back as one unit of work. |
-| 6 | Tracker queue failure | prod-path | `ProductionPathIntegrationTest.trackerFailureLosesOnlyTheNotificationNotTheData` | **Default policy now matches the legacy MDB:** the failure is logged and counted, the batch still commits, so data lands once and only that notification is lost — no rollback, no duplicate. The stricter behaviour is retained under `fail_batch_on_tracker_error` and covers scenario 3. |
+| 4 | Failure after MQ commit, before audit | unit | `TransactedReceiveLoopTest.auditFailureRollsBackSoNoUnauditedDataIsCommitted`; `.auditFailureCanBeConfiguredToCommitAnyway` | Commit survives an audit outage. The resulting crash window is closed by `PartitionReconciliationServiceTest.soleCopyOrphanIsKeptAndRetrospectivelyAudited`. |
+| 5 | Failure between RMS tracker send and commit | unit | `TransactedReceiveLoopTest.trackerContentFailureRollsBackWhenConfiguredToFailTheBatch`; `.trackerContentFailureDoesNotRollBackByDefault`; `.trackerPutFailureRollsBackEvenByDefault` | Now two FAILURE KINDS, not two policies. A content failure (the payload breaks the header rewrite) is logged, counted and committed — MDB parity — unless `fail_batch_on_tracker_error` escalates it. A put failure (`JMSException`: queue full, message too big, broken producer) rolls back regardless of that flag, because it will refuse the next message too and the alternative is landing every message with its acknowledgement dropped. |
+| 6 | Tracker queue failure | prod-path | `ProductionPathIntegrationTest.trackerContentFailureLosesOnlyTheNotificationNotTheData` | **Default policy now matches the legacy MDB:** the failure is logged and counted, the batch still commits, so data lands once and only that notification is lost — no rollback, no duplicate. The stricter behaviour is retained under `fail_batch_on_tracker_error` and covers scenario 3. |
 | 7 | Deterministic bad payload | **real-MQ** | `IbmMqFailureIntegrationTest.poisonIsolatedToBackoutQueueOnRealMq` | Real redelivery drives the bisection; 7 clean messages land, only the true poison reaches the BOQ, source drained. Embedded equivalents: `ClaimsBisectionIntegrationTest.batchOf16WithOnePoisonIsolatesItWithoutOneByOneProcessing`, `.multiplePoisonMessagesAreAllIsolatedSafely`. |
 | 8 | HDFS infrastructure failure | unit + pending | `TransactedReceiveLoopTest.infrastructureExceptionDoesNotEnterDegradedMode` | Classification and rollback are automated: infrastructure failures must NOT trigger degraded mode. A true HDFS outage/failover needs a real cluster — see R2. |
 | 9 | MQ reconnect / session recovery | **real-MQ** | `IbmMqFailureIntegrationTest.sessionRecoveryAfterRealChannelOutage`; `.recoveryAfterRealQueueManagerRestart` | Two outage severities. (a) `STOP CHANNEL ... MODE(FORCE)` breaks a live loop; `MQRC_CONNECTION_BROKEN` detected, Session+Consumer rebuilt from the same `Connection`, processing resumes. (b) Full queue-manager restart (`docker restart`, QM process down ~12s): the loop recovers *and* the batch that was uncommitted when the QM went down is replayed rather than lost. Both end with health back at HEALTHY. Component-level: `TransactedReceiveLoopTest.sessionRecoveryExposesReconnectCount`. |
@@ -69,6 +69,43 @@ was never seen to fail proves nothing about the bug it claims to cover.
 | An infrastructure blip reset progress toward leaving degraded mode | `DegradedModeManagerTest.infrastructureBlipDoesNotDiscardProgressTowardRestore` | expected not degraded, was degraded |
 | Suspects were registered after the degraded-mode flip, letting a concurrent success restore full batch size with the poison in flight | `DegradedModeManagerTest.suspectsAreRegisteredBeforeDegradedModeBecomesVisible` | — |
 | `batch_bytes` counted UTF-16 code units, not the UTF-8 bytes actually written | `FlushTriggerTest.byteTriggerCountsUtf8BytesNotUtf16CodeUnits`, `.utf8ByteCountHandlesSurrogatePairs` | — |
+
+## Verifying the receive loop's decomposition
+
+`TransactedReceiveLoop` was split into `BatchAccumulator`,
+`BatchTransactionProcessor`, `SessionRecoveryCoordinator` and
+`LoopStateReporter`. The suite alone was **measured to be insufficient** to
+confirm that split preserved behaviour, so the evidence for it is a different
+kind and is recorded here rather than inferred from a green build.
+
+Before the extraction, deliberately breaking the loop showed which invariants
+the suite actually held:
+
+| Mutation | Before the characterisation tests |
+|---|---|
+| `committed` flag set one line later | caught (1 failure) |
+| tracker send moved after the audit | caught (8 failures) |
+| message identifiers never collected | **not caught** — 67 tests passed |
+| drain commits with the interrupt still set | **not caught** — 67 tests passed |
+
+`LoopInvariantCharacterisationTest` closes those, and every test in it was
+verified to FAIL against the specific mutation it names. It pins behaviour, not
+structure, which is what let it survive the extraction unchanged:
+
+| Invariant | Pinned by |
+|---|---|
+| identifiers collected before anything is sent | `aCommittedBatchClearsTheIdentifiersItActuallyConsumed`, `aFailedBatchMarksTheIdentifiersItActuallyConsumed`, `identifiersSurviveARoutedPoisonMessageInTheSameBatch` |
+| drain clears the interrupt before committing | `theShutdownDrainCommitsWithTheInterruptFlagCleared` |
+| post-commit failure never marks a suspect | `aFailureAfterTheCommitIsNeverMarkedSuspect` |
+| balance checked before tracker send and audit | `anUnbalancedBatchSendsNoTrackerMessageAndWritesNoAudit` |
+| a flush leaves no accumulator state | `eachFlushStartsFromAnEmptyBatch` |
+| recovery budget resets on success | `SessionRecoveryTest.aBrokenSessionIsRecoveredAndConsumptionResumes` (pre-existing) |
+
+**Changing any of these classes warrants re-running the mutations, not just the
+suite.** Three of the five now mutate an extracted class and are still caught by
+tests written against the loop, which is the property that makes the
+decomposition checkable at all.
+
 
 Two fixes are not directly covered and rely on the existing suite plus
 inspection: clearing the thread interrupt before the shutdown drain (it fails

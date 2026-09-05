@@ -33,6 +33,7 @@ claims/      (depends on core)
 ```
 
 - `core` contains the shared machinery: transactional receive loop, batching, sequence file writer, path stamping, audit, Kerberos, RecordSerializer interface
+- The receive loop is decomposed: `TransactedReceiveLoop` receives and decides when a batch is full; `BatchAccumulator` holds it; `BatchTransactionProcessor` owns the unit of work (screen → write → balance → tracker → audit → commit, in that order); `SessionRecoveryCoordinator` rebuilds a faulted session; `LoopStateReporter` records health and metrics. The ordering inside the processor IS the delivery guarantee — see `LoopInvariantCharacterisationTest`, and re-run its mutations rather than trusting a green suite when changing any of them
 - `rms` and `claims` contain binding-specific implementations (RecordSerializer, TrackerMessageBuilder)
 - If a module needs shared functionality, it goes in `core` — never duplicate logic across `rms` and `claims`
 
