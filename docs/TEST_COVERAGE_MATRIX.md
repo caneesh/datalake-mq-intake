@@ -72,10 +72,16 @@ was never seen to fail proves nothing about the bug it claims to cover.
 
 ## Defects found by measuring coverage before refactoring
 
-Three refactors were proposed in review. Each began by mutating the existing
+Four refactors were proposed in review. Each began by mutating the existing
 code to find out which invariants the suite actually held, before any code
-moved. That step has now found a real defect every time — none of them was the
+moved. Three of the four turned up a real defect — none of them was the
 refactor, and none would have been visible from reading the class.
+
+The fourth (`IntakeRuntimeManager`) turned up no defect: the code was correct,
+but two of its invariants were held by nothing, which is a different problem
+with the same cause and is recorded under the lifecycle decomposition below.
+Measuring first is worth doing for that outcome too — a clean probe result is
+evidence, where a green suite on its own is not.
 
 | Defect | Found by | Test | Observed before the fix |
 |---|---|---|---|
@@ -151,6 +157,51 @@ only against a real IBM MQ client that honours the flag, which the embedded
 broker does not), and temp-file cleanup when `rename()` returns false (HDFS
 returning false rather than throwing is not reproducible against the local
 filesystem). Both are called out in §D″ / R.
+
+## Verifying the lifecycle root's decomposition
+
+`IntakeRuntimeManager` owned validation, the instance lease, staging cleanup,
+component construction, binding startup and rollback, reconciliation, shutdown,
+metrics and health. Review proposed splitting it. The same measure-first step
+ran again, and this time found no defect — but found two invariants the suite
+did not hold, both of them code added earlier in the same work, and both of them
+exactly what the proposed split would move:
+
+| Mutation | Before the characterisation tests |
+|---|---|
+| rollback after a failed start does nothing | caught (1 failure) |
+| lease taken AFTER the staging sweep instead of before | **not caught** |
+| lease never released on clean shutdown | **not caught** |
+
+`InstanceLeaseLifecycleTest` closes both, and each test was verified to fail
+against the mutation it names, before and again after the code moved:
+
+| Invariant | Pinned by | Why it matters |
+|---|---|---|
+| the lease is written before any staging directory is swept | `theLeaseIsWrittenBeforeAnyStagingDirectoryIsSwept` | two instances starting at the same moment must each see the other's claim before either decides a directory is abandoned |
+| the lease is held while running and released on clean shutdown | `theLeaseIsHeldWhileRunningAndReleasedOnCleanShutdown` | releasing it is what lets an ordinary restart reclaim its predecessor's directory immediately instead of waiting out the lease timeout |
+
+Both assert on **filesystem calls** — the lease file is created before any
+staging root is listed — rather than on the manager's internals. That is the
+observable form of the invariant, and it is why both tests survived the two
+subsequent commits unchanged while the code they cover moved to another class.
+
+The split itself:
+
+| Change | Effect |
+|---|---|
+| `initializeRuntimeFactory()` / `setRuntimeFactoryForTest()` / `startReconciliation()` replaced by injected suppliers | `PartialStartupRollbackTest` no longer subclasses the production lifecycle root (it did three times); the `@Autowired` constructor Spring uses is unchanged |
+| `StagingLifecycleManager` extracted | claim-then-sweep ordering was a comment between two adjacent calls in a sixty-line `start()`; it is now `claim()`, the only way to call the class |
+| `BindingRuntimeRegistry` **not** extracted | it would be a Map, three `clear()` calls, two iterations and two accessors — a hop with no decision in it |
+
+Post-extraction probes, each caught by the test that names it:
+
+| Mutation | Result |
+|---|---|
+| sweep before the claim instead of after | 1 failure |
+| `close()` drops the lease reference without releasing it | 1 failure |
+| shutdown never releases the staging claim | 1 failure |
+| late-startup failure leaves the bindings running | 1 failure |
 
 ## Backout-depth monitoring
 
