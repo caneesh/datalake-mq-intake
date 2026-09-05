@@ -6,7 +6,6 @@ import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Objects;
 
 /**
  * Turns what a listener observes into health and metric transitions.
@@ -56,9 +55,9 @@ class LoopStateReporter {
 
     LoopStateReporter(String bindingId, BindingHealthManager healthManager,
                       BindingMetrics metrics) {
-        this.bindingId = Objects.requireNonNull(bindingId, "bindingId required");
+        this.bindingId = bindingId;
         this.healthManager = healthManager;
-        this.metrics = Objects.requireNonNull(metrics, "metrics required");
+        this.metrics = metrics;
     }
 
     /** Names the thread this listener runs on, for per-listener health. */

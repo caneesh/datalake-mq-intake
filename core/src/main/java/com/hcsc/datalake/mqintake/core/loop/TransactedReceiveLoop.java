@@ -83,9 +83,6 @@ public class TransactedReceiveLoop implements Runnable {
     private final Clock flushClock;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
-    private final AtomicLong commitCount = new AtomicLong(0);
-    private final AtomicLong rollbackCount = new AtomicLong(0);
-    private final AtomicLong messageCount = new AtomicLong(0);
 
     /** This thread's JMS resources; see ListenerSession for the invariant. */
     private final ListenerSession listenerSession;
@@ -95,14 +92,15 @@ public class TransactedReceiveLoop implements Runnable {
 
     /** Translates what this listener observes into health and metric transitions. */
     private final LoopStateReporter reporter;
+
+    /** One batch, from screening to commit. Owns the order the guarantee rests on. */
+    private final BatchTransactionProcessor processor;
     private volatile Thread loopThread;
 
     /** Loop-thread-confined; see UNRECOGNISED_FAULTS_BEFORE_FORCED_RECOVERY. */
     private int consecutiveUnrecognisedFaults = 0;
 
 
-    /** Drives the log cadence in recordTrackerSuppressed; the metric is the signal. */
-    private final AtomicLong suppressedTrackers = new AtomicLong(0);
 
     /**
      * Creates a receive loop for the given binding.
@@ -183,6 +181,10 @@ public class TransactedReceiveLoop implements Runnable {
                 ? backoffPolicy : BackoffPolicy.exponentialWithJitter();
         this.flushClock = flushClock != null ? flushClock : Clock.systemUTC();
         this.reporter = new LoopStateReporter(config.getId(), healthManager, this.metrics);
+        this.processor = new BatchTransactionProcessor(
+                config, this.listenerSession, batchWriter, trackerMessageBuilder,
+                poisonMessageHandler, degradedModeManager, this.auditRecordEmitter,
+                this.metrics, this.reporter);
         this.recoveryCoordinator = new SessionRecoveryCoordinator(
                 config.getId(), this.listenerSession, this.faultPolicy, this.backoffPolicy,
                 healthManager, this.metrics, running::get);
@@ -213,25 +215,25 @@ public class TransactedReceiveLoop implements Runnable {
         } finally {
             cleanup();
             log.info("Receive loop stopped for binding '{}'. Commits: {}, Rollbacks: {}, Messages: {}",
-                    config.getId(), commitCount.get(), rollbackCount.get(), messageCount.get());
+                    config.getId(), processor.getCommitCount(), processor.getRollbackCount(),
+                    processor.getMessageCount());
         }
     }
 
     private void runLoop() {
-        FlushTrigger flushTrigger = new FlushTrigger(
+        BatchAccumulator batch = new BatchAccumulator(
                 config.getBatch().getSize(),
                 config.getBatch().getBytes(),
                 config.getBatch().getIntervalMs(),
-                flushClock
-        );
-        List<Message> batch = new ArrayList<>(config.getBatch().getSize());
+                flushClock,
+                metrics);
 
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
-                pollOnce(batch, flushTrigger);
+                pollOnce(batch);
                 consecutiveUnrecognisedFaults = 0; // the session demonstrably works
             } catch (JMSException e) {
-                if (!surviveFault(e, batch, flushTrigger)) {
+                if (!surviveFault(e, batch)) {
                     break;
                 }
             }
@@ -244,26 +246,22 @@ public class TransactedReceiveLoop implements Runnable {
      * One receive: accumulate the message, if any, and flush when a batch
      * boundary is hit.
      */
-    private void pollOnce(List<Message> batch, FlushTrigger flushTrigger) throws JMSException {
+    private void pollOnce(BatchAccumulator batch) throws JMSException {
         int effectiveBatchSize = getEffectiveBatchSize();
         Message message = listenerSession.consumer().receive(receiveTimeoutMs);
 
         if (message != null) {
             batch.add(message);
-            flushTrigger.trackMessage(message);
-            // In-flight batch depth. One atomic store per message,
-            // negligible beside the JMS receive that produced it.
-            metrics.setCurrentBatchSize(batch.size());
 
-            if (batch.size() >= effectiveBatchSize || flushTrigger.shouldFlush()) {
-                flushBatch(batch, flushTrigger);
+            if (batch.size() >= effectiveBatchSize || batch.shouldFlush()) {
+                flushBatch(batch);
             }
-        } else if (!batch.isEmpty() && flushTrigger.shouldFlush()) {
+        } else if (!batch.isEmpty() && batch.shouldFlush()) {
             // Idle poll. shouldFlush() rather than isTimeoutExpired()
             // so the partition boundary is noticed here too — otherwise
             // a quiet batch would sit until the next message arrived,
             // and land in a later partition than the one it belongs to.
-            flushBatch(batch, flushTrigger);
+            flushBatch(batch);
         }
     }
 
@@ -275,7 +273,7 @@ public class TransactedReceiveLoop implements Runnable {
      * @return true to keep looping; false to stop — a fatal fault, or
      *         recovery that failed after exhausting its budget
      */
-    private boolean surviveFault(JMSException e, List<Message> batch, FlushTrigger flushTrigger) {
+    private boolean surviveFault(JMSException e, BatchAccumulator batch) {
         if (!running.get()) {
             // Shutdown-time: stop() flips running before interrupting,
             // so an exception raised by the interrupt lands here. It
@@ -289,14 +287,13 @@ public class TransactedReceiveLoop implements Runnable {
 
         log.error("JMS error in receive loop for binding '{}': {}",
                 config.getId(), e.getMessage(), e);
-        handleFailure(e);
-        rollbackQuietly();
-        batch.clear();
-        flushTrigger.reset();
-        // Without this the gauge kept reporting the rolled-back
-        // batch's size through the whole reconnect backoff —
-        // a phantom stuck batch on the dashboard.
-        metrics.setCurrentBatchSize(0);
+        processor.handleFailure(e);
+        processor.rollbackQuietly();
+        // Resets the messages, the trigger and the in-flight gauge together.
+        // Without the gauge reset it kept reporting the rolled-back batch's
+        // size through the whole reconnect backoff — a phantom stuck batch on
+        // the dashboard.
+        batch.reset();
 
         if (faultPolicy.isFatal(e)) {
             // Reconnecting cannot fix bad credentials or denied
@@ -344,7 +341,7 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     /** Lands whatever is still accumulated when the loop stops. */
-    private void drainOnShutdown(List<Message> batch) {
+    private void drainOnShutdown(BatchAccumulator batch) {
         // stop() interrupts this thread to break the blocking receive(). The
         // drain below has to commit, and the IBM MQ client can fail in-flight
         // calls when the calling thread is still marked interrupted — which
@@ -359,20 +356,18 @@ public class TransactedReceiveLoop implements Runnable {
         log.info("Draining {} messages on shutdown for binding '{}'",
                 batch.size(), config.getId());
         try {
-            processBatch(batch);
+            processor.processBatch(batch.messages());
         } catch (Exception e) {
             log.warn("Failed to drain batch on shutdown for binding '{}': {}",
                     config.getId(), e.getMessage());
-            rollbackQuietly();
+            processor.rollbackQuietly();
         }
     }
 
     /** Processes the accumulated batch and resets the accumulation state. */
-    private void flushBatch(List<Message> batch, FlushTrigger flushTrigger) {
-        processBatch(batch);
-        batch.clear();
-        flushTrigger.reset();
-        metrics.setCurrentBatchSize(0);
+    private void flushBatch(BatchAccumulator batch) {
+        processor.processBatch(batch.messages());
+        batch.reset();
     }
 
     /** Brief pause after a JMS fault the policy does not classify as broken. */
@@ -391,468 +386,25 @@ public class TransactedReceiveLoop implements Runnable {
         return config.getBatch().getSize();
     }
 
-    private void processBatch(List<Message> batch) {
-        int batchSize = batch.size();
-        log.debug("Processing batch of {} messages for binding '{}'",
-                batchSize, config.getId());
-
-        // Collect IDs BEFORE any send: routing a message to the BOQ via
-        // producer.send() assigns it a NEW JMSMessageID, so IDs read afterward
-        // would no longer match the suspect entries recorded at failure time
-        List<String> batchMessageIds =
-                degradedModeManager != null ? collectMessageIds(batch) : List.of();
-
-        List<Message> cleanMessages = batch;
-        boolean committed = false;
-        int poisonCount = 0;
-        try {
-            if (poisonMessageHandler != null) {
-                PoisonMessageHandler.BatchPoisonCheckResult poisonResult = screenForPoison(batch);
-                poisonCount = poisonResult.getPoisonCount();
-                cleanMessages = poisonResult.getCleanMessages();
-
-                if (cleanMessages.isEmpty()) {
-                    // Nothing landed, but messages were consumed. Without a
-                    // record of its own this unit of work appears in no audit
-                    // anywhere and the balance shows those messages as lost.
-                    verifyAbcBalance(batchSize, 0, poisonCount);
-                    emitBackoutOnlyAudit(batch, poisonCount, batchSize);
-                    commitSession();
-                    committed = true;
-                    recordBackoutOnlyCommit(batchSize, batchMessageIds);
-                    return;
-                }
-            }
-
-            BatchWriter.BatchWriteResult writeResult = writeBatchToHdfs(cleanMessages);
-
-            // ABC balance, before anything is sent or committed: every message
-            // taken off the queue must be observed either in the file (the
-            // writer's per-append count) or on the BOQ (the screen's routing
-            // count). All three numbers are independent observations — none is
-            // computed from the others. Scope honestly stated: the current
-            // SequenceFileBatchWriter is all-or-nothing (any failed append
-            // throws before a result exists), so with today's writer this
-            // check guards loop/wiring bugs, a future writer that can return
-            // partial counts, and screen implementations that break the
-            // clean+routed=batch partition — not a partial write the current
-            // writer already turns into a hard rollback.
-            verifyAbcBalance(batchSize, writeResult.getRecordCount(), poisonCount);
-
-            if (config.getMode() == BindingMode.TRACKED) {
-                sendTrackerMessages(cleanMessages);
-            }
-
-            // Audit BEFORE commit. Written afterwards, a crash or an audit-store
-            // outage in between leaves committed data with no record, which a
-            // balancing control reads as loss — the wrong direction to fail in.
-            // Written first, the same crash yields an audited file whose
-            // messages are redelivered: a duplicate, which is detectable and
-            // true. Under ABC the audit is a control, so this is also the point
-            // at which an unwritable audit stops the batch rather than being
-            // logged and forgotten.
-            emitAuditRecord(cleanMessages, writeResult, poisonCount, batchSize);
-
-            commitSession();
-            committed = true;
-            recordCommittedBatch(batchSize, cleanMessages, writeResult, batchMessageIds);
-
-        } catch (Exception e) {
-            // "Did the commit happen?" is the pivotal question of the whole
-            // transaction design, so it stays visible here rather than inside
-            // a handler. The committed flag is set in this method, directly
-            // after each commitSession() call, for the same reason: set
-            // anywhere else, a failure in between would send an
-            // already-committed batch down the rollback path below.
-            if (committed) {
-                containPostCommitFailure(e, cleanMessages.size());
-            } else {
-                rollBackFailedBatch(e, batchSize, batchMessageIds);
-            }
-        }
-    }
-
-    /**
-     * A failure after the commit. The unit of work is already durable and
-     * acknowledged, so there is nothing to undo: this must not roll back and
-     * must not mark the batch suspect — those IDs are off the queue, so they
-     * can never be redelivered, clearSuspects() could never retire them, and
-     * DegradedModeManager would refuse to restore normal batch size for the
-     * life of the process.
-     */
-    private void containPostCommitFailure(Exception e, int committedCount) {
-        log.error("Post-commit bookkeeping failed for binding '{}' after committing "
-                        + "{} messages — delivery is unaffected: {}",
-                config.getId(), committedCount, e.getMessage(), e);
-    }
-
-    /**
-     * A failure before the commit. Rolling back puts every message of the
-     * unit of work back on the queue for redelivery; nothing is lost.
-     */
-    private void rollBackFailedBatch(Exception e, int batchSize, List<String> batchMessageIds) {
-        log.error("Batch processing failed for binding '{}', rolling back {} messages: {}",
-                config.getId(), batchSize, e.getMessage(), e);
-        handleFailure(e, batchMessageIds);
-        rollbackQuietly();
-        metrics.recordRollback();
-        reporter.batchFailed(e);
-    }
 
 
-    /**
-     * Routes poison messages to the backout queue and returns the screen
-     * result. A failure to route MUST propagate: rolling the batch back is
-     * what keeps the message on the queue instead of dropping it.
-     */
-    private PoisonMessageHandler.BatchPoisonCheckResult screenForPoison(List<Message> batch)
-            throws PoisonMessageHandler.BackoutFailureException {
-        PoisonMessageHandler.BatchPoisonCheckResult poisonResult;
-        try {
-            poisonResult = poisonMessageHandler.screen(listenerSession.session(), batch);
-        } catch (PoisonMessageHandler.BackoutFailureException e) {
-            log.error("Backout queue routing failed for binding '{}', rolling back: {}",
-                    config.getId(), e.getMessage(), e);
-            throw e; // Re-throw to trigger rollback in processBatch's catch
-        }
 
-        if (poisonResult.hasPoisonMessages()) {
-            log.warn("Routed {} poison messages to backout queue for binding '{}'",
-                    poisonResult.getPoisonCount(), config.getId());
-            for (int i = 0; i < poisonResult.getPoisonCount(); i++) {
-                metrics.recordPoisonMessageRouted();
-            }
-        }
-        return poisonResult;
-    }
 
-    /**
-     * The durable write: serialize, _tmp write, flush, close, rename into the
-     * partition. Flush latency covers the whole of it — the part that
-     * dominates batch time and the first thing to look at when throughput
-     * drops.
-     */
-    private BatchWriter.BatchWriteResult writeBatchToHdfs(List<Message> cleanMessages)
-            throws BatchWriter.BatchWriteException {
-        long flushStartNanos = System.nanoTime();
-        BatchWriter.BatchWriteResult writeResult = batchWriter.write(config.getId(), cleanMessages);
-        metrics.recordFlushLatency(Duration.ofNanos(System.nanoTime() - flushStartNanos));
-        return writeResult;
-    }
 
-    /**
-     * The acknowledgement to MQ. Everything before this call can roll back;
-     * nothing after it can.
-     *
-     * <p>Deliberately contains ONLY the commit: the caller flips its
-     * {@code committed} flag on the very next statement, and any code that
-     * ran here between the commit and the return would execute before that
-     * flip — if it could throw, an already-committed batch would take the
-     * rollback path and poison the suspect set.
-     */
-    private void commitSession() throws JMSException {
-        listenerSession.session().commit();
-    }
 
-    /** Post-commit bookkeeping for a unit of work that landed nothing. */
-    private void recordBackoutOnlyCommit(int batchSize, List<String> batchMessageIds) {
-        commitCount.incrementAndGet();
-        // The shared metrics must advance here too: this branch used to update
-        // only the loop's internal counter, so dashboards undercounted commits
-        // and consumption exactly when poison was churning.
-        metrics.recordCommit();
-        metrics.recordMessagesConsumed(batchSize);
-        if (degradedModeManager != null) {
-            degradedModeManager.clearSuspects(batchMessageIds);
-        }
-        handleSuccess();
-    }
 
-    /** Post-commit bookkeeping for a normally landed batch. */
-    private void recordCommittedBatch(int batchSize, List<Message> cleanMessages,
-                                      BatchWriter.BatchWriteResult writeResult,
-                                      List<String> batchMessageIds) {
-        commitCount.incrementAndGet();
-        messageCount.addAndGet(cleanMessages.size());
 
-        // Counted at commit, not at receive. A rolled-back batch is
-        // redelivered, so counting on receive would tally the same message
-        // repeatedly and overstate throughput during poison isolation.
-        // batchSize rather than cleanMessages.size(): messages routed to
-        // the BOQ in this unit of work were also consumed.
-        metrics.recordMessagesConsumed(batchSize);
 
-        // Committed messages (including any routed to BOQ in this unit of
-        // work) are no longer suspects
-        if (degradedModeManager != null) {
-            degradedModeManager.clearSuspects(batchMessageIds);
-        }
 
-        handleSuccess();
 
-        metrics.recordCommit();
-        metrics.recordMessagesWritten(cleanMessages.size(), writeResult.getByteCount());
 
-        log.debug("Committed batch of {} messages for binding '{}'",
-                cleanMessages.size(), config.getId());
-    }
 
-    /** Failure with no batch context (e.g. a fault in receive() itself). */
-    private void handleFailure(Throwable e) {
-        handleFailure(e, null);
-    }
 
-    private void handleFailure(Throwable e, List<String> failedBatchMessageIds) {
-        reporter.unhealthy();
-        if (degradedModeManager == null) {
-            return;
-        }
 
-        // Data failures mark the failed batch's message IDs as suspects so
-        // the bisection coordinator can track them across redelivery to
-        // any listener thread (§6.1). Marking is done inside recordFailure
-        // so it cannot be separated from the degraded-mode transition — and
-        // the entry edge is reported from inside that same transition, so
-        // racing listener threads record it exactly once.
-        DegradationPolicy.FailureResult result =
-                degradedModeManager.recordFailure(e, failedBatchMessageIds);
-        log.debug("Failure classified as {} for binding '{}'",
-                result.getFailureClass(), config.getId());
-        reporter.suspects(degradedModeManager.getSuspectCount());
 
-        if (result.enteredDegradedMode()) {
-            reporter.enteredDegradedMode(result.getFailureClass());
-        }
-    }
 
-    /**
-     * Collects JMS message IDs from a batch, skipping unreadable ones.
-     */
-    private List<String> collectMessageIds(List<Message> batch) {
-        List<String> ids = new ArrayList<>(batch.size());
-        for (Message message : batch) {
-            try {
-                String id = message.getJMSMessageID();
-                if (id != null) {
-                    ids.add(id);
-                }
-            } catch (JMSException e) {
-                log.debug("Could not read JMSMessageID: {}", e.getMessage());
-            }
-        }
-        return ids;
-    }
 
-    private void handleSuccess() {
-        reporter.healthy();
-        reporter.batchProgressed();
-        if (degradedModeManager == null) {
-            return;
-        }
 
-        reporter.suspects(degradedModeManager.getSuspectCount());
-
-        if (degradedModeManager.recordSuccess()) {
-            reporter.exitedDegradedMode();
-        }
-    }
-
-    /**
-     * The transaction-time ABC balance check: every message consumed must be
-     * observed either written to HDFS or routed to the BOQ, or the batch does
-     * not commit.
-     *
-     * <p>Gated per binding ({@code audit.balance-check-enabled}); RMS runs it,
-     * Claims keeps its existing behaviour. Throwing here lands in
-     * processBatch's catch before the commit, so the whole unit of work rolls
-     * back and MQ redelivers — the standard at-least-once path, no bespoke
-     * retry. The already-landed file (the write precedes this check) becomes a
-     * design-permitted duplicate on redelivery, exactly as for any other
-     * post-write pre-commit failure.
-     *
-     * @param mqConsumedCount  size of the batch as received from MQ
-     * @param hdfsWrittenCount records the writer observed itself append
-     * @param backoutCount     messages the screen observed itself route
-     */
-    private void verifyAbcBalance(int mqConsumedCount, int hdfsWrittenCount, int backoutCount)
-            throws AbcBalanceException {
-        if (!config.getAudit().isBalanceCheckEnabled()) {
-            return;
-        }
-
-        int balanceDelta = mqConsumedCount - hdfsWrittenCount - backoutCount;
-        if (balanceDelta == 0) {
-            return;
-        }
-
-        metrics.recordBalanceCheckFailure();
-        log.error("ABC balance check FAILED for binding '{}': consumed {} != written {} + "
-                        + "backout {} (delta {}). Rolling back — an unbalanced batch must "
-                        + "never be committed. The messages return to the queue for redelivery.",
-                config.getId(), mqConsumedCount, hdfsWrittenCount, backoutCount, balanceDelta);
-        throw new AbcBalanceException(String.format(
-                "ABC balance violated for binding '%s': consumed=%d, hdfsWritten=%d, "
-                        + "backout=%d, delta=%d",
-                config.getId(), mqConsumedCount, hdfsWrittenCount, backoutCount, balanceDelta));
-    }
-
-    /** An unbalanced unit of work; deliberately not a data failure. */
-    public static class AbcBalanceException extends Exception {
-        public AbcBalanceException(String message) {
-            super(message);
-        }
-    }
-
-    /**
-     * Writes the batch's audit record, before the commit.
-     *
-     * <p>Whether a failure here stops the batch is
-     * {@code fail_batch_on_audit_error}, default true: under ABC the audit is
-     * a control, and committing without one produces data no balance can
-     * account for. Rolling back leaves the messages on the queue, so nothing
-     * is lost — ingestion stalls until the audit path recovers.
-     */
-    private void emitAuditRecord(List<Message> messages, BatchWriter.BatchWriteResult writeResult,
-                                 int backoutCount, int mqConsumedCount) throws Exception {
-        try {
-            auditRecordEmitter.emit(config.getId(), writeResult, messages, backoutCount,
-                    mqConsumedCount);
-        } catch (Exception e) {
-            metrics.recordAuditFailure();
-            if (config.getAudit().isFailBatchOnError()) {
-                log.error("Audit record could not be written for binding '{}' — rolling back so "
-                                + "no unaudited data is committed: {}",
-                        config.getId(), e.getMessage(), e);
-                throw e;
-            }
-            log.warn("Failed to emit audit record for binding '{}' — batch still commits, "
-                            + "this landing is unaudited: {}",
-                    config.getId(), e.getMessage());
-        }
-    }
-
-    /** Audit for a unit of work that landed nothing because every message was poison. */
-    private void emitBackoutOnlyAudit(List<Message> batch, int backoutCount, int mqConsumedCount)
-            throws Exception {
-        if (backoutCount == 0) {
-            return;
-        }
-
-        try {
-            auditRecordEmitter.emitBackoutOnly(config.getId(), batch, backoutCount,
-                    mqConsumedCount);
-        } catch (Exception e) {
-            metrics.recordAuditFailure();
-            if (config.getAudit().isFailBatchOnError()) {
-                log.error("Backout-only audit record could not be written for binding '{}' — "
-                        + "rolling back: {}", config.getId(), e.getMessage(), e);
-                throw e;
-            }
-            log.warn("Failed to emit backout-only audit record for binding '{}': {}",
-                    config.getId(), e.getMessage());
-        }
-    }
-
-    /**
-     * Sends one tracker message per source message.
-     *
-     * <p><strong>Two failure kinds, handled differently, because they have
-     * different blast radii.</strong>
-     *
-     * <p><em>Infrastructure ({@code JMSException}) fails the batch.</em> The
-     * provider refusing a put — tracker queue full, message too big for it,
-     * producer broken — is not about this message; it will refuse the next one
-     * too. Rolling back stalls the feed and pages, which is right: the
-     * alternative is landing every message with its acknowledgement silently
-     * dropped, for as long as the condition lasts. It also classifies as
-     * MQ_INFRASTRUCTURE, which does NOT permit backout routing, so a stall
-     * cannot divert healthy messages to the BOQ.
-     *
-     * <p><em>Content ({@code RuntimeException}) is skipped and counted.</em> A
-     * malformed header that breaks the rewrite — {@code HeaderRewriter} runs
-     * {@code replaceAll}, so tag content with regex metacharacters can throw —
-     * affects exactly one message. Failing the batch for it would be actively
-     * worse: such a failure classifies as UNKNOWN, which never triggers
-     * degraded mode, so there is no bisection to isolate the culprit; the
-     * batch would roll back at full size until delivery count pushed the
-     * WHOLE batch past BOTHRESH and onto the backout queue. One bad header
-     * would cost a thousand healthy messages a manual replay. Skipping loses
-     * that one tracker notification instead, which is what the legacy MDB
-     * does.
-     *
-     * <p>{@code fail_batch_on_tracker_error} escalates the content case to
-     * match the infrastructure one. It no longer means "never fail the batch"
-     * when false — infrastructure failures always do.
-     *
-     * <p>Unlike the MDB, every outcome is counted: sent, suppressed, and
-     * failed. Matching its delivery behaviour is deliberate, inheriting its
-     * blindness is not.
-     */
-    private void sendTrackerMessages(List<Message> batch) throws JMSException {
-        for (Message sourceMessage : batch) {
-            try {
-                Optional<Message> trackerMessage =
-                        trackerMessageBuilder.build(listenerSession.session(), sourceMessage);
-
-                if (trackerMessage.isPresent()) {
-                    listenerSession.trackerProducer().send(trackerMessage.get());
-                    metrics.recordTrackerSent();
-                } else {
-                    recordTrackerSuppressed();
-                }
-            } catch (JMSException e) {
-                metrics.recordTrackerFailure();
-                log.error("Tracker put failed for binding '{}' — rolling back rather than "
-                                + "landing messages whose acknowledgement was dropped. Check the "
-                                + "tracker queue '{}' for depth, MAXDEPTH and MAXMSGL: {}",
-                        config.getId(), config.getTracker().getQueue(), e.getMessage(), e);
-                throw e;
-            } catch (RuntimeException e) {
-                if (config.getTracker().isFailBatchOnError()) {
-                    throw e;
-                }
-                metrics.recordTrackerFailure();
-                log.warn("Tracker message could not be built for binding '{}' — this one "
-                                + "message still commits and its tracker notification is lost: {}",
-                        config.getId(), e.getMessage());
-            }
-        }
-    }
-
-    /**
-     * A source message the builder declined to track.
-     *
-     * <p>Legitimate per message (RMS suppresses anything without
-     * MessageHeaderDetails, which is what keeps claims-shaped messages off the
-     * tracker queue) and a serious condition in bulk: if upstream stops
-     * setting that property, every message lands and none is acknowledged.
-     * Logged first-and-every-thousandth so a systemic regression is visible
-     * without a malformed flood becoming its own log problem; the counter
-     * behind it is the thing to alert on.
-     */
-    private void recordTrackerSuppressed() {
-        metrics.recordTrackerSuppressed();
-        long suppressed = suppressedTrackers.incrementAndGet();
-        if (suppressed == 1 || suppressed % 1000 == 0) {
-            log.warn("Binding '{}': {} message(s) landed with NO tracker notification — the "
-                            + "builder found no MessageHeaderDetails to rewrite. Isolated cases "
-                            + "are expected; a climbing count means data is landing "
-                            + "unacknowledged.",
-                    config.getId(), suppressed);
-        }
-    }
-
-    private void rollbackQuietly() {
-        try {
-            if (listenerSession.isOpen()) {
-                listenerSession.session().rollback();
-                rollbackCount.incrementAndGet();
-            }
-        } catch (JMSException e) {
-            log.warn("Failed to rollback session for binding '{}': {}",
-                    config.getId(), e.getMessage());
-        }
-    }
 
     public void stop() {
         log.info("Stopping receive loop for binding '{}'", config.getId());
@@ -882,15 +434,15 @@ public class TransactedReceiveLoop implements Runnable {
     }
 
     public long getCommitCount() {
-        return commitCount.get();
+        return processor.getCommitCount();
     }
 
     public long getRollbackCount() {
-        return rollbackCount.get();
+        return processor.getRollbackCount();
     }
 
     public long getMessageCount() {
-        return messageCount.get();
+        return processor.getMessageCount();
     }
 
     public String getBindingId() {

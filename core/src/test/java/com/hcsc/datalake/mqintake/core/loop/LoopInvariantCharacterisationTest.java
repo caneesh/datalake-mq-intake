@@ -59,6 +59,7 @@ class LoopInvariantCharacterisationTest {
 
     private static final String SOURCE_QUEUE = "CHAR.SOURCE";
     private static final String BACKOUT_QUEUE = "CHAR.BACKOUT";
+    private static final String TRACKER_QUEUE = "CHAR.TRACKER";
     private static final long RECEIVE_TIMEOUT_MS = 100;
 
     private Connection connection;
@@ -216,7 +217,54 @@ class LoopInvariantCharacterisationTest {
     }
 
     // ---------------------------------------------------------------------
-    // 4. A flush leaves no accumulator state behind.
+    // 4. The balance check runs BEFORE anything leaves the unit of work.
+    // ---------------------------------------------------------------------
+
+    @Test
+    void anUnbalancedBatchSendsNoTrackerMessageAndWritesNoAudit() throws Exception {
+        // Every message consumed must be observed either written or diverted.
+        // When that does not hold the batch must roll back having done nothing
+        // externally visible — so the check has to run before the tracker send
+        // and before the audit, not after them.
+        //
+        // Ordering it later would put acknowledgements on the tracker queue and
+        // an audit record on storage for a batch that then rolls back: the
+        // tracker consumer would see an acknowledgement for data that was never
+        // committed, and the audit would account for a file the balance says is
+        // wrong. Neither can be withdrawn.
+        RecordingAuditEmitter audit = new RecordingAuditEmitter();
+        BindingConfig config = config(2, false);
+        config.setMode(BindingMode.TRACKED);
+        config.getTracker().setQueue(TRACKER_QUEUE);
+        config.getAudit().setBalanceCheckEnabled(true);
+
+        send(2);
+
+        TransactedReceiveLoop loop = new TransactedReceiveLoop(
+                config, connection, new UnderReportingWriter(),
+                (session, source) -> java.util.Optional.of(
+                        session.createTextMessage("ack")),
+                null, null, null, audit, null, "characterisation", RECEIVE_TIMEOUT_MS);
+        Future<?> future = executor.submit(loop);
+
+        long deadline = System.currentTimeMillis() + 5000;
+        while (loop.getRollbackCount() < 1 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(25);
+        }
+        loop.stop();
+        future.get(5, TimeUnit.SECONDS);
+
+        assertThat(loop.getRollbackCount())
+                .as("an unbalanced batch must never commit").isGreaterThanOrEqualTo(1);
+        assertThat(loop.getCommitCount()).isZero();
+        assertThat(countOnQueue(TRACKER_QUEUE))
+                .as("no acknowledgement for a batch that did not commit").isZero();
+        assertThat(audit.emitted)
+                .as("no audit record for a batch the balance check refused").isZero();
+    }
+
+    // ---------------------------------------------------------------------
+    // 5. A flush leaves no accumulator state behind.
     // ---------------------------------------------------------------------
 
     @Test
@@ -330,6 +378,37 @@ class LoopInvariantCharacterisationTest {
                 return;
             }
             Thread.sleep(25);
+        }
+    }
+
+    /** Reports one fewer record than it was given, breaking the balance. */
+    private static class UnderReportingWriter implements BatchWriter {
+        @Override
+        public BatchWriteResult write(String bindingId, List<Message> messages) {
+            return new BatchWriteResult(
+                    "/tmp/characterisation/f.seq", messages.size() - 1, 100L);
+        }
+    }
+
+    /** Counts audit records so their absence can be asserted. */
+    private static class RecordingAuditEmitter
+            implements com.hcsc.datalake.mqintake.core.audit.AuditRecordEmitter {
+        volatile int emitted = 0;
+
+        @Override
+        public void emit(com.hcsc.datalake.mqintake.core.audit.AuditRecord record) {
+            emitted++;
+        }
+
+        @Override
+        public void emit(String bindingId, BatchWriter.BatchWriteResult writeResult,
+                         List<Message> messages) {
+            emitted++;
+        }
+
+        @Override
+        public void emitBackoutOnly(String bindingId, List<Message> messages, int backoutCount) {
+            emitted++;
         }
     }
 

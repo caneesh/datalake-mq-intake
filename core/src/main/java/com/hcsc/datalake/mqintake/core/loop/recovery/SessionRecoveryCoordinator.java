@@ -7,7 +7,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.jms.JMSException;
-import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
@@ -57,13 +56,13 @@ public class SessionRecoveryCoordinator {
                                       BindingHealthManager healthManager,
                                       BindingMetrics metrics,
                                       BooleanSupplier running) {
-        this.bindingId = Objects.requireNonNull(bindingId, "bindingId required");
-        this.listenerSession = Objects.requireNonNull(listenerSession, "listenerSession required");
-        this.faultPolicy = Objects.requireNonNull(faultPolicy, "faultPolicy required");
-        this.backoffPolicy = Objects.requireNonNull(backoffPolicy, "backoffPolicy required");
+        this.bindingId = bindingId;
+        this.listenerSession = listenerSession;
+        this.faultPolicy = faultPolicy;
+        this.backoffPolicy = backoffPolicy;
         this.healthManager = healthManager;   // may be absent
-        this.metrics = Objects.requireNonNull(metrics, "metrics required");
-        this.running = Objects.requireNonNull(running, "running required");
+        this.metrics = metrics;
+        this.running = running;
     }
 
     /**
