@@ -79,6 +79,18 @@ public class BindingMetrics {
      */
     private volatile java.util.function.LongSupplier identityMissSupplier = () -> 0L;
 
+    /**
+     * Supplies how long it has been since a reconciliation pass last completed
+     * for this binding, wired by the scheduler when it starts.
+     *
+     * <p>A supplier for the same reason as the one above: the scheduler owns
+     * the timestamp. Defaults to -1, meaning reconciliation is not running —
+     * which is a different statement from "it ran a long time ago" and must
+     * not read as one, or a deployment with reconciliation disabled would page
+     * someone every night.
+     */
+    private volatile java.util.function.LongSupplier reconciliationAgeSupplier = () -> -1L;
+
     public BindingMetrics(String bindingId) {
         this.bindingId = Objects.requireNonNull(bindingId, "bindingId required");
     }
@@ -182,6 +194,23 @@ public class BindingMetrics {
     /** Payloads whose identity could not be extracted (0 when not wired). */
     public long getIdentityMisses() {
         return identityMissSupplier.getAsLong();
+    }
+
+    public void setReconciliationAgeSupplier(java.util.function.LongSupplier supplier) {
+        this.reconciliationAgeSupplier = java.util.Objects.requireNonNull(supplier);
+    }
+
+    /**
+     * Milliseconds since a reconciliation pass last completed for this
+     * binding, or -1 when reconciliation is not running.
+     *
+     * <p>Climbing past a few intervals is the only signal that reconciliation
+     * has stopped: every worker blocked on HDFS produces no log line at all,
+     * because the "still running — skipping" warning only fires for a task
+     * that actually gets a thread.
+     */
+    public long getReconciliationAgeMs() {
+        return reconciliationAgeSupplier.getAsLong();
     }
 
     public void recordBalanceCheckFailure() {

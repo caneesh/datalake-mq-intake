@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
@@ -337,7 +338,252 @@ class ReconciliationSchedulerTest {
         assertThat(scheduler.isScheduled()).isFalse();
     }
 
+    @Test
+    void aBindingWhoseWorkersAreAllBlockedIsReportedStalledInsteadOfGoingSilent() throws Exception {
+        // The gap: the "still running — skipping this run" warning fires
+        // inside runBindingQuietly, so it only fires for a task that got a
+        // worker thread. Block every worker — the correlated case, since all
+        // bindings read the same HDFS cluster — and later passes queue behind
+        // them, logging nothing. The only reconciliation metric was a
+        // discrepancy counter, which stays flat precisely because no
+        // comparison is being made.
+        IntakeProperties properties = properties(true);
+        properties.getReconciliation().setLookbackWindows(1);
+        MutableClock clock = new MutableClock(NOW);
+
+        CountDownLatch bothInside = new CountDownLatch(2);
+        CountDownLatch neverReleased = new CountDownLatch(1);
+        PartitionReconciler wedged = (bindingId, basePath, instant, identityApproved,
+                                      quarantine, metrics) -> {
+            bothInside.countDown();
+            try {
+                neverReleased.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return PartitionReconciliationService.ReconciliationReport
+                    .notReady(bindingId, "partition", "stub");
+        };
+
+        ReconciliationScheduler scheduler =
+                new ReconciliationScheduler(wedged, properties, id -> null, clock);
+        try {
+            scheduler.start();
+            assertThat(bothInside.await(5, TimeUnit.SECONDS))
+                    .as("every worker is blocked, so the pool is saturated").isTrue();
+
+            assertThat(scheduler.isStalled("rms"))
+                    .as("not yet: one slow pass is ordinary").isFalse();
+
+            // Past the point where two whole passes should have completed.
+            clock.advance(Duration.ofMillis(
+                    properties.getReconciliation().getIntervalMs()
+                            * ReconciliationScheduler.STALE_PASSES_BEFORE_REPORTING + 1));
+
+            assertThat(scheduler.isStalled("rms"))
+                    .as("reconciliation has stopped and must say so").isTrue();
+            assertThat(scheduler.ageOfLastCompletedPassMs("rms"))
+                    .as("and the age is publishable, not just loggable")
+                    .isGreaterThan(properties.getReconciliation().getIntervalMs());
+        } finally {
+            neverReleased.countDown();
+            scheduler.close();
+        }
+    }
+
+    @Test
+    void theAgeIsWiredThroughToTheBindingGauge() {
+        // The Kerberos-gauge lesson: a supplier nothing wires publishes a
+        // healthy constant forever. This asserts the wiring, not the value.
+        IntakeProperties properties = properties(true);
+        // Long enough that the background schedule never fires during the
+        // test: at the 50ms default a pass completes mid-assertion and
+        // refreshes the very timestamp being read.
+        properties.getReconciliation().setIntervalMs(60_000);
+        MutableClock clock = new MutableClock(NOW);
+        BindingMetrics rmsMetrics = new BindingMetrics("rms");
+
+        assertThat(rmsMetrics.getReconciliationAgeMs())
+                .as("before start, reconciliation is not running — not 'ran long ago'")
+                .isEqualTo(-1);
+
+        ReconciliationScheduler scheduler = new ReconciliationScheduler(
+                new RecordingService(), properties,
+                id -> "rms".equals(id) ? rmsMetrics : null, clock);
+        try {
+            scheduler.start();
+            clock.advance(Duration.ofSeconds(30));
+
+            assertThat(rmsMetrics.getReconciliationAgeMs())
+                    .as("the gauge reads the scheduler's own timestamp")
+                    .isEqualTo(30_000L);
+        } finally {
+            scheduler.close();
+        }
+    }
+
+    @Test
+    void aCompletedPassClearsTheStall() {
+        IntakeProperties properties = properties(true);
+        properties.getReconciliation().setIntervalMs(60_000);
+        MutableClock clock = new MutableClock(NOW);
+        ReconciliationScheduler scheduler =
+                new ReconciliationScheduler(new RecordingService(), properties, id -> null, clock);
+        try {
+            scheduler.start();
+            clock.advance(Duration.ofMinutes(10));
+            assertThat(scheduler.isStalled("rms")).isTrue();
+
+            scheduler.runBindingQuietly(properties.getBindings().get(0));
+
+            assertThat(scheduler.isStalled("rms"))
+                    .as("a pass that completed is the recovery signal").isFalse();
+        } finally {
+            scheduler.close();
+        }
+    }
+
+    @Test
+    void reconciliationBeingDisabledIsNeverReportedAsStalled() {
+        // Switched off and stuck are different conditions. Reporting them
+        // alike would page someone nightly on every deployment that has
+        // reconciliation off, and the signal would be turned off in a week.
+        IntakeProperties properties = properties(false);
+        MutableClock clock = new MutableClock(NOW);
+        ReconciliationScheduler scheduler =
+                new ReconciliationScheduler(new RecordingService(), properties, id -> null, clock);
+        try {
+            scheduler.start();
+            clock.advance(Duration.ofDays(1));
+
+            assertThat(scheduler.isStalled("rms")).isFalse();
+            assertThat(scheduler.ageOfLastCompletedPassMs("rms")).isEqualTo(-1);
+        } finally {
+            scheduler.close();
+        }
+    }
+
+    @Test
+    void aSchedulerThatHasBeenStoppedIsNotReportedAsStalled() {
+        // The case the disabled test above does NOT cover, as a probe showed:
+        // when reconciliation is switched off the timestamps are never seeded,
+        // so the age is -1 and the answer is false whatever the guard does.
+        // After a clean close the timestamps DO exist and keep ageing, and
+        // shutting down must not read as stalling — the process can still be
+        // scraped on its way out.
+        IntakeProperties properties = properties(true);
+        properties.getReconciliation().setIntervalMs(60_000);
+        MutableClock clock = new MutableClock(NOW);
+        ReconciliationScheduler scheduler =
+                new ReconciliationScheduler(new RecordingService(), properties, id -> null, clock);
+
+        scheduler.start();
+        scheduler.close();
+        clock.advance(Duration.ofHours(1));
+
+        assertThat(scheduler.ageOfLastCompletedPassMs("rms"))
+                .as("the timestamp is still there and still ageing").isEqualTo(3_600_000L);
+        assertThat(scheduler.isStalled("rms"))
+                .as("but a stopped scheduler is stopped, not stalled").isFalse();
+    }
+
+    @Test
+    void theStallIsReportedOncePerIncidentAndClearedWhenPassesResume() throws Exception {
+        // What is pinned here is that the scheduler thread NOTICED. The report
+        // is a log line, so a probe deleting the check from the pass changed no
+        // test result until this existed. The scheduler thread is the right
+        // place for it: submission never blocks, so it keeps running when every
+        // worker is stuck.
+        IntakeProperties properties = properties(true);
+        properties.getReconciliation().setIntervalMs(60_000);
+        properties.getReconciliation().setLookbackWindows(1);
+        MutableClock clock = new MutableClock(NOW);
+
+        CountDownLatch release = new CountDownLatch(1);
+        PartitionReconciler wedged = (bindingId, basePath, instant, identityApproved,
+                                      quarantine, metrics) -> {
+            try {
+                release.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return PartitionReconciliationService.ReconciliationReport
+                    .notReady(bindingId, "partition", "stub");
+        };
+
+        ReconciliationScheduler scheduler =
+                new ReconciliationScheduler(wedged, properties, id -> null, clock);
+        try {
+            scheduler.start();
+            clock.advance(Duration.ofMinutes(10));
+
+            assertThat(scheduler.hasReportedStall("rms"))
+                    .as("stalled, but nothing has looked yet").isFalse();
+
+            scheduler.runAllBindingsQuietly();
+            assertThat(scheduler.hasReportedStall("rms"))
+                    .as("the pass must report it").isTrue();
+
+            // Nothing can have completed in between: every worker is inside
+            // the latch, so this second pass sees the same stall.
+            scheduler.runAllBindingsQuietly();
+            assertThat(scheduler.hasReportedStall("rms"))
+                    .as("still stalled, still reported — once, not once per interval").isTrue();
+
+            release.countDown();
+            assertThat(awaitCompletedPass(scheduler, "rms"))
+                    .as("the blocked passes finish once released").isTrue();
+
+            scheduler.runAllBindingsQuietly();
+            assertThat(scheduler.hasReportedStall("rms"))
+                    .as("recovery is reported too, or the incident never closes").isFalse();
+        } finally {
+            release.countDown();
+            scheduler.close();
+        }
+    }
+
     // --- harness ---
+    /** Waits for a pass to finish, which the mutable clock shows as an age of zero. */
+    private boolean awaitCompletedPass(ReconciliationScheduler scheduler, String bindingId)
+            throws InterruptedException {
+        for (int i = 0; i < 100; i++) {
+            if (scheduler.ageOfLastCompletedPassMs(bindingId) == 0) {
+                return true;
+            }
+            Thread.sleep(50);
+        }
+        return false;
+    }
+
+    /** A clock the test moves, so staleness needs no sleeping. */
+    private static class MutableClock extends Clock {
+        private volatile Instant instant;
+
+        MutableClock(Instant start) {
+            this.instant = start;
+        }
+
+        void advance(Duration by) {
+            instant = instant.plus(by);
+        }
+
+        @Override
+        public Instant instant() {
+            return instant;
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(java.time.ZoneId zone) {
+            return this;
+        }
+    }
+
 
     private ReconciliationScheduler scheduler(PartitionReconciler service,
                                               IntakeProperties properties) {

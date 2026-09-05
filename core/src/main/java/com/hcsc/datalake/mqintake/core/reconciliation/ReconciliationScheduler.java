@@ -20,6 +20,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
 /**
@@ -79,6 +80,36 @@ public class ReconciliationScheduler implements AutoCloseable {
     private final PendingPartitions pendingPartitions;
 
     static final int MAX_BINDING_WORKERS = 8;
+
+    /**
+     * Passes that must produce nothing before a binding is reported stalled.
+     *
+     * <p>One interval late is ordinary — a pass slower than the interval,
+     * which the in-progress flag already reports when the next task runs.
+     * Three means two whole passes came back with nothing, which no benign
+     * cause explains.
+     */
+    static final int STALE_PASSES_BEFORE_REPORTING = 3;
+
+    /**
+     * When each binding's last pass finished, in epoch millis. Populated by
+     * {@link #start()}, so a binding with no entry is one nothing is
+     * scheduling rather than one that is late.
+     *
+     * <p>This exists because a stalled reconciliation was completely silent.
+     * The "still running — skipping this run" warning fires inside
+     * {@link #runBindingQuietly}, which means it only fires for a task that
+     * got a worker thread. Once every worker is blocked on HDFS — the
+     * correlated case, since all bindings read the same cluster — later passes
+     * queue behind them and log nothing at all, and the only reconciliation
+     * metric was a discrepancy counter that stays flat because no comparison
+     * is being made. Reconciliation could stop for the life of the process
+     * with the sole symptom being the absence of a periodic INFO line.
+     */
+    private final Map<String, AtomicLong> lastPassCompletedMs = new ConcurrentHashMap<>();
+
+    /** Whether a binding's stall has been reported, so it is reported once. */
+    private final Map<String, AtomicBoolean> reportedStalled = new ConcurrentHashMap<>();
 
     public ReconciliationScheduler(PartitionReconciler reconciliationService,
                                    IntakeProperties properties,
@@ -140,6 +171,20 @@ public class ReconciliationScheduler implements AutoCloseable {
         scheduler.scheduleWithFixedDelay(this::runAllBindingsQuietly,
                 config.getIntervalMs(), config.getIntervalMs(), TimeUnit.MILLISECONDS);
 
+        // Seeded now rather than at zero: the first run is one interval out,
+        // and a binding must not read as stalled before it has had a chance to
+        // run once.
+        long startedAt = clock.millis();
+        for (BindingConfig binding : properties.getBindings()) {
+            lastPassCompletedMs.put(binding.getId(), new AtomicLong(startedAt));
+            reportedStalled.put(binding.getId(), new AtomicBoolean(false));
+            BindingMetrics metrics = metricsLookup.apply(binding.getId());
+            if (metrics != null) {
+                String bindingId = binding.getId();
+                metrics.setReconciliationAgeSupplier(() -> ageOfLastCompletedPassMs(bindingId));
+            }
+        }
+
         log.info("Reconciliation scheduled every {}ms, grace {}ms, {} windows per run",
                 config.getIntervalMs(), config.getGracePeriodMs(), config.getLookbackWindows());
     }
@@ -164,10 +209,14 @@ public class ReconciliationScheduler implements AutoCloseable {
      * that throws out of scheduleWithFixedDelay is cancelled silently, which
      * would stop reconciliation for the life of the process without saying so.
      */
-    private void runAllBindingsQuietly() {
+    void runAllBindingsQuietly() {
         try {
             ExecutorService workers = bindingWorkers;
             for (BindingConfig binding : properties.getBindings()) {
+                // Before submitting, not after: this thread always runs
+                // promptly — submission never blocks — so it is the one place
+                // guaranteed to notice that nothing is coming back.
+                reportStallTransition(binding.getId());
                 if (workers == null) {
                     // No pool: start() was never called, which is the shape
                     // tests use when driving a single pass directly.
@@ -222,7 +271,83 @@ public class ReconciliationScheduler implements AutoCloseable {
                 metrics.recordReconciliationDiscrepancy();
             }
         } finally {
+            // A contained failure counts as a completed pass: it proves the
+            // machinery is alive, and it already logs and increments a
+            // counter. What this timestamp detects is nothing happening at
+            // all.
+            AtomicLong lastCompleted = lastPassCompletedMs.get(binding.getId());
+            if (lastCompleted != null) {
+                lastCompleted.set(clock.millis());
+            }
             inProgress.set(false);
+        }
+    }
+
+    /**
+     * Milliseconds since this binding's last completed pass, or -1 when
+     * nothing is scheduling it.
+     *
+     * <p>Computed from the timestamp rather than reported by the scheduler
+     * thread, so it stays true even if that thread is the thing that died —
+     * which is the other way this can go quiet.
+     */
+    public long ageOfLastCompletedPassMs(String bindingId) {
+        AtomicLong lastCompleted = lastPassCompletedMs.get(bindingId);
+        if (lastCompleted == null) {
+            return -1;
+        }
+        return Math.max(0, clock.millis() - lastCompleted.get());
+    }
+
+    /**
+     * True when this binding has produced no completed pass for
+     * {@link #STALE_PASSES_BEFORE_REPORTING} intervals.
+     *
+     * <p>False whenever the schedule is not running: reconciliation being
+     * switched off is not the same condition as reconciliation being stuck,
+     * and reporting them alike would make the signal useless.
+     */
+    public boolean isStalled(String bindingId) {
+        if (!isScheduled()) {
+            return false;
+        }
+        long age = ageOfLastCompletedPassMs(bindingId);
+        return age >= 0 && age > staleAfterMs();
+    }
+
+    private long staleAfterMs() {
+        return (long) STALE_PASSES_BEFORE_REPORTING
+                * properties.getReconciliation().getIntervalMs();
+    }
+
+    /**
+     * Whether this binding's stall has been reported and not yet cleared.
+     *
+     * <p>The report itself is a log line, which nothing can assert on without
+     * a log-capturing appender this project does not otherwise use. This makes
+     * the transition observable instead: without it, deleting the check from
+     * the pass changed no test result.
+     */
+    boolean hasReportedStall(String bindingId) {
+        AtomicBoolean reported = reportedStalled.get(bindingId);
+        return reported != null && reported.get();
+    }
+
+    /** Reports a binding falling behind, and later catching up, once each. */
+    private void reportStallTransition(String bindingId) {
+        AtomicBoolean reported =
+                reportedStalled.computeIfAbsent(bindingId, id -> new AtomicBoolean(false));
+        if (isStalled(bindingId)) {
+            if (reported.compareAndSet(false, true)) {
+                log.error("Binding '{}': no reconciliation pass has completed in {}ms — landed "
+                                + "data is no longer being checked against the audit trail. "
+                                + "Ingestion is unaffected. The usual cause is every worker "
+                                + "blocked on HDFS, which queues later passes behind them "
+                                + "silently.",
+                        bindingId, ageOfLastCompletedPassMs(bindingId));
+            }
+        } else if (reported.compareAndSet(true, false)) {
+            log.info("Binding '{}': reconciliation is completing passes again", bindingId);
         }
     }
 

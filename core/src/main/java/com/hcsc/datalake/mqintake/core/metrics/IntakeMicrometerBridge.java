@@ -150,6 +150,15 @@ public class IntakeMicrometerBridge {
         gauge(metrics, tags, "flush_latency_seconds",
                 m -> m.getLastFlushLatency().toNanos() / 1_000_000_000.0,
                 "Duration of the most recent HDFS flush");
+        gauge(metrics, tags, "reconciliation_age_seconds",
+                m -> {
+                    long ms = m.getReconciliationAgeMs();
+                    return ms < 0 ? -1 : ms / 1000.0;
+                },
+                "Seconds since a reconciliation pass last completed for this binding, or -1 "
+                        + "when reconciliation is not running. Climbing past a few intervals "
+                        + "means landed data has stopped being checked against the audit trail "
+                        + "— alert on it, because that failure produces no log line of its own");
         gauge(metrics, tags, "flush_latency_seconds_avg",
                 m -> m.getAverageFlushLatency().toNanos() / 1_000_000_000.0,
                 "Mean HDFS flush duration since startup");
