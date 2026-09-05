@@ -2,16 +2,11 @@ package com.hcsc.datalake.mqintake.core.reconciliation;
 
 import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.IntakeProperties;
-import com.hcsc.datalake.mqintake.core.hdfs.PartitionPath;
 import com.hcsc.datalake.mqintake.core.metrics.BindingMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -20,7 +15,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
 /**
@@ -46,9 +40,9 @@ import java.util.function.Function;
  *       itself, doubling HDFS load exactly when it is already slow.</li>
  * </ul>
  *
- * <p>Each run examines the last {@code lookbackWindows} closed partitions
- * rather than only the most recent one, so a skipped run — overlap, restart,
- * a transient HDFS problem — does not leave a window permanently unchecked.
+ * <p>WHEN passes happen is all this class decides. What a pass does — which
+ * windows to examine, what to carry forward, how to report what it found —
+ * belongs to {@link BindingReconciliationRunner}, one per binding.
  */
 public class ReconciliationScheduler implements AutoCloseable {
 
@@ -59,8 +53,13 @@ public class ReconciliationScheduler implements AutoCloseable {
     private final Function<String, BindingMetrics> metricsLookup;
     private final Clock clock;
 
-    /** One flag per binding: held while that binding's run is in progress. */
-    private final Map<String, AtomicBoolean> running = new ConcurrentHashMap<>();
+    /**
+     * One runner per binding, holding everything that is per-binding: the
+     * in-progress flag, the windows, the pending backlog and the last
+     * completed pass. Created on demand so a pass driven directly needs no
+     * schedule.
+     */
+    private final Map<String, BindingReconciliationRunner> runners = new ConcurrentHashMap<>();
 
     private volatile ScheduledExecutorService scheduler;
 
@@ -92,11 +91,11 @@ public class ReconciliationScheduler implements AutoCloseable {
     static final int STALE_PASSES_BEFORE_REPORTING = 3;
 
     /**
-     * When each binding's last pass finished, in epoch millis. Populated by
-     * {@link #start()}, so a binding with no entry is one nothing is
-     * scheduling rather than one that is late.
+     * Stall reporting, which is a scheduling concern: the runner knows it is
+     * late, this decides that being late is worth saying out loud, and only
+     * says it once.
      *
-     * <p>This exists because a stalled reconciliation was completely silent.
+     * <p>It exists because a stalled reconciliation was completely silent.
      * The "still running — skipping this run" warning fires inside
      * {@link #runBindingQuietly}, which means it only fires for a task that
      * got a worker thread. Once every worker is blocked on HDFS — the
@@ -106,8 +105,6 @@ public class ReconciliationScheduler implements AutoCloseable {
      * is being made. Reconciliation could stop for the life of the process
      * with the sole symptom being the absence of a periodic INFO line.
      */
-    private final Map<String, AtomicLong> lastPassCompletedMs = new ConcurrentHashMap<>();
-
     /** Whether a binding's stall has been reported, so it is reported once. */
     private final Map<String, AtomicBoolean> reportedStalled = new ConcurrentHashMap<>();
 
@@ -176,12 +173,12 @@ public class ReconciliationScheduler implements AutoCloseable {
         // run once.
         long startedAt = clock.millis();
         for (BindingConfig binding : properties.getBindings()) {
-            lastPassCompletedMs.put(binding.getId(), new AtomicLong(startedAt));
+            BindingReconciliationRunner runner = runnerFor(binding);
+            runner.seed(startedAt);
             reportedStalled.put(binding.getId(), new AtomicBoolean(false));
             BindingMetrics metrics = metricsLookup.apply(binding.getId());
             if (metrics != null) {
-                String bindingId = binding.getId();
-                metrics.setReconciliationAgeSupplier(() -> ageOfLastCompletedPassMs(bindingId));
+                metrics.setReconciliationAgeSupplier(runner::ageOfLastCompletedPassMs);
             }
         }
 
@@ -241,46 +238,15 @@ public class ReconciliationScheduler implements AutoCloseable {
         }
     }
 
-    /**
-     * Reconciles one binding's recent windows.
-     *
-     * <p>Failures are contained here so one binding cannot affect another, and
-     * so nothing propagates towards ingestion.
-     */
+    /** Runs one binding's pass now, on the calling thread. */
     void runBindingQuietly(BindingConfig binding) {
-        AtomicBoolean inProgress =
-                running.computeIfAbsent(binding.getId(), id -> new AtomicBoolean(false));
+        runnerFor(binding).run();
+    }
 
-        if (!inProgress.compareAndSet(false, true)) {
-            log.warn("Reconciliation for binding '{}' is still running — skipping this run. "
-                    + "If this repeats, the interval is shorter than a pass takes.",
-                    binding.getId());
-            return;
-        }
-
-        try {
-            reconcileRecentWindows(binding);
-        } catch (Throwable t) {
-            // Deliberately swallowed. Reconciliation is a check on ingestion,
-            // not a participant in it: a failure here must never stop messages
-            // being consumed and landed.
-            log.error("Reconciliation failed for binding '{}' — ingestion is unaffected: {}",
-                    binding.getId(), t.getMessage(), t);
-            BindingMetrics metrics = metricsLookup.apply(binding.getId());
-            if (metrics != null) {
-                metrics.recordReconciliationDiscrepancy();
-            }
-        } finally {
-            // A contained failure counts as a completed pass: it proves the
-            // machinery is alive, and it already logs and increments a
-            // counter. What this timestamp detects is nothing happening at
-            // all.
-            AtomicLong lastCompleted = lastPassCompletedMs.get(binding.getId());
-            if (lastCompleted != null) {
-                lastCompleted.set(clock.millis());
-            }
-            inProgress.set(false);
-        }
+    private BindingReconciliationRunner runnerFor(BindingConfig binding) {
+        return runners.computeIfAbsent(binding.getId(), id ->
+                new BindingReconciliationRunner(binding, reconciliationService, properties,
+                        metricsLookup, pendingPartitions, clock));
     }
 
     /**
@@ -292,11 +258,8 @@ public class ReconciliationScheduler implements AutoCloseable {
      * which is the other way this can go quiet.
      */
     public long ageOfLastCompletedPassMs(String bindingId) {
-        AtomicLong lastCompleted = lastPassCompletedMs.get(bindingId);
-        if (lastCompleted == null) {
-            return -1;
-        }
-        return Math.max(0, clock.millis() - lastCompleted.get());
+        BindingReconciliationRunner runner = runners.get(bindingId);
+        return runner == null ? -1 : runner.ageOfLastCompletedPassMs();
     }
 
     /**
@@ -311,8 +274,8 @@ public class ReconciliationScheduler implements AutoCloseable {
         if (!isScheduled()) {
             return false;
         }
-        long age = ageOfLastCompletedPassMs(bindingId);
-        return age >= 0 && age > staleAfterMs();
+        BindingReconciliationRunner runner = runners.get(bindingId);
+        return runner != null && runner.isBehind(staleAfterMs());
     }
 
     private long staleAfterMs() {
@@ -349,112 +312,6 @@ public class ReconciliationScheduler implements AutoCloseable {
         } else if (reported.compareAndSet(true, false)) {
             log.info("Binding '{}': reconciliation is completing passes again", bindingId);
         }
-    }
-
-    private void reconcileRecentWindows(BindingConfig binding) {
-        IntakeProperties.ReconciliationProperties config = properties.getReconciliation();
-        BindingMetrics metrics = metricsLookup.apply(binding.getId());
-
-        // The recent windows PLUS anything an earlier pass could not resolve.
-        // A LinkedHashSet so a partition carried over that is also still
-        // recent is reconciled once, not twice.
-        java.util.Set<Instant> windows =
-                new java.util.LinkedHashSet<>(recentWindows(config.getLookbackWindows()));
-        if (pendingPartitions != null) {
-            windows.addAll(pendingPartitions.pending(binding.getId()));
-        }
-
-        for (Instant window : windows) {
-            PartitionReconciliationService.ReconciliationReport report =
-                    reconciliationService.reconcilePartition(
-                            binding.getId(),
-                            binding.getHdfs().getBasePath(),
-                            window,
-                            // Identity is only trustworthy where the sidecar
-                            // index is written; without it reconciliation
-                            // correctly refuses rather than guessing.
-                            binding.getHdfs().isRecordIndexEnabled(),
-                            config.isQuarantineDuplicates(),
-                            metrics);
-
-            trackPending(binding.getId(), window, report);
-            report(binding.getId(), report);
-        }
-    }
-
-    /**
-     * Carries a partition forward when it could not be resolved, and drops it
-     * once it was.
-     *
-     * <p>NOT_READY is excluded deliberately. It means the binding has no
-     * approved identity — a standing property of the binding, not something a
-     * later pass on this partition could change — so every window would enter
-     * the backlog and none would ever leave. SKIPPED_GRACE_PERIOD and ERROR
-     * are both genuinely worth another look.
-     */
-    private void trackPending(String bindingId, Instant window,
-                              PartitionReconciliationService.ReconciliationReport report) {
-        if (pendingPartitions == null) {
-            return;
-        }
-        boolean worthAnotherPass = report.isRetryLater()
-                && report.getStatus()
-                    != PartitionReconciliationService.ReconciliationStatus.NOT_READY;
-        if (worthAnotherPass) {
-            pendingPartitions.retain(bindingId, window);
-        } else {
-            pendingPartitions.resolved(bindingId, window);
-        }
-    }
-
-    /**
-     * The closed partition windows to examine, most recent first.
-     *
-     * <p>Starts one window back: the current window is still being written to.
-     */
-    List<Instant> recentWindows(int count) {
-        List<Instant> windows = new ArrayList<>();
-        Instant now = clock.instant();
-        for (int i = 1; i <= Math.max(1, count); i++) {
-            windows.add(now.minus(
-                    com.hcsc.datalake.mqintake.core.hdfs.PartitionPath.WINDOW.multipliedBy(i)));
-        }
-        return windows;
-    }
-
-    private void report(String bindingId,
-                        PartitionReconciliationService.ReconciliationReport report) {
-        switch (report.getStatus()) {
-            case SKIPPED_GRACE_PERIOD:
-                log.debug("Binding '{}': {} still inside grace period", bindingId,
-                        report.getPartitionPath());
-                return;
-            case NOT_READY:
-                log.debug("Binding '{}': reconciliation not ready for {} — {}", bindingId,
-                        report.getPartitionPath(), report.getMessage());
-                return;
-            case ERROR:
-                log.error("Binding '{}': reconciliation error for {} — {}", bindingId,
-                        report.getPartitionPath(), report.getMessage());
-                return;
-            default:
-                break;
-        }
-
-        if (report.getDiscrepancies().isEmpty()
-                && report.getActualRecordSum() == report.getAuditedRecordSum()) {
-            log.info("Binding '{}': {} balances — {} files, {} records, audit agrees",
-                    bindingId, report.getPartitionPath(), report.getFileCount(),
-                    report.getActualRecordSum());
-            return;
-        }
-
-        // The ABC control failing is the whole point of running it: say so
-        // loudly, with both sides of the balance, and leave the data alone.
-        log.error("Binding '{}': RECONCILIATION DISCREPANCY in {} — landed {} records across {} "
-                        + "files, audit accounts for {}. Discrepancies: {}",
-                bindingId, report.getPartitionPath(), report.getActualRecordSum(),
-                report.getFileCount(), report.getAuditedRecordSum(), report.getDiscrepancies());
     }
 
     /** True when the schedule is active. */

@@ -311,10 +311,7 @@ class ReconciliationSchedulerTest {
 
     @Test
     void lookbackWindowsStartOneWindowBackAndStepByAQuarterHour() {
-        ReconciliationScheduler scheduler =
-                scheduler(new RecordingService(), properties(true));
-
-        List<Instant> windows = scheduler.recentWindows(3);
+        List<Instant> windows = BindingReconciliationRunner.recentWindows(FIXED, 3);
 
         // The current window is still being written to, so it is not examined
         assertThat(windows).containsExactly(
@@ -541,6 +538,27 @@ class ReconciliationSchedulerTest {
             release.countDown();
             scheduler.close();
         }
+    }
+
+    @Test
+    void aPassDrivenWithNothingSchedulingItReportsNoAge() {
+        // Before the extraction this was impossible: the timestamp lived in a
+        // map that only start() populated, so a pass with no schedule behind it
+        // had nowhere to write. A runner has the field either way, so the
+        // unseeded state is now explicit — and a probe showed nothing was
+        // holding it. Without it the first direct pass publishes an age of
+        // roughly the epoch, and "nothing is scheduling this" reads as "it is
+        // catastrophically late".
+        IntakeProperties properties = properties(true);
+        MutableClock clock = new MutableClock(NOW);
+        ReconciliationScheduler scheduler =
+                new ReconciliationScheduler(new RecordingService(), properties, id -> null, clock);
+
+        scheduler.runBindingQuietly(properties.getBindings().get(0));
+
+        assertThat(scheduler.ageOfLastCompletedPassMs("rms"))
+                .as("a pass ran, but nothing is scheduling it").isEqualTo(-1);
+        assertThat(scheduler.isStalled("rms")).isFalse();
     }
 
     // --- harness ---
