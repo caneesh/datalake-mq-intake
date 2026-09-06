@@ -126,7 +126,15 @@ public class PendingPartitions {
         }
     }
 
-    /** How many partitions a binding is carrying; published for alerting. */
+    /**
+     * How many partitions a binding is carrying.
+     *
+     * <p>Published as {@code mq_intake_pending_partitions} at the end of each
+     * reconciliation pass — see
+     * {@code BindingReconciliationRunner.publishBacklogSize}. This said
+     * "published for alerting" while having no caller anywhere, which is a
+     * documented alert that nothing feeds.
+     */
     public int size(String bindingId) {
         TreeSet<Long> entries = entriesFor(bindingId);
         synchronized (entries) {

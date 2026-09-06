@@ -138,7 +138,33 @@ class BindingReconciliationRunner {
             if (lastPassCompletedMs.get() != UNSEEDED) {
                 lastPassCompletedMs.set(clock.millis());
             }
+            publishBacklogSize();
             inProgress.set(false);
+        }
+    }
+
+    /**
+     * Publishes how many partitions this binding is still carrying.
+     *
+     * <p>{@code PendingPartitions.size} documented itself as "published for
+     * alerting" and had no caller anywhere — the same shape as the Kerberos
+     * gauge that read 0.0 for the life of the process. Between one unresolved
+     * partition and the 512 that trigger the ERROR for dropping the oldest,
+     * there was no signal at all.
+     *
+     * <p>Published here, at the end of a pass, rather than read from a gauge
+     * on demand. The count only changes during a pass, so this is exactly as
+     * fresh — and a scrape that read it live would take the set's monitor and,
+     * on the first call, trigger the HDFS load behind it, putting cluster I/O
+     * on the metrics path.
+     */
+    private void publishBacklogSize() {
+        if (pendingPartitions == null) {
+            return;
+        }
+        BindingMetrics metrics = metricsLookup.apply(binding.getId());
+        if (metrics != null) {
+            metrics.setPendingPartitionCount(pendingPartitions.size(binding.getId()));
         }
     }
 

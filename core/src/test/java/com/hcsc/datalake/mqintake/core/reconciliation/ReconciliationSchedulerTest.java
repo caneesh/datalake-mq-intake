@@ -561,6 +561,48 @@ class ReconciliationSchedulerTest {
         assertThat(scheduler.isStalled("rms")).isFalse();
     }
 
+    @Test
+    void theBacklogSizeIsPublishedToTheBindingGauge() throws Exception {
+        // PendingPartitions.size() said "published for alerting" and had no
+        // caller anywhere — the Kerberos-gauge shape, where the documentation
+        // describes an alert that nothing feeds. Between one unresolved
+        // partition and the 512 that trigger the drop-the-oldest ERROR there
+        // was no signal at all.
+        IntakeProperties properties = properties(true);
+        properties.getReconciliation().setIntervalMs(60_000);
+        properties.getReconciliation().setLookbackWindows(2);
+        BindingMetrics rmsMetrics = new BindingMetrics("rms");
+
+        java.nio.file.Path auditDir = java.nio.file.Files.createTempDirectory("backlog-gauge");
+        org.apache.hadoop.conf.Configuration conf = new org.apache.hadoop.conf.Configuration();
+        conf.set("fs.defaultFS", "file:///");
+        org.apache.hadoop.fs.FileSystem fs = org.apache.hadoop.fs.FileSystem.get(conf);
+        PendingPartitions backlog = new PendingPartitions(fs, auditDir.toString());
+
+        // Every window comes back unresolved, so each one is carried forward.
+        PartitionReconciler retryable = (bindingId, basePath, instant, identityApproved,
+                                         quarantine, metrics) ->
+                PartitionReconciliationService.ReconciliationReport
+                        .error(bindingId, "partition", "cluster unreachable");
+
+        ReconciliationScheduler scheduler = new ReconciliationScheduler(
+                retryable, properties, id -> "rms".equals(id) ? rmsMetrics : null,
+                FIXED, backlog);
+        try {
+            assertThat(rmsMetrics.getPendingPartitionCount()).isZero();
+
+            scheduler.runBindingQuietly(properties.getBindings().get(0));
+
+            assertThat(rmsMetrics.getPendingPartitionCount())
+                    .as("the gauge must carry what the backlog is actually holding")
+                    .isEqualTo(backlog.size("rms"))
+                    .isEqualTo(2);
+        } finally {
+            scheduler.close();
+            fs.delete(new org.apache.hadoop.fs.Path(auditDir.toString()), true);
+        }
+    }
+
     // --- harness ---
     /** Waits for a pass to finish, which the mutable clock shows as an age of zero. */
     private boolean awaitCompletedPass(ReconciliationScheduler scheduler, String bindingId)

@@ -62,7 +62,14 @@ class IntakeMicrometerBridgeTest {
                 "mq_intake_batches_rolled_back_total",
                 "mq_intake_identity_misses_total",
                 "mq_intake_suspect_count",
-                "mq_intake_degraded");
+                "mq_intake_degraded",
+                // Both added with the reconciliation work and both alertable:
+                // an age that climbs means landed data has stopped being
+                // checked at all, and a backlog that climbs means partitions
+                // are not clearing. Neither was in this list, so deleting
+                // either registration from the bridge changed nothing.
+                "mq_intake_reconciliation_age_seconds",
+                "mq_intake_pending_partitions");
     }
 
     @Test

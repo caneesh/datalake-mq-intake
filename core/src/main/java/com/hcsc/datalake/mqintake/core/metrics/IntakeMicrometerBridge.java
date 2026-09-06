@@ -150,6 +150,10 @@ public class IntakeMicrometerBridge {
         gauge(metrics, tags, "flush_latency_seconds",
                 m -> m.getLastFlushLatency().toNanos() / 1_000_000_000.0,
                 "Duration of the most recent HDFS flush");
+        gauge(metrics, tags, "pending_partitions", BindingMetrics::getPendingPartitionCount,
+                "Partitions reconciliation could not resolve and is carrying forward. A "
+                        + "steady climb means they are not clearing; at 512 the oldest is "
+                        + "dropped and never re-examined, which is logged at ERROR");
         gauge(metrics, tags, "reconciliation_age_seconds",
                 m -> {
                     long ms = m.getReconciliationAgeMs();

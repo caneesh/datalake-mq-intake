@@ -72,6 +72,18 @@ public class BindingMetrics {
     private final AtomicLong suspectCount = new AtomicLong(0);
 
     /**
+     * Partitions this binding is carrying that reconciliation could not
+     * resolve.
+     *
+     * <p>Published at the end of each pass rather than read on demand: the
+     * count only changes during a pass — retain and resolved are called from
+     * nowhere else — so a value stamped when the pass ends is exactly as fresh
+     * as the underlying set, and a scrape never has to take the set's lock or
+     * trigger the HDFS load behind it.
+     */
+    private final AtomicLong pendingPartitionCount = new AtomicLong(0);
+
+    /**
      * Supplies the binding serializer's identity-miss count, wired by the
      * runtime factory when the serializer reports one. A supplier rather than
      * a counter of our own because the serializer already owns the count;
@@ -254,6 +266,15 @@ public class BindingMetrics {
      */
     public void setSuspectCount(long count) {
         suspectCount.set(count);
+    }
+
+    public void setPendingPartitionCount(long count) {
+        pendingPartitionCount.set(count);
+    }
+
+    /** Unresolved partitions carried forward; a climb means they are not clearing. */
+    public long getPendingPartitionCount() {
+        return pendingPartitionCount.get();
     }
 
     public long getSuspectCount() {
