@@ -134,54 +134,96 @@ public class PendingPartitions {
         }
     }
 
+    /**
+     * This binding's set, loaded from HDFS the first time it is asked for.
+     *
+     * <p>The load holds the SET's monitor, which every other operation here
+     * already takes. Two properties follow, and both matter:
+     *
+     * <p>No other thread can see a half-loaded set. Without this, a second
+     * caller found {@code loaded.add} already false and got the set mid-read —
+     * and if it then retained a window, {@link #persist} rewrote the whole
+     * file from that partial set, destroying the entries the load had not
+     * reached yet. Serialised per binding by the reconciliation runner's
+     * in-progress flag today, so it was latent, but that invariant lives in
+     * another class.
+     *
+     * <p>And the lock is per binding, so one binding's HDFS read never delays
+     * another's. Loading inside {@code computeIfAbsent} would close the first
+     * hole and open this one: the map synchronises on the bin, not the key, so
+     * two binding ids that share a bin would block each other for the length
+     * of a cluster read — against both ConcurrentHashMap's documented contract
+     * ("the computation should be short and simple") and the scheduler's, that
+     * one binding's slow reconciliation must not delay another's.
+     */
     private TreeSet<Long> entriesFor(String bindingId) {
         TreeSet<Long> entries = byBinding.computeIfAbsent(bindingId, id -> new TreeSet<>());
-        if (loaded.add(bindingId)) {
-            load(bindingId, entries);
+        synchronized (entries) {
+            if (loaded.add(bindingId)) {
+                loadInto(bindingId, entries);
+            }
         }
         return entries;
     }
 
-    private void load(String bindingId, TreeSet<Long> entries) {
+    /**
+     * Reads the backlog file into the set. Caller holds the set's monitor.
+     *
+     * <p>Every failure is logged and swallowed — see the class javadoc. A
+     * backlog that cannot be read costs coverage of some old windows, and
+     * failing reconciliation because its to-do list was unreadable would let a
+     * bookkeeping problem stop the check entirely.
+     */
+    private void loadInto(String bindingId, TreeSet<Long> entries) {
         Path path = new Path(AuditPaths.pendingFile(auditBasePath, bindingId));
         try {
             if (!fileSystem.exists(path)) {
                 return;
             }
-            int unreadableLines = 0;
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(fileSystem.open(path), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    String trimmed = line.trim();
-                    if (trimmed.isEmpty()) {
-                        continue;
-                    }
-                    try {
-                        synchronized (entries) {
-                            entries.add(Long.parseLong(trimmed));
-                        }
-                    } catch (NumberFormatException e) {
-                        // A crash mid-write can leave a torn last line. Keep
-                        // every window that parses rather than discarding the
-                        // whole backlog for one bad entry.
-                        unreadableLines++;
-                    }
-                }
-            }
-            if (unreadableLines > 0) {
-                log.warn("Binding '{}': {} unreadable line(s) in the pending-partition backlog "
-                        + "at {} — kept the {} that parsed", bindingId, unreadableLines, path,
-                        entries.size());
-            }
-            if (!entries.isEmpty()) {
-                log.info("Binding '{}': resuming {} pending partition(s) from a previous run",
-                        bindingId, entries.size());
-            }
+            int unreadableLines = readEntries(path, entries);
+            logLoadResult(bindingId, path, entries.size(), unreadableLines);
         } catch (IOException e) {
             log.warn("Binding '{}': could not read the pending-partition backlog at {} — "
                             + "continuing without it, so only the recent windows are checked "
                             + "until something is added: {}", bindingId, path, e.getMessage());
+        }
+    }
+
+    /**
+     * @return how many lines could not be parsed; the rest are in {@code entries}
+     */
+    private int readEntries(Path path, TreeSet<Long> entries) throws IOException {
+        int unreadableLines = 0;
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(fileSystem.open(path), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+                try {
+                    entries.add(Long.parseLong(trimmed));
+                } catch (NumberFormatException e) {
+                    // A crash mid-write can leave a torn last line. Keep every
+                    // window that parses rather than discarding the whole
+                    // backlog for one bad entry.
+                    unreadableLines++;
+                }
+            }
+        }
+        return unreadableLines;
+    }
+
+    private void logLoadResult(String bindingId, Path path, int loadedCount, int unreadableLines) {
+        if (unreadableLines > 0) {
+            log.warn("Binding '{}': {} unreadable line(s) in the pending-partition backlog "
+                            + "at {} — kept the {} that parsed",
+                    bindingId, unreadableLines, path, loadedCount);
+        }
+        if (loadedCount > 0) {
+            log.info("Binding '{}': resuming {} pending partition(s) from a previous run",
+                    bindingId, loadedCount);
         }
     }
 
