@@ -42,21 +42,56 @@ fi
 
 JAVA_OPTS="${JAVA_OPTS:--Xmx4g}"
 
+# Which java to run, in a fixed order that does not depend on shell state:
+#
+#   1. <base>/jre/bin/java   — a runtime shipped with the deployment
+#   2. $JAVA_HOME/bin/java   — an explicitly chosen runtime
+#   3. java from PATH        — whatever the login shell happens to resolve
+#
+# The order matters on a host that also runs something else. The intake runs as
+# its own process, so it does not have to share that application's JVM — and on
+# a WebSphere host, PATH usually resolves to a Java 8 the intake cannot use.
+# Relying on PATH there means every shell, cron entry and colleague has to
+# remember to prepend the right one; putting the runtime in the deployment
+# means the deployment carries its own answer.
+resolve_java() {
+    if [[ -x "${BASE_DIR}/jre/bin/java" ]]; then
+        JAVA_BIN="${BASE_DIR}/jre/bin/java"
+        JAVA_SOURCE="bundled ${BASE_DIR}/jre"
+    elif [[ -n "${JAVA_HOME:-}" ]]; then
+        # Named but wrong is a different problem from not named at all, and
+        # falling through to PATH here would hide it.
+        if [[ ! -x "${JAVA_HOME}/bin/java" ]]; then
+            echo "JAVA_HOME is set to ${JAVA_HOME} but ${JAVA_HOME}/bin/java is not executable." >&2
+            return 1
+        fi
+        JAVA_BIN="${JAVA_HOME}/bin/java"
+        JAVA_SOURCE="JAVA_HOME"
+    elif command -v java > /dev/null 2>&1; then
+        JAVA_BIN="$(command -v java)"
+        JAVA_SOURCE="PATH"
+    else
+        echo "No Java runtime found. This service needs Java 11 or newer." >&2
+        echo "Unpack one into ${BASE_DIR}/jre, or set JAVA_HOME in ${ENV_FILE}." >&2
+        return 1
+    fi
+}
+
 # The jar targets Java 11. An older JVM fails with UnsupportedClassVersionError
 # — a message that names a class-file version rather than the actual problem —
 # so say it plainly here instead. A newer JVM is fine and is not blocked.
 require_java() {
-    command -v java > /dev/null 2>&1 || {
-        echo "java is not on PATH. This service needs a Java 11 runtime." >&2
-        exit 1
-    }
+    resolve_java || exit 1
     local raw major
-    raw=$(java -version 2>&1 | head -1 | sed 's/.*version "\([^"]*\)".*/\1/')
+    raw=$("$JAVA_BIN" -version 2>&1 | head -1 | sed 's/.*version "\([^"]*\)".*/\1/')
     major=${raw%%.*}
     [[ "$major" == "1" ]] && major=$(echo "$raw" | cut -d. -f2)   # 1.8.0_x style
     if [[ "$major" =~ ^[0-9]+$ ]] && (( major < 11 )); then
-        echo "Java ${raw} found; this service needs Java 11 or newer." >&2
-        echo "Point PATH (or JAVA_HOME/bin) at the Java 11 runtime and retry." >&2
+        echo "Java ${raw} found via ${JAVA_SOURCE} (${JAVA_BIN})." >&2
+        echo "This service needs Java 11 or newer." >&2
+        echo "Unpack a Java 11 runtime into ${BASE_DIR}/jre, or set JAVA_HOME in" >&2
+        echo "${ENV_FILE}. It runs as its own process, so this does not affect" >&2
+        echo "anything else on the host." >&2
         exit 1
     fi
 }
@@ -94,7 +129,7 @@ cmd_preflight() {
     [[ -n "$group" ]] && args+=(--intake.preflight.only="$group")
     echo "Preflight — probing dependencies. Nothing is consumed and nothing is started."
     # Exit status propagates: 0 clean, 1 if any check failed.
-    java $JAVA_OPTS -jar "$JAR" "${CONFIG_ARG[@]}" "${args[@]}" --logging.level.root=WARN
+    "$JAVA_BIN" $JAVA_OPTS -jar "$JAR" "${CONFIG_ARG[@]}" "${args[@]}" --logging.level.root=WARN
 }
 
 cmd_start() {
@@ -107,7 +142,7 @@ cmd_start() {
     local log="${LOG_DIR}/intake-$(date -u +%Y%m%dT%H%M%SZ).log"
 
     echo "Starting; log: ${log}"
-    nohup java $JAVA_OPTS -jar "$JAR" "${CONFIG_ARG[@]}" > "$log" 2>&1 &
+    nohup "$JAVA_BIN" $JAVA_OPTS -jar "$JAR" "${CONFIG_ARG[@]}" > "$log" 2>&1 &
     local pid=$!
     echo "$pid" > "$PID_FILE"
     ln -sfn "$log" "${LOG_DIR}/current.log"
@@ -214,7 +249,14 @@ cmd_config() {
     echo "env file  : ${ENV_FILE}"
     echo "config dir: ${CONFIG_DIR} $([[ ${#CONFIG_ARG[@]} -gt 0 ]] && echo '(in use)' || echo '(empty — using built-in defaults)')"
     echo "java opts : ${JAVA_OPTS}"
-    echo "java      : $(command -v java > /dev/null 2>&1 && java -version 2>&1 | head -1 || echo '<not on PATH>')"
+    # Reported, never fatal: status is what an operator runs to find out why
+    # something is wrong, and "there is no usable java" is an answer it should
+    # print rather than exit on.
+    if resolve_java 2>/dev/null; then
+        echo "java      : $("$JAVA_BIN" -version 2>&1 | head -1) [${JAVA_SOURCE}]"
+    else
+        echo "java      : <none found — no ${BASE_DIR}/jre, no JAVA_HOME, none on PATH>"
+    fi
     echo
     for var in MQ_HOST MQ_PORT MQ_QUEUE_MANAGER MQ_CHANNEL MQ_SOURCE_QUEUE \
                MQ_TRACKER_QUEUE MQ_BACKOUT_QUEUE HDFS_BASE_PATH HDFS_AUDIT_BASE_PATH \

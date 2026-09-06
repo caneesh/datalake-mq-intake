@@ -211,6 +211,7 @@ without consuming anything.
 |---|---|
 | `MQ_INTAKE_PRODUCTION=true` | arms every startup gate. Leave on anywhere that stands in for production |
 | `JAVA_OPTS=-Xmx4g` | floor. Startup fails if the batch budget exceeds 50% of max heap |
+| `JAVA_HOME` | only needed when the host's `PATH` resolves to a Java older than 11 — see below |
 | `CLAIMS_IDENTITY_FIELD` | **claims only, required in production** — `CLM_XMITSN_ID` or `REC_CTL_NBR`, once the data owner confirms which. Startup is blocked until set |
 | `STOP_TIMEOUT_SECONDS` | how long `stop` waits for the drain (default 90) |
 
@@ -218,6 +219,33 @@ Leave `INTAKE_INSTANCE_ID` unset — it derives as `hostname-pid`, which is what
 JVMs on one host from sharing a `_tmp` tree.
 
 YAML overrides beyond these go in `<base>/config/application.yml`, which also survives deploys.
+
+### Running on a host whose Java is too old
+
+The service needs Java 11 and runs as **its own process**, so it does not have to use
+whatever JVM the host's other applications use. A WebSphere host pinned to Java 8 is the
+case this exists for: give the intake its own runtime and nothing else on the host changes.
+
+The launcher picks a Java in this order, and prints which one it chose in
+`./current/intake.sh config`:
+
+1. `<base>/jre/bin/java` — a runtime unpacked into the deployment
+2. `$JAVA_HOME/bin/java` — set in `env.sh`
+3. `java` from `PATH`
+
+Prefer the first. It travels with the deployment, so a cron entry, a fresh login shell and
+a colleague's session all get the same JVM without anyone remembering to prepend anything:
+
+```bash
+cd ~/mq-intake-rms
+tar xzf /tmp/jdk-11-linux-x64.tar.gz
+mv jdk-11* jre                 # <base>/jre, beside env.sh — survives deploys
+./current/intake.sh config     # java : ... [bundled .../jre]
+```
+
+A `JAVA_HOME` that is set but does not hold `bin/java` is an error, not a reason to fall
+through to `PATH` — naming the wrong runtime is a different mistake from naming none, and
+silently using a third one would hide it.
 
 ### Landing on local disk instead of a cluster
 
