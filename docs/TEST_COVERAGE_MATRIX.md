@@ -72,7 +72,7 @@ was never seen to fail proves nothing about the bug it claims to cover.
 
 ## Defects found by measuring coverage before refactoring
 
-Six refactors were proposed in review. Each began by mutating the existing
+Seven refactors were proposed in review. Each began by mutating the existing
 code to find out which invariants the suite actually held, before any code
 moved. The step has produced three different outcomes, and all three are worth
 having:
@@ -92,6 +92,12 @@ first at once: four unheld invariants, plus a stale javadoc asserting the
 opposite of the production gate it documents. Recorded under the tracker header
 rewrite below.
 
+The seventh (`MqConnectionManager`) produced the widest result of all — five
+probes, none caught — and needs a fourth category: **coverage that exists but is
+gated**. Its tests were thorough and skipped unless a queue manager was running,
+which reads identically to having none. Recorded under the MQ connection path
+below.
+
 A clean probe result is evidence in its own right, where a green suite is not.
 
 | Defect | Found by | Test | Observed before the fix |
@@ -102,6 +108,8 @@ A clean probe result is evidence in its own right, where a green suite is not.
 | An incomplete audit scan authorised quarantine, so a correctly-audited file could be MOVED because its audit record was corrupt | testing a review's claim about `PartitionReconciliationService` | `PartitionReconciliationServiceTest.anIncompleteAuditScanMustNotAuthoriseQuarantine` | the file was moved |
 | Reconciliation could stop for the life of the process with no signal of any kind | assessing a review's claim about `ReconciliationScheduler` | `ReconciliationSchedulerTest.aBindingWhoseWorkersAreAllBlockedIsReportedStalledInsteadOfGoingSilent` | no log line, no metric movement, no health change |
 | The javadoc on `TAG_VALUE_MAPPING_CAPTURED` described the mapping as un-captured while the constant read true, so it asserted the opposite of the RMS production startup gate it feeds | reading `RmsTrackerMessageBuilder` before extracting from it | — (documentation; the gate itself is held, see below) | a reader would conclude the tracker contract was incomplete |
+| A connection whose `start()` failed was handed to the next caller — non-null, never started, no error — so a second binding on the same queue manager consumed nothing, silently | mutating `MqConnectionManager` before making it reachable | `ManagedConnectionTest.aConnectionThatFailedToStartIsNotHandedToTheNextCaller` | the second call returned the dead connection instead of throwing |
+| A `retain` arriving during the backlog load rewrote the file from a half-read set, deleting from HDFS the entries the read had not reached | mutating `PendingPartitions` while reviewing a proposed refactor | `PendingPartitionsLoadRaceTest.aRetainDuringTheLoadCannotTruncateTheBacklog` | the persisted backlog lost every entry the load had not yet reached |
 
 The last is the one to remember: reporting a condition and refusing to act on it
 are different guarantees. An earlier fix made the corrupt-audit case VISIBLE —
@@ -356,6 +364,66 @@ ActiveMQ, so the browse is real):
 Not covered here: behaviour against a real IBM MQ queue manager. Browsing
 semantics are standard JMS and ActiveMQ implements them faithfully, but depth
 sampling under a real BOTHRESH-driven routing event is part of R-3.
+
+## The MQ connection path
+
+The largest coverage hole found by this method, and the clearest case of
+**gated coverage reading as no coverage**. `ManagedConnection` was a private
+nested class inside `MqConnectionManager`, reachable only through the manager's
+public API — which needs a queue manager. Its eleven tests
+(`ManagedConnectionAgainstRealMqTest`) skip unless `MQ_USER` is set, so in every
+ordinary build this had nothing holding it at all:
+
+| Mutation | Default build, before |
+|---|---|
+| fault classification disabled — every misconfiguration retried to exhaustion | **not caught** |
+| the linked-exception half of the matcher removed | **not caught** |
+| the channel never set on the IBM factory | **not caught** |
+| retry gives up after a single attempt | **not caught** |
+| the connection rebuilt per caller instead of shared | **not caught** |
+
+The last is standing constraint #2 — one `Connection` per queue manager, shared;
+Sessions never shared — and nothing tested it.
+
+`ConnectionOpener` is the seam that fixes this, and it was added against an
+earlier decision recorded in the test file itself, which said no production code
+had been changed to make it testable and that a seam in the connect path was not
+worth it. The argument was that the class is reachable without one. It is — but
+not in a build without a broker, which is every ordinary build. The javadoc now
+records the reversal and which half of the argument failed.
+
+`buildConnectionFactory` is static and package-private rather than injected:
+configuring an `MQConnectionFactory` needs no broker, only reachability. Build
+one, read its getters back. Testability wanted reachability, not another
+interface. `BackoffPolicy` is injected but **defaults to the existing fixed
+delay** — switching to the exponential-with-jitter policy session recovery uses
+would be a behaviour change wearing a refactor's clothes.
+
+All five are now caught with no Docker, along with the do-not-retry list,
+backoff placement, close, and credential faults: ten for ten. The eleven real-MQ
+tests are unchanged and still drive the production opener, which is what makes
+the seam a real path rather than one only tests take.
+
+## The pending-partition backlog
+
+| Behaviour | Test | Mutation that breaks it |
+|---|---|---|
+| A `retain` during the load cannot truncate the backlog | `PendingPartitionsLoadRaceTest.aRetainDuringTheLoadCannotTruncateTheBacklog` | loading outside the set's monitor |
+| The backlog is read once per binding, not per call | `.theBacklogIsReadOncePerBindingAndNotOnEveryCall` | removing the load-once guard |
+
+The race was latent — the reconciliation runner's in-progress flag serialises
+passes per binding — but the invariant that makes it unreachable lives in
+another class, which is not a property this one can assume.
+
+**A probe that is not a gap.** Moving the load inside `computeIfAbsent` also
+closes the race, so it passes both tests. That is correct, not a hole: a test
+asserting the race is closed cannot separate two shapes that both close it. What
+separates them is `ConcurrentHashMap` locking the *bin* rather than the key, so
+two binding ids sharing a bin would block each other for a cluster read —
+against the map's own contract and against the scheduler's "one binding must not
+delay another". Testing that would need two ids provably colliding in a bin,
+which is brittle against table size and `spread()` internals. The reasoning is
+recorded in the code instead of encoded in a fragile test.
 
 ## R. Still requires a real environment
 
