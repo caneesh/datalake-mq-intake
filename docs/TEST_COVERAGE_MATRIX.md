@@ -404,6 +404,37 @@ backoff placement, close, and credential faults: ten for ten. The eleven real-MQ
 tests are unchanged and still drive the production opener, which is what makes
 the seam a real path rather than one only tests take.
 
+### What reaching the class then found
+
+Two defects, neither visible while nothing could construct a `ManagedConnection`.
+
+**A connection that failed to start was handed to the next caller.** The field
+was published before `start()`, so a `start()` that threw left a non-null,
+never-started Connection behind. The caller that triggered it still got an
+exception once the budget ran out; the NEXT caller found the field non-null and
+got the dead connection with no error at all. Two bindings on one queue manager
+is enough: the first fails startup, the second consumes nothing, silently.
+Pinned by `.aConnectionThatFailedToStartIsNotHandedToTheNextCaller`.
+
+**And it was leaked, not closed.** An abandoned connection holds an MQ channel
+instance until the client object is collected, and channel instances are a
+server-side resource with a MAXINST limit — so a binding retrying through its
+budget could deny channels to every *other* application on that queue manager,
+reaching them as MQRC_CHANNEL_NOT_AVAILABLE and looking like their problem.
+Pinned by `.aConnectionThatFailsToStartIsClosedRatherThanAbandoned`, with
+`.aCleanupThatAlsoFailsDoesNotReplaceTheFailureThatMattered` holding the
+`addSuppressed` so a secondary close error cannot replace the diagnosis with a
+symptom.
+
+**A review's rationale found a gap the review did not know it had.** A proposal
+for `connect()` listed "restores the thread's interrupted flag" among its
+benefits. The code already did — and nothing tested it: deleting
+`Thread.currentThread().interrupt()` changed no test result, as did deleting the
+pre-attempt interrupt check. Swallowing an interrupt is how a shutdown stalls,
+because the thread that asked to stop never learns it was interrupted. Both are
+now pinned. Worth generalising: when a review claims a property as a benefit,
+check whether anything holds it, whether or not you take the proposal.
+
 ## The pending-partition backlog
 
 | Behaviour | Test | Mutation that breaks it |
@@ -424,6 +455,30 @@ against the map's own contract and against the scheduler's "one binding must not
 delay another". Testing that would need two ids provably colliding in a bin,
 which is brittle against table size and `spread()` internals. The reasoning is
 recorded in the code instead of encoded in a fragile test.
+
+## Documented operator behaviour
+
+`DEPLOYMENT.md` tells operators that `HDFS_CONFIG_RESOURCES` may name files
+comma-separated instead of naming a directory, because a directory reads
+`core-site.xml` and `hdfs-site.xml` and nothing else — so a cluster needing
+`ssl-client.xml` for wire encryption or RPC privacy has to list its files.
+
+That instruction was written before it was checked, which is the wrong order.
+A runbook step nobody can run is worse than no step: it gets followed once, at
+2am, on a cluster that will not come up. `ConfigResourcesBindingTest` now holds
+all three halves of the claim.
+
+| The claim | Test | Mutation that breaks it |
+|---|---|---|
+| A comma-separated value binds to one entry per file | `.aCommaSeparatedValueBindsToOneEntryPerFile` | — (Spring binding) |
+| A named file loads even when it is not one of the two site files — the half that makes the advice *work* | `.aNamedFileLoadsEvenWhenItIsNotOneOfTheTwoSiteFiles` | handling only directories in `loadConfigResources` |
+| The same file is ignored when the directory is named — the half that makes the advice *necessary* | `.thatSameFileIsIgnoredWhenTheDIRECTORYIsNamedInstead` | sweeping every `.xml` in the directory |
+
+The general point: a claim in an operator document is a claim about behaviour,
+and behaviour claims belong in tests. This project already had one instance of
+the opposite — a javadoc asserting the RMS tracker contract was incomplete while
+the gate it fed said otherwise — and documentation drifts the same way code
+does, with less to catch it.
 
 ## R. Still requires a real environment
 
