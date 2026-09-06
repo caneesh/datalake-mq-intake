@@ -209,6 +209,95 @@ class ManagedConnectionTest {
                 .isInstanceOf(MqConnectionManager.MqConnectionException.class);
     }
 
+    @Test
+    void aConnectionThatFailsToStartIsClosedRatherThanAbandoned() throws Exception {
+        // An abandoned connection holds an MQ channel instance until the
+        // client object is collected. Channel instances are a server-side
+        // resource with a MAXINST limit, so a binding retrying its way through
+        // the budget could deny channels to every other application on that
+        // queue manager — reported to them as MQRC_CHANNEL_NOT_AVAILABLE,
+        // which looks like their problem.
+        Connection neverStarts = mock(Connection.class);
+        org.mockito.Mockito.doThrow(new JMSException("broker refused start"))
+                .when(neverStarts).start();
+
+        assertThatThrownBy(() ->
+                managed(config(3), new CountingOpener(null, neverStarts, 1)).getConnection())
+                .isInstanceOf(MqConnectionManager.MqConnectionException.class);
+
+        org.mockito.Mockito.verify(neverStarts, org.mockito.Mockito.times(3)).close();
+    }
+
+    @Test
+    void aCleanupThatAlsoFailsDoesNotReplaceTheFailureThatMattered() throws Exception {
+        // The operator needs to know why the connect failed. Letting a
+        // secondary close error propagate would replace the diagnosis with a
+        // symptom.
+        Connection broken = mock(Connection.class);
+        org.mockito.Mockito.doThrow(new JMSException("broker refused start"))
+                .when(broken).start();
+        org.mockito.Mockito.doThrow(new JMSException("and the close failed too"))
+                .when(broken).close();
+
+        assertThatThrownBy(() ->
+                managed(config(2), new CountingOpener(null, broken, 1)).getConnection())
+                .isInstanceOf(MqConnectionManager.MqConnectionException.class)
+                .hasMessageContaining("after 2 attempts")
+                .cause()
+                .hasMessageContaining("broker refused start");
+    }
+
+    // --- interruption ---
+
+    @Test
+    void anInterruptDuringBackoffIsReportedAndLeavesTheFlagSet() {
+        // Swallowing the interrupt is how a shutdown stalls: the thread that
+        // asked to stop never learns it was interrupted, and the listener it
+        // belongs to keeps going until something else notices. Nothing held
+        // this — deleting the interrupt() call changed no test result.
+        BackoffPolicy interruptsWhileWaiting = attempt -> {
+            Thread.currentThread().interrupt();
+            return Duration.ofSeconds(10);   // so the sleep throws at once
+        };
+        CountingOpener opener = new CountingOpener(new JMSException("down"));
+
+        try {
+            assertThatThrownBy(() ->
+                    new ManagedConnection(config(3), opener, interruptsWhileWaiting)
+                            .getConnection())
+                    .isInstanceOf(MqConnectionManager.MqConnectionException.class)
+                    .hasMessageContaining("interrupted");
+
+            assertThat(Thread.currentThread().isInterrupted())
+                    .as("the caller must still see the interrupt").isTrue();
+            assertThat(opener.attempts.get())
+                    .as("and the budget is abandoned, not spent").isEqualTo(1);
+        } finally {
+            // Clear it, or the flag leaks into whatever runs next on this thread.
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    void anAlreadyInterruptedThreadOpensNothing() {
+        CountingOpener opener = new CountingOpener(new JMSException("down"));
+        ManagedConnection managed = managed(config(3), opener);
+
+        try {
+            Thread.currentThread().interrupt();
+
+            assertThatThrownBy(managed::getConnection)
+                    .isInstanceOf(MqConnectionManager.MqConnectionException.class)
+                    .hasMessageContaining("interrupted");
+
+            assertThat(opener.attempts.get())
+                    .as("a connect that was asked to stop before it began opens nothing")
+                    .isZero();
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
     // --- the IBM factory, which needs no broker to check ---
 
     @Test

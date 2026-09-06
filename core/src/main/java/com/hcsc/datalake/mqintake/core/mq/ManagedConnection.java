@@ -59,29 +59,18 @@ class ManagedConnection {
     }
 
     private Connection connect() throws MqConnectionManager.MqConnectionException {
-        int attempts = 0;
         int maxAttempts = config.getReconnectAttempts();
         JMSException lastException = null;
 
-        while (attempts < maxAttempts) {
-            attempts++;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
                 if (Thread.currentThread().isInterrupted()) {
-                    throw new MqConnectionManager.MqConnectionException("Connection attempt interrupted");
+                    throw new MqConnectionManager.MqConnectionException(
+                            "Connection attempt interrupted");
                 }
 
-                // Published only once it is started. Assigning the field
-                // first — which is what this did — left a non-null,
-                // never-started Connection behind whenever start() threw. The
-                // caller that triggered it still got an exception once the
-                // budget ran out, but the NEXT caller found the field non-null
-                // and was handed the dead connection with no error at all.
-                // Reachable with two bindings sharing one queue manager: the
-                // first fails startup, the second asks for the same connection
-                // id and consumes nothing, silently.
-                Connection opened = opener.open();
-                opened.start();
-                connection = opened;
+                // Published only once it is started; see openAndStart.
+                connection = openAndStart();
 
                 log.info("Connected to MQ: id={}, host={}, queueManager={}",
                         config.getId(), config.getHost(), config.getQueueManager());
@@ -91,20 +80,16 @@ class ManagedConnection {
             } catch (JMSException e) {
                 lastException = e;
                 log.warn("Connection attempt {} of {} failed for {}: {}",
-                        attempts, maxAttempts, config.getId(), e.getMessage());
+                        attempt, maxAttempts, config.getId(), e.getMessage());
 
                 if (isConfigurationError(e)) {
                     throw new MqConnectionManager.MqConnectionException(
-                            "Configuration error connecting to " + config.getId() + ": " + e.getMessage(), e);
+                            "Configuration error connecting to " + config.getId()
+                                    + ": " + e.getMessage(), e);
                 }
 
-                if (attempts < maxAttempts) {
-                    try {
-                        Thread.sleep(backoffPolicy.backoffFor(attempts).toMillis());
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        throw new MqConnectionManager.MqConnectionException("Connection attempt interrupted", ie);
-                    }
+                if (attempt < maxAttempts) {
+                    waitBeforeRetry(attempt);
                 }
             }
         }
@@ -112,6 +97,65 @@ class ManagedConnection {
         throw new MqConnectionManager.MqConnectionException(
                 "Failed to connect to " + config.getId() + " after " + maxAttempts + " attempts",
                 lastException);
+    }
+
+    /**
+     * Opens a connection and starts it, or leaves nothing behind.
+     *
+     * <p>Two failures are handled here that used to be handled nowhere.
+     *
+     * <p>The connection is returned only once started, so the caller can
+     * publish it unconditionally. Assigning the field before {@code start()} —
+     * which is what this did — left a non-null, never-started Connection
+     * behind whenever start() threw: the caller that triggered it still got an
+     * exception once the budget ran out, but the NEXT caller found the field
+     * non-null and was handed the dead connection with no error at all.
+     *
+     * <p>And a connection that fails to start is closed rather than abandoned.
+     * An abandoned one holds an MQ channel instance until the client object is
+     * collected, and channel instances are a server-side resource with a
+     * MAXINST limit — so a binding that retries its way through the budget
+     * could deny channels to every other application on that queue manager,
+     * reported to them as MQRC_CHANNEL_NOT_AVAILABLE.
+     */
+    private Connection openAndStart() throws JMSException {
+        Connection opened = opener.open();
+        try {
+            opened.start();
+        } catch (JMSException e) {
+            closeAbandoned(opened, e);
+            throw e;
+        }
+        return opened;
+    }
+
+    /**
+     * Releases a connection that never started.
+     *
+     * <p>A close that also fails is attached to the original rather than
+     * thrown: the operator needs to know why the connect failed, and losing
+     * that to a secondary cleanup error would replace the diagnosis with a
+     * symptom.
+     */
+    private void closeAbandoned(Connection opened, JMSException cause) {
+        try {
+            opened.close();
+        } catch (JMSException e) {
+            cause.addSuppressed(e);
+            log.debug("Could not close the connection that failed to start for {}: {}",
+                    config.getId(), e.getMessage());
+        }
+    }
+
+    /** Waits out the backoff, treating an interrupt as a reason to stop. */
+    private void waitBeforeRetry(int attempt) {
+        try {
+            Thread.sleep(backoffPolicy.backoffFor(attempt).toMillis());
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new MqConnectionManager.MqConnectionException(
+                    "Connection attempt interrupted", ie);
+        }
     }
 
     /**
