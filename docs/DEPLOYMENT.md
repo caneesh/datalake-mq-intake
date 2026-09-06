@@ -142,6 +142,44 @@ cd ~/mq-intake-rms && vi env.sh        # then again for ~/mq-intake-claims
 
 The queue-manager-side settings that must match these are in step 2.
 
+#### Setting `MQ_CREDENTIAL_REF`
+
+It names **where the secret lives**, never the secret. Two forms work:
+
+```bash
+# Preferred — two variables
+export MQ_CREDENTIAL_REF="env:MQ_USER,MQ_PASSWORD"
+export MQ_USER=svc_dmih_rms
+export MQ_PASSWORD='...'
+
+# Or one variable holding username:password
+export MQ_CREDENTIAL_REF="env:MQ_CREDS"
+export MQ_CREDS='svc_dmih_rms:s3cr3t'
+```
+
+The single-variable form splits on the **first** colon, so a password may contain colons but
+a username may not. The two-variable form avoids that rule and keeps the password out of a
+value that also carries the username.
+
+Three things to know before you set it:
+
+- **Leaving it blank connects with no credentials**, and that is a legitimate configuration —
+  it is what you use when the channel accepts the process identity. Blank is not an error.
+- **Once set, it fails closed.** If the reference is present and does not resolve, startup
+  refuses rather than connecting anonymously. Missing variables, only one of the two set, or
+  a lookup that throws all fail with the reference named and the secret never logged. That
+  is deliberate: a credential-store outage or a rotation that removed the entry would
+  otherwise downgrade you to an anonymous connect, which on a queue manager permitting
+  anonymous binds succeeds *with different authority than intended*.
+- **The `env:` prefix is required.** `MQ_CREDENTIAL_REF="MQ_USER,MQ_PASSWORD"` resolves to
+  nothing and startup refuses — it is not a partial success.
+
+`MQ_USER`/`MQ_PASSWORD` are read from the process environment, so they must be `export`ed
+in this module's own `env.sh`. A credential fault classifies as a *configuration* error, so
+it fails on the first attempt instead of retrying to exhaustion and burying the cause.
+Prove it with `./current/intake.sh preflight mq`, which resolves the credential and connects
+without consuming anything.
+
 ### HDFS
 
 | Variable | Notes |

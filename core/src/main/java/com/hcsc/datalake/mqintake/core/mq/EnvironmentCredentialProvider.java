@@ -23,6 +23,24 @@ public class EnvironmentCredentialProvider implements CredentialProvider {
     private static final Logger log = LoggerFactory.getLogger(EnvironmentCredentialProvider.class);
     private static final String ENV_PREFIX = "env:";
 
+    /**
+     * How a variable name becomes a value.
+     *
+     * <p>{@code System::getenv} in production. A seam only because the
+     * alternative was tests that depend on the ambient environment — the ones
+     * here did, and one of them skipped its assertions entirely when USER or
+     * HOME happened to be unset, passing green while testing nothing.
+     */
+    private final java.util.function.UnaryOperator<String> env;
+
+    public EnvironmentCredentialProvider() {
+        this(System::getenv);
+    }
+
+    EnvironmentCredentialProvider(java.util.function.UnaryOperator<String> env) {
+        this.env = env;
+    }
+
     @Override
     public Optional<Credentials> getCredentials(String credentialRef) {
         if (credentialRef == null || credentialRef.isBlank()) {
@@ -53,8 +71,8 @@ public class EnvironmentCredentialProvider implements CredentialProvider {
         String userVar = parts[0].trim();
         String passVar = parts[1].trim();
 
-        String username = System.getenv(userVar);
-        String password = System.getenv(passVar);
+        String username = env.apply(userVar);
+        String password = env.apply(passVar);
 
         if (username == null || password == null) {
             log.warn("Environment variables not found: {} or {}", userVar, passVar);
@@ -66,7 +84,7 @@ public class EnvironmentCredentialProvider implements CredentialProvider {
     }
 
     private Optional<Credentials> getCredentialsFromSingleVar(String envVar) {
-        String value = System.getenv(envVar);
+        String value = env.apply(envVar);
         if (value == null || value.isBlank()) {
             log.warn("Environment variable not found: {}", envVar);
             return Optional.empty();

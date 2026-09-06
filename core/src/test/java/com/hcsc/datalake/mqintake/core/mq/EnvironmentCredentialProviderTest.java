@@ -47,16 +47,67 @@ class EnvironmentCredentialProviderTest {
 
     @Test
     void parsesTwoVarFormat() {
-        String userEnv = System.getenv("USER");
-        String homeEnv = System.getenv("HOME");
+        // Was conditional on USER and HOME being set, so on a container
+        // without them the assertions were skipped and the test passed having
+        // checked nothing.
+        CredentialProvider stubbed = withEnv(java.util.Map.of(
+                "MQ_USER", "svc_dmih_rms", "MQ_PASSWORD", "s3cr3t"));
 
-        if (userEnv != null && homeEnv != null) {
-            Optional<CredentialProvider.Credentials> result = provider.getCredentials("env:USER,HOME");
+        Optional<CredentialProvider.Credentials> result =
+                stubbed.getCredentials("env:MQ_USER,MQ_PASSWORD");
 
-            assertTrue(result.isPresent());
-            assertEquals(userEnv, result.get().getUsername());
-            assertEquals(homeEnv, result.get().getPassword());
-        }
+        assertTrue(result.isPresent());
+        assertEquals("svc_dmih_rms", result.get().getUsername());
+        assertEquals("s3cr3t", result.get().getPassword());
+    }
+
+    @Test
+    void theSingleVariableFormSplitsOnTheFIRSTColonSoPasswordsMayContainColons() {
+        // DEPLOYMENT.md tells operators exactly this. Nothing held it:
+        // credentialsWithColonInPassword builds a Credentials object and reads
+        // its getters back, which never touches the parse.
+        CredentialProvider stubbed = withEnv(java.util.Map.of(
+                "MQ_CREDS", "svc_dmih_rms:p4ss:w1th:colons"));
+
+        Optional<CredentialProvider.Credentials> result = stubbed.getCredentials("env:MQ_CREDS");
+
+        assertTrue(result.isPresent());
+        assertEquals("svc_dmih_rms", result.get().getUsername());
+        assertEquals("p4ss:w1th:colons", result.get().getPassword());
+    }
+
+    @Test
+    void aSingleVariableWithNoColonResolvesToNothing() {
+        CredentialProvider stubbed = withEnv(java.util.Map.of("MQ_CREDS", "just-a-username"));
+
+        assertTrue(stubbed.getCredentials("env:MQ_CREDS").isEmpty());
+    }
+
+    @Test
+    void aTwoVariableRefWithOnlyThePasswordSetResolvesToNothing() {
+        // Refused rather than half-populated; MqConnectionManager turns the
+        // empty result into a refusal to connect.
+        CredentialProvider stubbed = withEnv(java.util.Map.of("MQ_PASSWORD", "s3cr3t"));
+
+        assertTrue(stubbed.getCredentials("env:MQ_USER,MQ_PASSWORD").isEmpty());
+    }
+
+    @Test
+    void aShortMalformedRefResolvesToNothingRatherThanThrowing() {
+        // The prefix check also guards the substring that follows it. Without
+        // it a ref shorter than "env:" throws StringIndexOutOfBoundsException
+        // instead of returning empty — the operator still gets a refusal,
+        // because resolveCredentials turns a RuntimeException into one, but a
+        // stack trace replaces the message that names the reference.
+        CredentialProvider stubbed = withEnv(java.util.Map.of());
+
+        assertTrue(stubbed.getCredentials("x").isEmpty());
+        assertTrue(stubbed.getCredentials("env").isEmpty());
+    }
+
+    /** A provider reading a fixed map instead of the ambient environment. */
+    private CredentialProvider withEnv(java.util.Map<String, String> values) {
+        return new EnvironmentCredentialProvider(values::get);
     }
 
     @Test

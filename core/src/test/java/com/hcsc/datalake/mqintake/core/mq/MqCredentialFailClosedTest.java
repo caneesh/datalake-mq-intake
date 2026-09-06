@@ -105,6 +105,39 @@ class MqCredentialFailClosedTest {
     }
 
     @Test
+    void aRefMissingTheEnvPrefixIsRefusedRatherThanTreatedAsAnonymous() {
+        // The typo DEPLOYMENT.md warns about: "MQ_USER,MQ_PASSWORD" instead of
+        // "env:MQ_USER,MQ_PASSWORD". Two tests already covered the halves —
+        // the provider ignores an unprefixed ref, and an unresolved ref is
+        // refused — but the operator-facing claim is the composition, and a
+        // runbook warning that is only an inference is worth one test.
+        //
+        // Anonymous is the wrong outcome here even though it is a legitimate
+        // configuration when deliberately chosen: on a queue manager that
+        // permits anonymous binds it connects with different authority than
+        // intended, and the typo never surfaces.
+        CredentialProvider provider = new EnvironmentCredentialProvider();
+
+        assertThatThrownBy(() -> MqConnectionManager.resolveCredentials(
+                "MQ_USER,MQ_PASSWORD", CONNECTION_ID, provider))
+                .isInstanceOf(MqConnectionManager.MqCredentialException.class)
+                .hasMessageContaining("did not resolve");
+    }
+
+    @Test
+    void aRefNamingVariablesThatDoNotExistIsRefusedToo() {
+        // The other half an operator hits: prefix right, variables never
+        // exported into the process environment.
+        CredentialProvider provider = new EnvironmentCredentialProvider();
+
+        assertThatThrownBy(() -> MqConnectionManager.resolveCredentials(
+                "env:NO_SUCH_USER_VAR_FOR_TEST,NO_SUCH_PASSWORD_VAR_FOR_TEST",
+                CONNECTION_ID, provider))
+                .isInstanceOf(MqConnectionManager.MqCredentialException.class)
+                .hasMessageContaining("did not resolve");
+    }
+
+    @Test
     void secretsNeverAppearInErrorMessages() {
         // Every failure path is checked, because one leaky message is enough
         // to put a live MQ password into a log aggregator.
