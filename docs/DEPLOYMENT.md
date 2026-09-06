@@ -146,10 +146,22 @@ The queue-manager-side settings that must match these are in step 2.
 
 | Variable | Notes |
 |---|---|
-| `HDFS_CONFIG_RESOURCES` | path to the **target** cluster's conf dir. Without it Hadoop resolves `fs.defaultFS` to `file:///` and writes to local disk, silently and successfully |
+| `HDFS_CONFIG_RESOURCES` | path to the **target** cluster's conf dir, or a comma-separated list of XML files. Without it Hadoop resolves `fs.defaultFS` to `file:///` and writes to local disk, silently and successfully |
 | `HDFS_EXPECTED_NAMESERVICE` | `dfs.nameservices` from that `hdfs-site.xml`. The only check that catches a wrong conf dir — everything else passes either way |
 | `HDFS_BASE_PATH` | where data lands |
 | `HDFS_AUDIT_BASE_PATH` | audit records; must be writable or batches roll back |
+
+> **A directory loads `core-site.xml` and `hdfs-site.xml`, and nothing else.** Anything
+> else the cluster team put there — `ssl-client.xml`, `hive-site.xml`, `yarn-site.xml` — is
+> ignored without comment. If the cluster needs one of them (`ssl-client.xml` for HDFS wire
+> encryption or RPC privacy is the usual case), name the files instead of the directory:
+>
+> ```bash
+> export HDFS_CONFIG_RESOURCES=/etc/hadoop/conf/core-site.xml,/etc/hadoop/conf/hdfs-site.xml,/etc/hadoop/conf/ssl-client.xml
+> ```
+>
+> The directory form is the right default; it just cannot tell you about a file it was
+> never going to read.
 
 ### Kerberos (if the cluster is secured)
 
@@ -168,6 +180,24 @@ Leave `INTAKE_INSTANCE_ID` unset — it derives as `hostname-pid`, which is what
 JVMs on one host from sharing a `_tmp` tree.
 
 YAML overrides beyond these go in `<base>/config/application.yml`, which also survives deploys.
+
+### Landing on local disk instead of a cluster
+
+Only useful on a box with no cluster to point at — a first smoke test, or a demo. There is
+**no environment variable for it**; it is YAML only, deliberately, because it is not a thing
+to turn on from a shell by accident:
+
+```yaml
+# <base>/config/application.yml
+intake:
+  hdfs:
+    allow-local-filesystem: true
+```
+
+Without it, startup in production mode refuses to run on `file:///` and preflight's
+`cluster-config.resources` check fails naming `HDFS_CONFIG_RESOURCES`. That refusal is the
+feature: a run that lands on the server's own disk otherwise succeeds, reports healthy, and
+writes a clean audit trail, with only the data in the wrong place.
 
 ## 5. Start it
 
