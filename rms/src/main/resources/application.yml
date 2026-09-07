@@ -2,6 +2,13 @@ spring:
   application:
     name: datalake-mq-intake-rms
 
+# The actuator port. Explicit rather than left to Spring's default because
+# 8080 is taken on any host that already runs something, and the control
+# script derives its health and metrics URLs from the same variable — so
+# moving the service moves both together.
+server:
+  port: ${SERVER_PORT:8080}
+
 intake:
   # Left empty so the service derives hostname-pid. HOSTNAME alone is unique
   # per host, not per process: two intake JVMs on one host would share a

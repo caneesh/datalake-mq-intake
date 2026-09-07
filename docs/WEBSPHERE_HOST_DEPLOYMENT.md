@@ -44,6 +44,18 @@ This runs as its own JVM on the shared host. It is worth stating because it remo
 
 If this ever moves *inside* the WebSphere JVM, all four rows change and so does the Kerberos model. Treat that as a different deployment, not a variation on this one.
 
+## Two things the shared host will take from you
+
+**Port 8080.** Spring's default, and whatever else runs here almost certainly
+holds it. Set `SERVER_PORT` in `env.sh` — `intake.sh status` derives its health
+and metrics URLs from the same variable, so both move together. Preflight binds
+no port at all, so it works before you have decided on one.
+
+**The Java on `PATH`.** This runs as its own process and needs Java 11; a
+WebSphere host is usually pinned to 8. Unpack a runtime into `<base>/jre` and
+the launcher prefers it over both `JAVA_HOME` and `PATH`, without touching
+anything else on the host.
+
 ## Configuration
 
 The cluster-side values do not have to be requested: the WebSphere application on this host already reaches the target cluster, so its working `odp.*` values can be read off the host and mapped across. [Property reference](PROPERTY_REFERENCE.md) has the commands for finding them and the property-by-property mapping.

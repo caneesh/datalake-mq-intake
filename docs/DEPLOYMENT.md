@@ -212,6 +212,7 @@ without consuming anything.
 | `MQ_INTAKE_PRODUCTION=true` | arms every startup gate. Leave on anywhere that stands in for production |
 | `JAVA_OPTS=-Xmx4g` | floor. Startup fails if the batch budget exceeds 50% of max heap |
 | `JAVA_HOME` | only needed when the host's `PATH` resolves to a Java older than 11 — see below |
+| `SERVER_PORT` | actuator port, default 8080. **Set it on any host already running something** — `status` follows it automatically |
 | `CLAIMS_IDENTITY_FIELD` | **claims only, required in production** — `CLM_XMITSN_ID` or `REC_CTL_NBR`, once the data owner confirms which. Startup is blocked until set |
 | `STOP_TIMEOUT_SECONDS` | how long `stop` waits for the drain (default 90) |
 
@@ -290,7 +291,7 @@ so a pipeline can gate on it. Narrow it with `preflight mq`, `hdfs`, or `app`.
 ./current/intake.sh config        # effective settings; secrets shown as set/unset only
 ```
 
-Health and metrics: `http://localhost:8080/actuator/health` and `/actuator/metrics`.
+Health and metrics: `http://localhost:${SERVER_PORT:-8080}/actuator/health` and `/actuator/metrics`.
 
 `DOWN` (503) means every binding is unhealthy. `PARTIAL_OUTAGE` and `DEGRADED` return 200
 deliberately — this service serves no traffic, so a 503 only restarts the pod and interrupts

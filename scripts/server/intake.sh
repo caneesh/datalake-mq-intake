@@ -95,8 +95,13 @@ require_java() {
         exit 1
     fi
 }
-HEALTH_URL="${HEALTH_URL:-http://localhost:8080/actuator/health}"
-METRICS_URL="${METRICS_URL:-http://localhost:8080/actuator/metrics}"
+# The running service serves actuator health and metrics, so it needs a port.
+# 8080 is Spring's default and is already taken on a host that runs anything
+# else — set SERVER_PORT in env.sh and both the service and these URLs follow
+# it together, which is the point of deriving them here rather than hardcoding.
+SERVER_PORT="${SERVER_PORT:-8080}"
+HEALTH_URL="${HEALTH_URL:-http://localhost:${SERVER_PORT}/actuator/health}"
+METRICS_URL="${METRICS_URL:-http://localhost:${SERVER_PORT}/actuator/metrics}"
 
 # A config directory is only passed to Spring when it actually holds something;
 # an empty --spring.config.additional-location is a confusing no-op.
@@ -139,7 +144,13 @@ cmd_preflight() {
     [[ -n "$group" ]] && args+=(--intake.preflight.only="$group")
     echo "Preflight — probing dependencies. Nothing is consumed and nothing is started."
     # Exit status propagates: 0 clean, 1 if any check failed.
+    # No web server: preflight is an ApplicationRunner that probes and exits,
+    # and it never serves HTTP. Binding a port would make a diagnostic fail
+    # for a reason that has nothing to do with the dependencies it checks —
+    # on a shared host, where something already holds 8080, that is exactly
+    # the machine you most need this to run on.
     "$JAVA_BIN" $JAVA_OPTS -jar "$JAR" ${CONFIG_ARG[@]+"${CONFIG_ARG[@]}"} \
+        --spring.main.web-application-type=none \
         "${args[@]}" --logging.level.root=WARN
 }
 
@@ -260,6 +271,7 @@ cmd_config() {
     echo "env file  : ${ENV_FILE}"
     echo "config dir: ${CONFIG_DIR} $([[ ${#CONFIG_ARG[@]} -gt 0 ]] && echo '(in use)' || echo '(empty — using built-in defaults)')"
     echo "java opts : ${JAVA_OPTS}"
+    echo "http port : ${SERVER_PORT}"
     # Reported, never fatal: config is what an operator runs to find out why
     # something is wrong, and "there is no usable java" is an answer it should
     # print rather than exit on.
