@@ -263,13 +263,22 @@ cmd_status() {
             fi
         else
             echo "health  : $(echo "$health" | head -c 400)"
-            for m in messages_consumed_total messages_written_total \
+            # current_batch_size first, and it earns the place. Consumption
+            # is counted at COMMIT, not at receive, so with interval-ms: 0 a
+            # binding that is receiving normally reports zero for everything
+            # else until its partition window rolls — up to a quarter hour.
+            # Without this gauge "nothing is arriving" and "arriving, not yet
+            # committed" produce identical output, and they need opposite
+            # responses.
+            for m in current_batch_size \
+                     messages_consumed_total messages_written_total \
                      batches_committed_total batches_rolled_back_total \
                      balance_check_failures_total backout_queue_depth \
-                     identity_misses_total suspect_count; do
+                     identity_misses_total suspect_count \
+                     pending_partitions reconciliation_age_seconds; do
                 local v
                 v=$(curl -s --max-time 5 "${METRICS_URL}/mq_intake_${m}" 2>/dev/null \
-                    | grep -o '"value":[0-9.E]*' | head -1 | cut -d: -f2 || true)
+                    | grep -o '"value":-\?[0-9.E]*' | head -1 | cut -d: -f2 || true)
                 [[ -n "$v" ]] && printf 'metric  : %-32s %s\n' "$m" "$v"
             done
         fi
