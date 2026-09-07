@@ -105,6 +105,16 @@ if compgen -G "${CONFIG_DIR}/*.yml" > /dev/null || compgen -G "${CONFIG_DIR}/*.p
     CONFIG_ARG=(--spring.config.additional-location="file:${CONFIG_DIR}/")
 fi
 
+# Expanded through ${CONFIG_ARG[@]+...} rather than "${CONFIG_ARG[@]}" because
+# bash before 4.4 — RHEL 7 ships 4.2 — treats expanding an EMPTY array under
+# `set -u` as an unbound variable and aborts. The array is empty whenever
+# config/ holds no yml or properties, which is the ordinary case, so on those
+# hosts every start and preflight died with
+# "CONFIG_ARG[@]: unbound variable" and no other explanation.
+#
+# It never showed up in development: bash 4.4+ expands an empty array to
+# nothing, so the same script is fine on a modern box and fails on the server.
+
 running_pid() {
     [[ -f "$PID_FILE" ]] || return 1
     local pid
@@ -129,7 +139,8 @@ cmd_preflight() {
     [[ -n "$group" ]] && args+=(--intake.preflight.only="$group")
     echo "Preflight — probing dependencies. Nothing is consumed and nothing is started."
     # Exit status propagates: 0 clean, 1 if any check failed.
-    "$JAVA_BIN" $JAVA_OPTS -jar "$JAR" "${CONFIG_ARG[@]}" "${args[@]}" --logging.level.root=WARN
+    "$JAVA_BIN" $JAVA_OPTS -jar "$JAR" ${CONFIG_ARG[@]+"${CONFIG_ARG[@]}"} \
+        "${args[@]}" --logging.level.root=WARN
 }
 
 cmd_start() {
@@ -142,7 +153,7 @@ cmd_start() {
     local log="${LOG_DIR}/intake-$(date -u +%Y%m%dT%H%M%SZ).log"
 
     echo "Starting; log: ${log}"
-    nohup "$JAVA_BIN" $JAVA_OPTS -jar "$JAR" "${CONFIG_ARG[@]}" > "$log" 2>&1 &
+    nohup "$JAVA_BIN" $JAVA_OPTS -jar "$JAR" ${CONFIG_ARG[@]+"${CONFIG_ARG[@]}"} > "$log" 2>&1 &
     local pid=$!
     echo "$pid" > "$PID_FILE"
     ln -sfn "$log" "${LOG_DIR}/current.log"
