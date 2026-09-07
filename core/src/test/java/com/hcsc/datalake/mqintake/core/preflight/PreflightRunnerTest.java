@@ -15,12 +15,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 class PreflightRunnerTest {
 
     private PreflightCheck check(String group, String name, CheckOutcome outcome) {
-        return new MqChecks.AbstractCheck(group, name, "proves " + name) {
-            @Override
-            public CheckOutcome run() {
-                return outcome;
-            }
-        };
+        return PreflightCheck.of(group, name, "proves " + name, () -> {
+            return outcome;
+        
+        });
     }
 
     @Test
@@ -30,18 +28,16 @@ class PreflightRunnerTest {
         // socket. Without a bound, the diagnostic hangs on exactly the
         // environment it was run to diagnose.
         java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
-        PreflightCheck hangs = new MqChecks.AbstractCheck("hdfs", "hangs", "never answers") {
-            @Override
-            public CheckOutcome run() {
-                entered.countDown();
-                try {
-                    Thread.sleep(Long.MAX_VALUE);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-                return CheckOutcome.pass("never reached");
+        PreflightCheck hangs = PreflightCheck.of("hdfs", "hangs", "never answers", () -> {
+            entered.countDown();
+            try {
+                Thread.sleep(Long.MAX_VALUE);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
-        };
+            return CheckOutcome.pass("never reached");
+        
+        });
 
         long startedMs = System.currentTimeMillis();
         PreflightReport report = new PreflightRunner(List.of(hangs), 250).run(Set.of());
@@ -61,17 +57,15 @@ class PreflightRunnerTest {
 
     @Test
     void aTimeoutDoesNotStopTheRemainingChecks() {
-        PreflightCheck hangs = new MqChecks.AbstractCheck("hdfs", "hangs", "never answers") {
-            @Override
-            public CheckOutcome run() {
-                try {
-                    Thread.sleep(Long.MAX_VALUE);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-                return CheckOutcome.pass("never reached");
+        PreflightCheck hangs = PreflightCheck.of("hdfs", "hangs", "never answers", () -> {
+            try {
+                Thread.sleep(Long.MAX_VALUE);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
-        };
+            return CheckOutcome.pass("never reached");
+        
+        });
 
         // Each check gets its own thread, so a stuck one must not leave the
         // rest queued behind it — the checks after a dead NameNode are often
@@ -87,13 +81,11 @@ class PreflightRunnerTest {
     @Test
     void runsEveryCheckEvenAfterOneFails() {
         AtomicInteger ran = new AtomicInteger();
-        PreflightCheck counting = new MqChecks.AbstractCheck("hdfs", "later", "runs last") {
-            @Override
-            public CheckOutcome run() {
-                ran.incrementAndGet();
-                return CheckOutcome.pass("fine");
-            }
-        };
+        PreflightCheck counting = PreflightCheck.of("hdfs", "later", "runs last", () -> {
+            ran.incrementAndGet();
+            return CheckOutcome.pass("fine");
+        
+        });
 
         PreflightReport report = new PreflightRunner(List.of(
                 check("mq", "broken", CheckOutcome.fail("nope")), counting)).run(Set.of());
@@ -107,12 +99,10 @@ class PreflightRunnerTest {
 
     @Test
     void aCheckThatThrowsIsReportedRatherThanEscaping() {
-        PreflightCheck exploding = new MqChecks.AbstractCheck("mq", "explodes", "throws") {
-            @Override
-            public CheckOutcome run() {
-                throw new IllegalStateException("kaboom");
-            }
-        };
+        PreflightCheck exploding = PreflightCheck.of("mq", "explodes", "throws", () -> {
+            throw new IllegalStateException("kaboom");
+        
+        });
 
         PreflightReport report = new PreflightRunner(List.of(exploding)).run(Set.of());
 

@@ -36,4 +36,49 @@ public interface PreflightCheck {
      * cut short.
      */
     CheckOutcome run();
+
+    /**
+     * A check built from its three constants and the probe itself.
+     *
+     * <p>Every check is the same shape: three strings and one method that does
+     * the work. Written as anonymous subclasses that was four overrides each,
+     * three of them {@code return field;} — fifteen times over, with the probe
+     * buried in the middle.
+     *
+     * <p>It also removes a wart that shape created: the shared base class
+     * lived inside {@code MqChecks}, so {@code HdfsChecks} and
+     * {@code AppChecks} each referenced the MQ class for a base class and
+     * nothing else.
+     *
+     * @param group     one of mq, hdfs, app — what {@code --preflight=<group>}
+     *                  filters on, so a wrong one means the check silently
+     *                  does not run under that filter
+     * @param name      stable identifier, e.g. {@code mq.backout-queue.output}
+     * @param describes one line saying what a pass proves
+     * @param probe     the work; must not throw, per {@link #run()}
+     */
+    static PreflightCheck of(String group, String name, String describes,
+                             java.util.function.Supplier<CheckOutcome> probe) {
+        return new PreflightCheck() {
+            @Override
+            public String group() {
+                return group;
+            }
+
+            @Override
+            public String name() {
+                return name;
+            }
+
+            @Override
+            public String describes() {
+                return describes;
+            }
+
+            @Override
+            public CheckOutcome run() {
+                return probe.get();
+            }
+        };
+    }
 }
