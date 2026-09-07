@@ -480,6 +480,63 @@ the opposite — a javadoc asserting the RMS tracker contract was incomplete whi
 the gate it fed said otherwise — and documentation drifts the same way code
 does, with less to catch it.
 
+### The same thing again, with `MQ_CREDENTIAL_REF`
+
+Writing the credential section of the runbook — both forms, the first-colon
+split, fails-closed once set, the required `env:` prefix — turned up **three**
+problems in the tests that were supposed to hold those claims.
+
+| Test | What was wrong |
+|---|---|
+| `credentialsWithColonInPassword` | Constructs a `Credentials` object and reads its getters back. Never reaches the parse, despite the name. The first-colon rule the runbook now depends on was untested, and `indexOf` → `lastIndexOf` passed clean |
+| `parsesTwoVarFormat` | Read `USER` and `HOME` from the ambient environment and wrapped every assertion in a null check, so on a container without them it asserted **nothing** and passed green |
+| the `env:` prefix warning | Only an inference from two separate tests, never the composition an operator actually hits |
+
+`EnvironmentCredentialProvider` now takes its env lookup as a
+`UnaryOperator<String>` defaulting to `System::getenv`, so the parsing is
+testable without depending on what happens to be exported. The production
+constructor is unchanged.
+
+**A third way for a test to be worthless.** The matrix already records tests
+that pass for the wrong reason and probes that never ran. This adds the
+*vacuous* test: assertions inside a conditional that is false in the
+environment where it matters. It is worse than the other two, because it looks
+like coverage in every report — it runs, it passes, it is counted — while
+asserting nothing at all.
+
+## Published metrics and the names alerts use
+
+`everyMetricTheRunbookAlertsOnIsPublished` lists alert metrics as **exact
+strings**, because an alert rule is written against a string and fails silently
+when the string drifts. That test is the only thing standing between a renamed
+meter and an alert that never fires again.
+
+Both gauges added with the reconciliation work were missing from that list, so
+deleting either registration from `IntakeMicrometerBridge` changed no test
+result:
+
+| Gauge | What its absence hides |
+|---|---|
+| `mq_intake_reconciliation_age_seconds` | landed data has stopped being checked against the audit trail at all |
+| `mq_intake_pending_partitions` | partitions are not clearing; at 512 the oldest is dropped and never re-examined |
+
+Both listed now, both probes caught.
+
+**Two layers, two failure modes.** A gauge can be wired into `BindingMetrics`
+and still never reach Micrometer, or reach Micrometer under a name no alert
+watches. `theAgeIsWiredThroughToTheBindingGauge` holds the first;
+`everyMetricTheRunbookAlertsOnIsPublished` holds the second. A metric needs both
+to be worth anything, and this project has now been bitten at each layer
+separately — the Kerberos supplier nothing wired, and these two registrations
+nothing named.
+
+**`PendingPartitions.size()` is the wiring, and it had no caller.** It
+documented itself as "published for alerting" while nothing published it. It is
+now called at the end of each reconciliation pass rather than read live by the
+gauge: the count only changes during a pass, so end-of-pass is exactly as fresh,
+and a gauge reading it on demand would take the set's monitor and trigger the
+HDFS load behind it — putting cluster I/O on the metrics scrape path.
+
 ## R. Still requires a real environment
 
 Cannot be proven with embedded substitutes; required before production cutover.
