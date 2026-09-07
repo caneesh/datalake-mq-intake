@@ -47,6 +47,7 @@ public final class MqChecks {
                     "source-queue.input", binding.getSourceQueue(), Access.INPUT,
                     "the listener can open the source queue for input"));
             checks.add(depthReadable(binding, connectionId, connections));
+            checks.add(sourceHasWork(binding, connectionId, connections));
             checks.add(queueAccess(binding, connectionId, connections,
                     "tracker-queue.output",
                     binding.getMode() == BindingMode.TRACKED ? binding.getTracker().getQueue() : null,
@@ -120,6 +121,54 @@ public final class MqChecks {
                                 + "lacks the open option this probe used.");
             }
         
+        });
+    }
+
+    /**
+     * Whether there is anything on the source queue to consume.
+     *
+     * <p>Never a failure — an empty queue is a normal state, not a broken
+     * dependency. It is here because "the service is up and consuming
+     * nothing" has two causes needing opposite responses, and no other check
+     * separates them: an empty queue, or a queue with work the service is not
+     * getting. The other mq checks open the source queue for input and prove
+     * authority; none of them looks inside.
+     *
+     * <p>Browses rather than receives, and peeks a single message rather than
+     * counting: non-destructive, safe beside a live legacy consumer, and the
+     * same cost on a queue of ten as on a queue of ten million. The exact
+     * depth is not the question — "is there anything" is.
+     */
+    private static PreflightCheck sourceHasWork(BindingConfig binding, String connectionId,
+                                                MqConnectionProvider connections) {
+        return PreflightCheck.of("mq", binding.getId() + ".source-queue.has-work",
+                "whether the source queue currently holds anything to consume", () -> {
+            String queueName = binding.getSourceQueue();
+            if (queueName == null || queueName.isBlank()) {
+                return CheckOutcome.skip("no source queue configured");
+            }
+            try {
+                Connection connection = connections.getConnection(connectionId);
+                try (Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE)) {
+                    Queue queue = session.createQueue(queueName);
+                    try (QueueBrowser browser = session.createBrowser(queue)) {
+                        boolean any = browser.getEnumeration().hasMoreElements();
+                        if (any) {
+                            return CheckOutcome.pass("'" + queueName + "' has messages waiting — "
+                                    + "if the service is consuming nothing, the messages are not "
+                                    + "reaching it: check whether another consumer is draining "
+                                    + "the queue, and that GET is enabled");
+                        }
+                        return CheckOutcome.pass("'" + queueName + "' is empty — nothing to "
+                                + "consume, so a service reporting zero consumed is correct");
+                    }
+                }
+            } catch (JMSException | RuntimeException e) {
+                return CheckOutcome.fail("could not browse '" + queueName + "'", e,
+                        "Browse authority (MQOO_BROWSE) on the source queue is needed for this "
+                                + "check only; the service itself does not require it, so a "
+                                + "failure here does not stop consumption.");
+            }
         });
     }
 
