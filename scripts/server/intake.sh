@@ -239,9 +239,29 @@ cmd_status() {
     fi
 
     if command -v curl > /dev/null; then
-        local health
-        health=$(curl -s --max-time 5 "$HEALTH_URL" 2>/dev/null || true)
-        if [[ -n "$health" ]]; then
+        # The response has to be identified, not merely counted. On a shared
+        # host something else answers on this port — IBM HTTP Server returned
+        # its own 404 page, and a check that only asked "was the body
+        # non-empty" printed that page under "health:". A dead service behind
+        # a live neighbour would have looked the same, which is the reading
+        # that actually costs something.
+        #
+        # Identified by the payload rather than the status code: actuator
+        # answers 503 with a JSON body when the service is DOWN, and a DOWN
+        # service is still ours and still worth showing.
+        local response code health
+        response=$(curl -s --max-time 5 -w '\n%{http_code}' "$HEALTH_URL" 2>/dev/null || true)
+        code="${response##*$'\n'}"
+        health="${response%$'\n'*}"
+        if [[ "$health" != *'"status"'* ]]; then
+            if [[ -z "$code" || "$code" == "000" ]]; then
+                echo "health  : endpoint not answering at ${HEALTH_URL}"
+            else
+                echo "health  : ${HEALTH_URL} answered HTTP ${code}, but not with actuator health"
+                echo "        : something else holds this port. Set SERVER_PORT in env.sh to a"
+                echo "        : free port — 'ss -lnt' shows what is taken."
+            fi
+        else
             echo "health  : $(echo "$health" | head -c 400)"
             for m in messages_consumed_total messages_written_total \
                      batches_committed_total batches_rolled_back_total \
@@ -252,8 +272,6 @@ cmd_status() {
                     | grep -o '"value":[0-9.E]*' | head -1 | cut -d: -f2 || true)
                 [[ -n "$v" ]] && printf 'metric  : %-32s %s\n' "$m" "$v"
             done
-        else
-            echo "health  : endpoint not answering at ${HEALTH_URL}"
         fi
     fi
 }
