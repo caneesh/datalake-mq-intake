@@ -249,7 +249,7 @@ cmd_config() {
     echo "env file  : ${ENV_FILE}"
     echo "config dir: ${CONFIG_DIR} $([[ ${#CONFIG_ARG[@]} -gt 0 ]] && echo '(in use)' || echo '(empty — using built-in defaults)')"
     echo "java opts : ${JAVA_OPTS}"
-    # Reported, never fatal: status is what an operator runs to find out why
+    # Reported, never fatal: config is what an operator runs to find out why
     # something is wrong, and "there is no usable java" is an answer it should
     # print rather than exit on.
     if resolve_java 2>/dev/null; then
