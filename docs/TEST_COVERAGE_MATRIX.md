@@ -537,6 +537,67 @@ gauge: the count only changes during a pass, so end-of-pass is exactly as fresh,
 and a gauge reading it on demand would take the set's monitor and trigger the
 HDFS load behind it — putting cluster I/O on the metrics scrape path.
 
+## Preflight check metadata
+
+Every preflight check answers three questions before it runs: which group it
+belongs to, what it is called, and what a pass proves. Nothing held any of
+them. Probed before extracting a factory for the fifteen anonymous checks:
+
+| Mutation | Before |
+|---|---|
+| the group of an mq check becomes `hdfs` | **not caught** |
+| the check name loses its binding prefix | **not caught** |
+| `describes()` returns the name instead of the description | **not caught** |
+| the cluster-config check is renamed | caught |
+
+**The group is the one that bites.** `PreflightRunner` filters on exact
+`group()` equality for `--preflight=<group>`, so a group that drifts means the
+check silently does not run under that filter — and the narrowed run still
+reports success. An operator running `preflight mq` would get a clean pass with
+an MQ check that never executed. That is the worst way for a probe of the
+environment to fail: it is the thing you run *because* you do not trust the
+environment yet.
+
+`CheckMetadataContractTest` pins it across all fifteen checks at once rather
+than per check, so a check added later is covered by construction:
+
+| Contract | Test |
+|---|---|
+| every check declares a group the runner filters on | `.everyCheckDeclaresAKnownGroup` |
+| each group contains only its own checks | `.everyGroupContainsOnlyItsOwnChecks` |
+| names are unique, so a report line identifies one check | `.everyCheckNameIsUniqueSoAReportLineIdentifiesOneCheck` |
+| per-binding checks carry their binding in the name | `.aPerBindingCheckCarriesItsBindingInItsName` |
+| `describes()` says something other than the name | `.everyCheckDescribesWhatAPassProvesRatherThanRepeatingItsName` |
+
+The refactor itself replaced fifteen anonymous `AbstractCheck` subclasses —
+four overrides each, three of them `return field;` — with
+`PreflightCheck.of(group, name, describes, () -> {…})`. Net lines were roughly
+break-even; the gain was coupling. `AbstractCheck` lived inside `MqChecks`, so
+`HdfsChecks` and `AppChecks` each referenced the MQ checks class for a base
+class and nothing else. Both are now at zero references to it. Six probes on
+the new shape, all caught.
+
+### What a green suite cannot tell you
+
+Converting the fifteen sites de-indented every lambda body by eight spaces
+where four was right. **All 1017 tests passed.** The behaviour was identical
+and the formatting was wrong throughout, and no amount of mutation probing
+would have said so — probes hold behaviour, which is exactly what a
+mis-indentation does not change.
+
+It was caught by reading the output. Worth stating plainly, because this
+document is largely an argument for measuring rather than trusting: measurement
+covers behaviour, and a mechanical rewrite also needs a human to look at what it
+produced.
+
+**And the tooling needs the same scepticism as the tests.** The first attempt at
+the conversion broke `HdfsChecks`, because the script's brace matcher read the
+apostrophe in a comment — `// Mirrors the application's own rule` — as the start
+of a char literal and swallowed the rest of the file. `MqChecks` and `AppChecks`
+happened to contain no apostrophe inside a converted block, so they converted
+cleanly and hid the bug. Same family as the malformed probes recorded above: a
+tool that reports success is not evidence that it did what you meant.
+
 ## R. Still requires a real environment
 
 Cannot be proven with embedded substitutes; required before production cutover.
