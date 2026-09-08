@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Control-M Job Definitions for MQ Intake Claims
+
+    Import this file into Control-M to create the job definitions.
+    Update the %%VARIABLES to match your environment before import.
+
+    Folder: DATALAKE/MQ_INTAKE/CLAIMS
+-->
+<DEFTABLE>
+    <FOLDER
+        DATACENTER="DEFAULT"
+        FOLDER_NAME="DATALAKE/MQ_INTAKE/CLAIMS"
+        FOLDER_ORDER_METHOD="SYSTEM">
+
+        <!-- ================================================================ -->
+        <!-- OPERATIONS JOBS                                                   -->
+        <!-- ================================================================ -->
+
+        <JOB
+            JOBNAME="CLAIMS_PREFLIGHT"
+            DESCRIPTION="Validate MQ and HDFS connectivity for Claims"
+            NODEID="%%NODEID"
+            CMDLINE="%%APP_BASE_CLAIMS/current/intake.sh preflight"
+            TASKTYPE="Job"
+            RUN_AS="%%RUN_AS"
+            MAXRERUN="0"
+            CONFIRM="N">
+
+            <OUTCOND NAME="CLAIMS_PREFLIGHT-OK" ODATE="ODAT" SIGN="+"/>
+
+            <ON STMT="*" CODE="NOTOK">
+                <DOSHOUT
+                    DEST="%%EMAIL_OPS"
+                    MESSAGE="Claims Preflight FAILED on %%NODEID - check MQ/HDFS connectivity"
+                    URGENCY="U"/>
+            </ON>
+        </JOB>
+
+        <JOB
+            JOBNAME="CLAIMS_START"
+            DESCRIPTION="Start Claims MQ Intake service"
+            NODEID="%%NODEID"
+            CMDLINE="%%APP_BASE_CLAIMS/current/intake.sh start"
+            TASKTYPE="Job"
+            RUN_AS="%%RUN_AS"
+            MAXRERUN="1">
+
+            <INCOND NAME="CLAIMS_PREFLIGHT-OK" ODATE="ODAT" AND_OR="A"/>
+            <OUTCOND NAME="CLAIMS_START-OK" ODATE="ODAT" SIGN="+"/>
+
+            <ON STMT="*" CODE="NOTOK">
+                <DOSHOUT
+                    DEST="%%EMAIL_OPS"
+                    MESSAGE="Claims Start FAILED on %%NODEID"
+                    URGENCY="U"/>
+                <DOCMD CMD="%%CTM_SCRIPTS/create_incident.sh 'CLAIMS_START' 'FAILED' '%%$ORDERID' 'high'"/>
+            </ON>
+        </JOB>
+
+        <JOB
+            JOBNAME="CLAIMS_STOP"
+            DESCRIPTION="Stop Claims MQ Intake service (graceful drain)"
+            NODEID="%%NODEID"
+            CMDLINE="%%APP_BASE_CLAIMS/current/intake.sh stop"
+            TASKTYPE="Job"
+            RUN_AS="%%RUN_AS"
+            MAXRERUN="0">
+        </JOB>
+
+        <JOB
+            JOBNAME="CLAIMS_RESTART"
+            DESCRIPTION="Restart Claims MQ Intake service"
+            NODEID="%%NODEID"
+            CMDLINE="%%APP_BASE_CLAIMS/current/intake.sh stop; sleep 10; %%APP_BASE_CLAIMS/current/intake.sh start"
+            TASKTYPE="Job"
+            RUN_AS="%%RUN_AS"
+            MAXRERUN="1">
+
+            <ON STMT="*" CODE="NOTOK">
+                <DOSHOUT
+                    DEST="%%EMAIL_OPS"
+                    MESSAGE="Claims Restart FAILED on %%NODEID - manual intervention required"
+                    URGENCY="V"/>
+                <DOCMD CMD="%%CTM_SCRIPTS/page_oncall.sh 'CLAIMS_RESTART' 'Claims restart failed on %%NODEID' 'critical'"/>
+            </ON>
+
+            <ON STMT="*" CODE="OK">
+                <DOCMD CMD="%%CTM_SCRIPTS/resolve_incident.sh 'CLAIMS_HEALTH_CHECK'"/>
+            </ON>
+        </JOB>
+
+        <!-- ================================================================ -->
+        <!-- MONITORING JOBS                                                   -->
+        <!-- ================================================================ -->
+
+        <JOB
+            JOBNAME="CLAIMS_HEALTH_CHECK"
+            DESCRIPTION="Check Claims service health via actuator"
+            NODEID="%%NODEID"
+            CMDLINE="%%CTM_SCRIPTS/health_check.sh claims %%SERVER_PORT_CLAIMS"
+            TASKTYPE="Job"
+            RUN_AS="%%RUN_AS"
+            CYCLIC="Y"
+            INTERVAL="00:05"
+            MAXRERUN="0">
+
+            <ON STMT="*" CODE="NOTOK" TIMES="1">
+                <DOSHOUT
+                    DEST="%%EMAIL_OPS"
+                    MESSAGE="Claims Health Check failed (attempt 1) - will attempt restart"
+                    URGENCY="R"/>
+                <DOFORCEJOB FOLDER="DATALAKE/MQ_INTAKE/CLAIMS" JOBNAME="CLAIMS_RESTART"/>
+            </ON>
+
+            <ON STMT="*" CODE="NOTOK" TIMES="2">
+                <DOSHOUT
+                    DEST="%%EMAIL_OPS"
+                    MESSAGE="Claims Health Check failed (attempt 2) - incident created"
+                    URGENCY="U"/>
+                <DOCMD CMD="%%CTM_SCRIPTS/create_incident.sh 'CLAIMS_HEALTH_CHECK' 'FAILED' '%%$ORDERID' 'high'"/>
+            </ON>
+
+            <ON STMT="*" CODE="NOTOK" TIMES="3">
+                <DOSHOUT
+                    DEST="%%EMAIL_MGMT"
+                    MESSAGE="CRITICAL: Claims service down after multiple restart attempts"
+                    URGENCY="V"/>
+                <DOCMD CMD="%%CTM_SCRIPTS/page_oncall.sh 'CLAIMS_HEALTH_CHECK' 'CRITICAL: Claims intake down after 3 failures' 'critical'"/>
+            </ON>
+
+            <ON STMT="*" CODE="OK">
+                <DOCMD CMD="%%CTM_SCRIPTS/resolve_incident.sh 'CLAIMS_HEALTH_CHECK'"/>
+            </ON>
+        </JOB>
+
+        <JOB
+            JOBNAME="CLAIMS_QUEUE_DEPTH"
+            DESCRIPTION="Monitor Claims source queue depth"
+            NODEID="%%NODEID"
+            CMDLINE="%%CTM_SCRIPTS/queue_depth_check.sh claims %%SERVER_PORT_CLAIMS %%QUEUE_DEPTH_WARN %%QUEUE_DEPTH_CRIT"
+            TASKTYPE="Job"
+            RUN_AS="%%RUN_AS"
+            CYCLIC="Y"
+            INTERVAL="00:05"
+            MAXRERUN="0">
+
+            <ON STMT="*" CODE="COMPSTAT" SIGN="GT" VAL="0">
+                <DOSHOUT
+                    DEST="%%EMAIL_OPS"
+                    MESSAGE="Claims Queue Depth Alert - check consumer throughput"
+                    URGENCY="R"/>
+            </ON>
+        </JOB>
+
+        <JOB
+            JOBNAME="CLAIMS_BACKOUT_ALERT"
+            DESCRIPTION="Alert on Claims backout queue messages"
+            NODEID="%%NODEID"
+            CMDLINE="%%CTM_SCRIPTS/backout_alert.sh claims %%SERVER_PORT_CLAIMS"
+            TASKTYPE="Job"
+            RUN_AS="%%RUN_AS"
+            CYCLIC="Y"
+            INTERVAL="00:15"
+            MAXRERUN="0">
+
+            <ON STMT="*" CODE="NOTOK">
+                <DOSHOUT
+                    DEST="%%EMAIL_OPS"
+                    MESSAGE="ALERT: Poison messages in Claims backout queue"
+                    URGENCY="U"/>
+                <DOCMD CMD="%%CTM_SCRIPTS/page_oncall.sh 'CLAIMS_BACKOUT_ALERT' 'Poison messages in Claims backout queue' 'error'"/>
+                <DOCMD CMD="%%CTM_SCRIPTS/create_incident.sh 'CLAIMS_BACKOUT_ALERT' 'POISON_MESSAGES' '%%$ORDERID' 'high'"/>
+            </ON>
+        </JOB>
+
+        <JOB
+            JOBNAME="CLAIMS_METRICS_COLLECT"
+            DESCRIPTION="Collect Claims metrics for trending"
+            NODEID="%%NODEID"
+            CMDLINE="%%CTM_SCRIPTS/metrics_collect.sh claims %%SERVER_PORT_CLAIMS %%CTM_LOG_DIR/claims_metrics.csv"
+            TASKTYPE="Job"
+            RUN_AS="%%RUN_AS"
+            CYCLIC="Y"
+            INTERVAL="01:00"
+            MAXRERUN="0">
+        </JOB>
+
+        <!-- ================================================================ -->
+        <!-- MAINTENANCE JOBS                                                  -->
+        <!-- ================================================================ -->
+
+        <JOB
+            JOBNAME="CLAIMS_LOG_CLEANUP"
+            DESCRIPTION="Clean up Claims log files older than retention period"
+            NODEID="%%NODEID"
+            CMDLINE="%%CTM_SCRIPTS/log_cleanup.sh %%APP_BASE_CLAIMS %%LOG_RETENTION_DAYS"
+            TASKTYPE="Job"
+            RUN_AS="%%RUN_AS"
+            MAXRERUN="0"
+            TIMEFROM="0200"
+            TIMETO="0400">
+
+            <SCHEDTABLE NAME="DAILY"/>
+        </JOB>
+
+        <JOB
+            JOBNAME="CLAIMS_TMP_CLEANUP"
+            DESCRIPTION="Check for stale HDFS temp files"
+            NODEID="%%NODEID"
+            CMDLINE="%%CTM_SCRIPTS/tmp_cleanup.sh %%HDFS_BASE_CLAIMS %%TMP_MAX_AGE_HOURS"
+            TASKTYPE="Job"
+            RUN_AS="%%RUN_AS"
+            MAXRERUN="0"
+            TIMEFROM="0300"
+            TIMETO="0500">
+
+            <SCHEDTABLE NAME="DAILY"/>
+
+            <ON STMT="*" CODE="NOTOK">
+                <DOSHOUT
+                    DEST="%%EMAIL_OPS"
+                    MESSAGE="Stale HDFS temp files found for Claims - review required"
+                    URGENCY="R"/>
+            </ON>
+        </JOB>
+
+    </FOLDER>
+</DEFTABLE>
