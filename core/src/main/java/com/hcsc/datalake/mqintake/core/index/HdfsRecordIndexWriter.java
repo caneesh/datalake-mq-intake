@@ -120,11 +120,15 @@ public class HdfsRecordIndexWriter implements RecordIndexWriter {
      */
     private String basePathOf(RecordIndex index) {
         String partition = index.getPartitionPath();
-        // LAST occurrence: the partition component the writer appended is the
-        // final /year= in the string, so an admin-configured base path that
-        // itself contains "/year=" no longer truncates at the wrong point.
-        int yearMarker = partition.lastIndexOf("/year=");
-        return yearMarker > 0 ? partition.substring(0, yearMarker) : partition;
+        // Numeric partition format: {base}/{YYYY}/{MM}/{DD}/{HH}/{Q}
+        // Find the first /YYYY/ pattern (4 consecutive digits after a slash).
+        // Using regex to locate year component in numeric path format.
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("/\\d{4}/")
+                .matcher(partition);
+        if (m.find()) {
+            return partition.substring(0, m.start());
+        }
+        return partition;
     }
 
     private String headerLine(RecordIndex index) {

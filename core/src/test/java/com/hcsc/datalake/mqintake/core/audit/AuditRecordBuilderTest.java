@@ -44,7 +44,7 @@ class AuditRecordBuilderTest {
         AuditRecordBuilder builder = new AuditRecordBuilder("instance1", FIXED_CLOCK);
 
         BatchWriter.BatchWriteResult writeResult = new BatchWriter.BatchWriteResult(
-                "/data/raw/rms/year=2026/month=08/day=22/hour=10/quarter=2/rms_instance1_1724328000000_1.seq",
+                "/data/raw/rms/2026/08/22/10/2/rms_instance1_1724328000000_1.seq",
                 100,
                 50000
         );
@@ -57,7 +57,7 @@ class AuditRecordBuilderTest {
 
         assertThat(record.getBindingId()).isEqualTo("rms");
         assertThat(record.getPartitionPath())
-                .isEqualTo("/data/raw/rms/year=2026/month=08/day=22/hour=10/quarter=2");
+                .isEqualTo("/data/raw/rms/2026/08/22/10/2");
         assertThat(record.getFilename()).isEqualTo("rms_instance1_1724328000000_1.seq");
         assertThat(record.getRecordCount()).isEqualTo(100);
         assertThat(record.getByteCount()).isEqualTo(50000);

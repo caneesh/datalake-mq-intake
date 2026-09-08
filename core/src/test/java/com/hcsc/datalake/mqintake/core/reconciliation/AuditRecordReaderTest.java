@@ -55,13 +55,13 @@ class AuditRecordReaderTest {
 
     @Test
     void readsBackWhatTheEmitterWrote() throws Exception {
-        emitter.emit(record("rms_a_1.seq", "/data/raw/rms/year=2026", 42));
+        emitter.emit(record("rms_a_1.seq", "/data/raw/rms/2026", 42));
 
         List<AuditRecordReader.ParsedAuditRecord> records = records("rms", DATE);
 
         assertThat(records).hasSize(1);
         assertThat(records.get(0).getFilename()).isEqualTo("rms_a_1.seq");
-        assertThat(records.get(0).getPartitionPath()).isEqualTo("/data/raw/rms/year=2026");
+        assertThat(records.get(0).getPartitionPath()).isEqualTo("/data/raw/rms/2026");
         assertThat(records.get(0).getRecordCount()).isEqualTo(42);
     }
 

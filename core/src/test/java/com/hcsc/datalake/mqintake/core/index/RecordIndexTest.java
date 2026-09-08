@@ -32,7 +32,7 @@ class RecordIndexTest {
         conf.set("fs.defaultFS", "file:///");
         fileSystem = FileSystem.get(conf);
         root = "/tmp/record-index-test-" + System.nanoTime();
-        partition = root + "/year=2026/month=08/day=25/hour=10/quarter=2";
+        partition = root + "/2026/08/25/10/2";
         fileSystem.mkdirs(new Path(partition));
         writer = new HdfsRecordIndexWriter(fileSystem, "test-instance");
         reader = new RecordIndexReader(fileSystem);

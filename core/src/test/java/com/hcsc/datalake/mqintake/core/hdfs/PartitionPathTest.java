@@ -15,6 +15,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * - A pure function of (base_path, instant)
  * - Correct across hour and quarter boundaries
  * - Using UTC time
+ * - Numeric format matching legacy MDB paths
  */
 class PartitionPathTest {
 
@@ -25,7 +26,7 @@ class PartitionPathTest {
 
         String path = PartitionPath.compute("/data/raw/rms", instant);
 
-        assertThat(path).isEqualTo("/data/raw/rms/year=2025/month=08/day=22/hour=14/quarter=1");
+        assertThat(path).isEqualTo("/data/raw/rms/2025/08/22/14/1");
     }
 
     @Test
@@ -34,9 +35,9 @@ class PartitionPathTest {
         Instant minute14 = ZonedDateTime.of(2025, 8, 22, 10, 14, 59, 0, ZoneOffset.UTC).toInstant();
 
         assertThat(PartitionPath.compute("/base", minute0))
-                .endsWith("hour=10/quarter=0");
+                .endsWith("10/0");
         assertThat(PartitionPath.compute("/base", minute14))
-                .endsWith("hour=10/quarter=0");
+                .endsWith("10/0");
     }
 
     @Test
@@ -45,9 +46,9 @@ class PartitionPathTest {
         Instant minute29 = ZonedDateTime.of(2025, 8, 22, 10, 29, 59, 0, ZoneOffset.UTC).toInstant();
 
         assertThat(PartitionPath.compute("/base", minute15))
-                .endsWith("hour=10/quarter=1");
+                .endsWith("10/1");
         assertThat(PartitionPath.compute("/base", minute29))
-                .endsWith("hour=10/quarter=1");
+                .endsWith("10/1");
     }
 
     @Test
@@ -56,9 +57,9 @@ class PartitionPathTest {
         Instant minute44 = ZonedDateTime.of(2025, 8, 22, 10, 44, 59, 0, ZoneOffset.UTC).toInstant();
 
         assertThat(PartitionPath.compute("/base", minute30))
-                .endsWith("hour=10/quarter=2");
+                .endsWith("10/2");
         assertThat(PartitionPath.compute("/base", minute44))
-                .endsWith("hour=10/quarter=2");
+                .endsWith("10/2");
     }
 
     @Test
@@ -67,9 +68,9 @@ class PartitionPathTest {
         Instant minute59 = ZonedDateTime.of(2025, 8, 22, 10, 59, 59, 0, ZoneOffset.UTC).toInstant();
 
         assertThat(PartitionPath.compute("/base", minute45))
-                .endsWith("hour=10/quarter=3");
+                .endsWith("10/3");
         assertThat(PartitionPath.compute("/base", minute59))
-                .endsWith("hour=10/quarter=3");
+                .endsWith("10/3");
     }
 
     @Test
@@ -82,8 +83,8 @@ class PartitionPathTest {
         String pathBefore = PartitionPath.compute("/base", beforeBoundary);
         String pathAfter = PartitionPath.compute("/base", afterBoundary);
 
-        assertThat(pathBefore).endsWith("hour=10/quarter=0");
-        assertThat(pathAfter).endsWith("hour=10/quarter=1");
+        assertThat(pathBefore).endsWith("10/0");
+        assertThat(pathAfter).endsWith("10/1");
         assertThat(pathBefore).isNotEqualTo(pathAfter);
     }
 
@@ -97,8 +98,8 @@ class PartitionPathTest {
         String pathBefore = PartitionPath.compute("/base", beforeBoundary);
         String pathAfter = PartitionPath.compute("/base", afterBoundary);
 
-        assertThat(pathBefore).endsWith("hour=10/quarter=3");
-        assertThat(pathAfter).endsWith("hour=11/quarter=0");
+        assertThat(pathBefore).endsWith("10/3");
+        assertThat(pathAfter).endsWith("11/0");
         assertThat(pathBefore).isNotEqualTo(pathAfter);
     }
 
@@ -112,8 +113,8 @@ class PartitionPathTest {
         String pathBefore = PartitionPath.compute("/base", beforeBoundary);
         String pathAfter = PartitionPath.compute("/base", afterBoundary);
 
-        assertThat(pathBefore).contains("day=22").endsWith("hour=23/quarter=3");
-        assertThat(pathAfter).contains("day=23").endsWith("hour=00/quarter=0");
+        assertThat(pathBefore).contains("/22/").endsWith("23/3");
+        assertThat(pathAfter).contains("/23/").endsWith("00/0");
     }
 
     @Test
@@ -125,7 +126,7 @@ class PartitionPathTest {
         String path = PartitionPath.compute("/base", instant);
 
         // Should be hour=02, quarter=2 in UTC
-        assertThat(path).endsWith("hour=02/quarter=2");
+        assertThat(path).endsWith("02/2");
     }
 
     @Test
@@ -177,22 +178,22 @@ class PartitionPathTest {
 
     @Test
     void designDocExample_0420_isQuarter1() {
-        // From §7: "04:20 UTC → hour=04/quarter=1"
+        // From §7: "04:20 UTC → 04/1"
         Instant instant = ZonedDateTime.of(2025, 8, 22, 4, 20, 0, 0, ZoneOffset.UTC).toInstant();
 
         String path = PartitionPath.compute("/base", instant);
 
-        assertThat(path).endsWith("hour=04/quarter=1");
+        assertThat(path).endsWith("04/1");
     }
 
     @Test
     void designDocExample_0447_isQuarter3() {
-        // From §7: "04:47 UTC → hour=04/quarter=3"
+        // From §7: "04:47 UTC → 04/3"
         Instant instant = ZonedDateTime.of(2025, 8, 22, 4, 47, 0, 0, ZoneOffset.UTC).toInstant();
 
         String path = PartitionPath.compute("/base", instant);
 
-        assertThat(path).endsWith("hour=04/quarter=3");
+        assertThat(path).endsWith("04/3");
     }
 
     // --- windowId must agree with compute() ---

@@ -319,7 +319,7 @@ class AbcBalanceCheckTest {
         @Override
         public BatchWriteResult write(String bindingId, List<Message> messages) {
             int observed = messages.size() - shortfall;
-            return new BatchWriteResult("/fake/year=2026/rms_abc_1.seq", observed, 1_000);
+            return new BatchWriteResult("/fake/2026/rms_abc_1.seq", observed, 1_000);
         }
     }
 
@@ -389,7 +389,7 @@ class AbcBalanceCheckTest {
                          List<Message> messages, int backoutCount, int consumedCount) {
             AuditRecord.Builder builder = AuditRecord.builder()
                     .bindingId(bindingId)
-                    .partitionPath("/fake/year=2026")
+                    .partitionPath("/fake/2026")
                     .filename("rms_abc_1.seq")
                     .recordCount(writeResult.getRecordCount())
                     .byteCount(writeResult.getByteCount())

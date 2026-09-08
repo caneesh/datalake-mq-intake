@@ -14,10 +14,11 @@ import java.time.ZonedDateTime;
  * <p>A cached path is the confirmed root cause of production problem #3:
  * files landing in a partition ~87 minutes stale.
  *
- * <p>Path format: {base}/year={YYYY}/month={MM}/day={DD}/hour={HH}/quarter={Q}/
+ * <p>Path format: {base}/{YYYY}/{MM}/{DD}/{HH}/{Q}
  * <ul>
  *   <li>All components derived from UTC</li>
  *   <li>Quarter = minute / 15 (integer division): 0-14→0, 15-29→1, 30-44→2, 45-59→3</li>
+ *   <li>Numeric format matches legacy MDB paths for migration compatibility</li>
  * </ul>
  */
 public final class PartitionPath {
@@ -72,7 +73,7 @@ public final class PartitionPath {
         int hour = utc.getHour();
         int quarter = utc.getMinute() / 15;
 
-        return String.format("%s/year=%04d/month=%02d/day=%02d/hour=%02d/quarter=%d",
+        return String.format("%s/%04d/%02d/%02d/%02d/%d",
                 normalizeBasePath(basePath), year, month, day, hour, quarter);
     }
 

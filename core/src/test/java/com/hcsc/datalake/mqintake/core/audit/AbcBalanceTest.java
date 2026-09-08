@@ -135,7 +135,7 @@ class AbcBalanceTest {
     private AuditRecord record(int recordCount, int backoutCount) {
         return AuditRecord.builder()
                 .bindingId("rms")
-                .partitionPath("/data/raw/rms/year=2026/month=08/day=26/hour=10/quarter=1")
+                .partitionPath("/data/raw/rms/2026/08/26/10/1")
                 .filename("rms_abc_1_" + recordCount + "_" + backoutCount + ".seq")
                 .recordCount(recordCount)
                 .byteCount(recordCount * 100L)

@@ -165,7 +165,7 @@ class HdfsAuditRecordEmitterTest {
         // would have written 9 and balanced perfectly, hiding the loss.
         AuditRecord record = AuditRecord.builder()
                 .bindingId("rms")
-                .partitionPath("/data/raw/rms/year=2026/month=08/day=27")
+                .partitionPath("/data/raw/rms/2026/08/27")
                 .filename("rms_inst1_1_1.seq")
                 .recordCount(8)
                 .byteCount(1000)
@@ -191,7 +191,7 @@ class HdfsAuditRecordEmitterTest {
         // derives it, and its balance is then true by construction.
         AuditRecord record = AuditRecord.builder()
                 .bindingId("rms")
-                .partitionPath("/data/raw/rms/year=2026/month=08/day=27")
+                .partitionPath("/data/raw/rms/2026/08/27")
                 .filename("rms_inst1_2_1.seq")
                 .recordCount(5)
                 .byteCount(500)
@@ -212,7 +212,7 @@ class HdfsAuditRecordEmitterTest {
     void emitsAuditRecordAsJson() throws Exception {
         AuditRecord record = AuditRecord.builder()
                 .bindingId("rms")
-                .partitionPath("/data/raw/rms/year=2026/month=08/day=22")
+                .partitionPath("/data/raw/rms/2026/08/22")
                 .filename("rms_inst1_123456_1.seq")
                 .recordCount(100)
                 .byteCount(50000)
@@ -232,7 +232,7 @@ class HdfsAuditRecordEmitterTest {
 
         String json = lines.get(0);
         assertThat(json).contains("\"binding_id\":\"rms\"");
-        assertThat(json).contains("\"partition_path\":\"/data/raw/rms/year=2026/month=08/day=22\"");
+        assertThat(json).contains("\"partition_path\":\"/data/raw/rms/2026/08/22\"");
         assertThat(json).contains("\"filename\":\"rms_inst1_123456_1.seq\"");
         assertThat(json).contains("\"record_count\":100");
         assertThat(json).contains("\"byte_count\":50000");

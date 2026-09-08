@@ -17,7 +17,7 @@ class AuditRecordTest {
 
         AuditRecord record = AuditRecord.builder()
                 .bindingId("rms")
-                .partitionPath("/data/raw/rms/year=2026/month=08/day=22/hour=10/quarter=2")
+                .partitionPath("/data/raw/rms/2026/08/22/10/2")
                 .filename("rms_instance1_1724328000000_1.seq")
                 .recordCount(4000)
                 .byteCount(1048576)
@@ -28,7 +28,7 @@ class AuditRecordTest {
                 .build();
 
         assertThat(record.getBindingId()).isEqualTo("rms");
-        assertThat(record.getPartitionPath()).isEqualTo("/data/raw/rms/year=2026/month=08/day=22/hour=10/quarter=2");
+        assertThat(record.getPartitionPath()).isEqualTo("/data/raw/rms/2026/08/22/10/2");
         assertThat(record.getFilename()).isEqualTo("rms_instance1_1724328000000_1.seq");
         assertThat(record.getRecordCount()).isEqualTo(4000);
         assertThat(record.getByteCount()).isEqualTo(1048576);
@@ -42,7 +42,7 @@ class AuditRecordTest {
     void computesFullFilePath() {
         AuditRecord record = AuditRecord.builder()
                 .bindingId("rms")
-                .partitionPath("/data/raw/rms/year=2026/month=08")
+                .partitionPath("/data/raw/rms/2026/08")
                 .filename("test.seq")
                 .recordCount(1)
                 .byteCount(100)
@@ -50,7 +50,7 @@ class AuditRecordTest {
                 .commitTimestamp(Instant.now())
                 .build();
 
-        assertThat(record.getFilePath()).isEqualTo("/data/raw/rms/year=2026/month=08/test.seq");
+        assertThat(record.getFilePath()).isEqualTo("/data/raw/rms/2026/08/test.seq");
     }
 
     @Test

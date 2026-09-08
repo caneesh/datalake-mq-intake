@@ -76,20 +76,20 @@ class SequenceFileBatchWriterTest {
         String basePath = tempDir.resolve("data").toString();
         SequenceFileBatchWriter writer = createWriter(basePath, clock);
 
-        // First batch at 10:10 -> quarter=0
+        // First batch at 10:10 -> /0
         List<Message> batch1 = createMessages(3);
         BatchWriter.BatchWriteResult result1 = writer.write("test-binding", batch1);
 
-        assertThat(result1.getFilePath()).contains("hour=10/quarter=0");
+        assertThat(result1.getFilePath()).contains("10/0");
 
-        // Advance time to 10:20 -> quarter=1
+        // Advance time to 10:20 -> /1
         clock.set(ZonedDateTime.of(2025, 8, 22, 10, 20, 0, 0, ZoneOffset.UTC).toInstant());
 
         // Second batch should land in NEW partition
         List<Message> batch2 = createMessages(3);
         BatchWriter.BatchWriteResult result2 = writer.write("test-binding", batch2);
 
-        assertThat(result2.getFilePath()).contains("hour=10/quarter=1");
+        assertThat(result2.getFilePath()).contains("10/1");
         assertThat(result1.getFilePath()).isNotEqualTo(result2.getFilePath());
     }
 
@@ -111,13 +111,13 @@ class SequenceFileBatchWriterTest {
         String basePath = tempDir.resolve("data").toString();
         SequenceFileBatchWriter writer = createWriter(basePath, clock);
 
-        // Messages that all arrived in 10:00-10:14 (quarter=0), flushed half a
+        // Messages that all arrived in 10:00-10:14 (/0), flushed half a
         // second after that window closed.
         BatchWriter.BatchWriteResult result = writer.write("test-binding", createMessages(3));
 
         assertThat(result.getFilePath())
                 .as("filed forward, into the window that is still open")
-                .contains("hour=10/quarter=1");
+                .contains("10/1");
         assertThat(fileSystem.exists(new Path(result.getFilePath()))).isTrue();
     }
 
@@ -133,15 +133,15 @@ class SequenceFileBatchWriterTest {
         List<Message> batch1 = createMessages(2);
         BatchWriter.BatchWriteResult result1 = writer.write("binding", batch1);
 
-        assertThat(result1.getFilePath()).contains("hour=10/quarter=3");
+        assertThat(result1.getFilePath()).contains("10/3");
 
-        // Advance to 11:05 -> hour=11, quarter=0
+        // Advance to 11:05 -> hour=11, /0
         clock.set(ZonedDateTime.of(2025, 8, 22, 11, 5, 0, 0, ZoneOffset.UTC).toInstant());
 
         List<Message> batch2 = createMessages(2);
         BatchWriter.BatchWriteResult result2 = writer.write("binding", batch2);
 
-        assertThat(result2.getFilePath()).contains("hour=11/quarter=0");
+        assertThat(result2.getFilePath()).contains("11/0");
     }
 
     @Test
@@ -152,25 +152,25 @@ class SequenceFileBatchWriterTest {
         String basePath = tempDir.resolve("data").toString();
         SequenceFileBatchWriter writer = createWriter(basePath, clock);
 
-        // Batch at 10:14 -> quarter=0
+        // Batch at 10:14 -> /0
         List<Message> batch1 = createMessages(2);
         BatchWriter.BatchWriteResult result1 = writer.write("binding", batch1);
 
-        assertThat(result1.getFilePath()).contains("quarter=0");
+        assertThat(result1.getFilePath()).contains("/0");
 
-        // Advance to 10:16 -> quarter=1
+        // Advance to 10:16 -> /1
         clock.set(ZonedDateTime.of(2025, 8, 22, 10, 16, 0, 0, ZoneOffset.UTC).toInstant());
 
         List<Message> batch2 = createMessages(2);
         BatchWriter.BatchWriteResult result2 = writer.write("binding", batch2);
 
-        assertThat(result2.getFilePath()).contains("quarter=1");
+        assertThat(result2.getFilePath()).contains("/1");
     }
 
     @Test
     void batchSpanningBoundaryLandsInFlushTimePartition() throws Exception {
         // A batch that STARTS at 10:14 but FLUSHES at 10:16
-        // should land in the 10:16 partition (quarter=1), not the 10:14 partition (quarter=0)
+        // should land in the 10:16 partition (/1), not the 10:14 partition (/0)
         TestClock clock = new TestClock(
                 ZonedDateTime.of(2025, 8, 22, 10, 16, 0, 0, ZoneOffset.UTC).toInstant());
 
@@ -180,10 +180,10 @@ class SequenceFileBatchWriterTest {
         // Messages might have been received at 10:14, but flush happens at 10:16
         List<Message> batch = createMessages(5);
 
-        // Flush time is 10:16 -> quarter=1
+        // Flush time is 10:16 -> /1
         BatchWriter.BatchWriteResult result = writer.write("binding", batch);
 
-        assertThat(result.getFilePath()).contains("hour=10/quarter=1");
+        assertThat(result.getFilePath()).contains("10/1");
     }
 
     // NOTE: a test named fileWrittenToTmpBeforeRename used to live here. It

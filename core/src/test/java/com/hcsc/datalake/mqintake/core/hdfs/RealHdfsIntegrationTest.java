@@ -148,7 +148,8 @@ class RealHdfsIntegrationTest {
 
         Path landed = new Path(result.getFilePath());
         assertThat(fs.exists(landed)).isTrue();
-        assertThat(landed.toString()).contains("/year=").contains("/quarter=");
+        // Numeric partition format: /YYYY/MM/DD/HH/Q
+        assertThat(landed.toString()).matches(".*\\d{4}/\\d{2}/\\d{2}/\\d{2}/\\d.*");
 
         // Nothing left behind in staging
         Path tmp = new Path(PartitionPath.tempDir(BASE + "/rename", "it-instance"));
