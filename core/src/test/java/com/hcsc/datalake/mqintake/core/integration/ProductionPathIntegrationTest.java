@@ -239,7 +239,7 @@ class ProductionPathIntegrationTest {
         // nothing is lost.
         List<String> seqFiles = new ArrayList<>();
         for (String f : listFilesRecursive(config.getHdfs().getBasePath())) {
-            if (f.endsWith(".seq") && !f.contains("/_tmp/")) seqFiles.add(f);
+            if (isDataFile(f) && !f.contains("/_tmp/")) seqFiles.add(f);
         }
         assertThat(seqFiles.size()).isGreaterThanOrEqualTo(2);
 
@@ -427,7 +427,7 @@ class ProductionPathIntegrationTest {
         Set<String> identities = new HashSet<>();
         for (String file : listFilesRecursive(config.getHdfs().getBasePath())) {
             // Only renamed (visible) files count as landed — never in-progress _tmp
-            if (file.endsWith(".seq") && !file.contains("/_tmp/")) {
+            if (isDataFile(file) && !file.contains("/_tmp/")) {
                 try {
                     identities.addAll(identityReader.extractIdentities(file));
                 } catch (Exception e) {
@@ -436,6 +436,17 @@ class ProductionPathIntegrationTest {
             }
         }
         return identities;
+    }
+
+    /** Returns true if the path is a data file (not an index, audit, or metadata file). */
+    private boolean isDataFile(String path) {
+        String filename = path.substring(path.lastIndexOf('/') + 1);
+        // Exclude known non-data file patterns
+        if (filename.endsWith(".json") || filename.endsWith(".jsonl") ||
+            filename.startsWith("_") || filename.startsWith(".")) {
+            return false;
+        }
+        return true;
     }
 
     private List<String> listFiles(String dir) throws Exception {

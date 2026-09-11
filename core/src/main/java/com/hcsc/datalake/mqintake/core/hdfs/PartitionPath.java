@@ -95,10 +95,10 @@ public final class PartitionPath {
      * @param instanceId the unique instance identifier
      * @param epochMs    the timestamp in epoch milliseconds
      * @param batchSeq   the batch sequence number for this instance
-     * @return filename: {binding_id}_{instance_id}_{epoch_millis}_{batch_seq}.seq
+     * @return filename: {binding_id}_{instance_id}_{epoch_millis}_{batch_seq} (no extension, matching legacy MDB)
      */
     public static String filename(String bindingId, String instanceId, long epochMs, long batchSeq) {
-        return String.format("%s_%s_%d_%d.seq", bindingId, instanceId, epochMs, batchSeq);
+        return String.format("%s_%s_%d_%d", bindingId, instanceId, epochMs, batchSeq);
     }
 
     /**

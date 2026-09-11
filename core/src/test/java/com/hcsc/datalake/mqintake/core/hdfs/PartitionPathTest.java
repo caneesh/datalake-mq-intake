@@ -151,8 +151,9 @@ class PartitionPathTest {
     void filenameIncludesAllComponents() {
         String filename = PartitionPath.filename("rms", "instance-1", 1692700000000L, 42);
 
-        assertThat(filename).isEqualTo("rms_instance-1_1692700000000_42.seq");
-        assertThat(filename).endsWith(".seq");
+        // No extension - matches legacy MDB format
+        assertThat(filename).isEqualTo("rms_instance-1_1692700000000_42");
+        assertThat(filename).doesNotContain(".");
     }
 
     @Test

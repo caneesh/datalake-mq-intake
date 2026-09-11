@@ -329,7 +329,7 @@ class SequenceFileBatchWriterTest {
 
         Path partition = new Path(PartitionPath.compute(basePath, clock.instant()));
         org.apache.hadoop.fs.FileStatus[] files = fileSystem.listStatus(partition,
-                path -> path.getName().endsWith(".seq"));
+                path -> !path.getName().startsWith("_") && !path.getName().endsWith(".json"));
         assertThat(files)
                 .as("every batch lands as its own distinctly named file")
                 .hasSize(threads * batchesPerThread);
@@ -383,10 +383,10 @@ class SequenceFileBatchWriterTest {
         List<Message> batch = createMessages(2);
         BatchWriter.BatchWriteResult result = writer.write("my-binding", batch);
 
-        // Filename should be: {binding_id}_{instance_id}_{epoch_millis}_{batch_seq}.seq
+        // Filename should be: {binding_id}_{instance_id}_{epoch_millis}_{batch_seq} (no extension)
         String filename = new Path(result.getFilePath()).getName();
         assertThat(filename).startsWith("my-binding_my-instance_");
-        assertThat(filename).endsWith(".seq");
+        assertThat(filename).doesNotContain(".");  // no extension
         assertThat(filename).contains("1692700000000");
     }
 
