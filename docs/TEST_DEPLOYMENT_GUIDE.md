@@ -135,6 +135,25 @@ Four things to get right:
 
 **Point `HDFS_CONFIG_RESOURCES` at the cluster configuration** — normally `/etc/hadoop/conf`, or the `core-site.xml` and `hdfs-site.xml` files themselves. Hadoop looks for those files on the *classpath*, and a jar started with `java -jar` has only itself on the classpath, so without this the service never finds the cluster: `fs.defaultFS` falls back to `file:///` and every batch lands on **this server's local disk**, successfully and silently. Production mode now refuses to start in that state, and preflight fails `filesystem.connect` rather than certifying the wrong destination — but the value still has to be right.
 
+### CyberArk Conjur for secrets (optional)
+
+Instead of embedding MQ credentials in `env.sh`, you can fetch them from CyberArk Conjur at startup. Uncomment and configure the Conjur section in `env.sh`:
+
+```bash
+export CONJUR_APPLIANCE_URL=https://conjur.company.com
+export CONJUR_ACCOUNT=company
+export CONJUR_AUTHN_LOGIN=host/mq-intake/rms
+export CONJUR_MQ_SECRET_PATH=apps/mq-intake/rms/mq
+```
+
+The `fetch_secrets.sh` script runs automatically when sourced from `env.sh`. It fetches `username` and `password` from the configured path and exports them as `IBM_MQ_USER` and `IBM_MQ_PASSWORD`.
+
+To test the integration locally without a real Conjur server:
+
+```bash
+./scripts/server/test/test_conjur_integration.sh
+```
+
 ### When you need more than environment variables
 
 `env.sh` covers the environment-specific values. To change **behaviour** — batch size, thresholds, listener threads — drop a YAML file in `config/`, which the control script passes to Spring automatically:
@@ -221,7 +240,7 @@ metric  : backout_queue_depth              0.0
 Then confirm data actually landed:
 
 ```bash
-hdfs dfs -ls -R $HDFS_BASE_PATH | grep '\.seq$'
+hdfs dfs -ls -R $HDFS_BASE_PATH | head -20
 hdfs dfs -cat $HDFS_AUDIT_BASE_PATH/rms/$(date -u +%Y%m%d)/audit_*.json | python3 -m json.tool
 ```
 
@@ -229,7 +248,21 @@ The audit record should read `"balance_status": "BALANCED"` with `consumed_count
 
 > **A handful of test messages will not appear immediately.** Production settings flush a batch on size (1000), on bytes, or at the quarter-hour partition boundary — so a dozen messages sit in the in-flight batch until the boundary passes. They are already consumed (the source queue shows depth 0) and they are not lost: a graceful `stop` drains them to disk immediately, which is a good way to see the whole path work in one minute. For sustained functional testing, use the test overlay in the test plan (`batch.size: 10`, `interval-ms: 5000`) via a `config/application.yml` with the complete binding block.
 
-## 7 — Upgrade and roll back
+## 7 — Control-M integration (optional)
+
+For scheduler-driven operation, use the Control-M wrapper script instead of calling `intake.sh` directly:
+
+```bash
+./current/ctm_run.sh start      # start via Control-M job
+./current/ctm_run.sh stop       # stop via Control-M job
+./current/ctm_run.sh status     # check status (exit 0 = running)
+./current/ctm_run.sh preflight  # validate before consuming
+./current/ctm_run.sh health     # health check for monitoring
+```
+
+The wrapper auto-detects the deployment path (no hardcoded node IDs), sources `env.sh`, and provides Control-M-friendly exit codes. See [Control-M setup](CONTROLM_SETUP.md) for job definitions.
+
+## 8 — Upgrade and roll back
 
 Upgrading is deploy, stop, start:
 
@@ -251,7 +284,7 @@ ln -sfn releases/<previous-stamp> current
 
 **Rollback is always message-safe.** Anything unprocessed simply queues on MQ; landed files stay landed and audited. There is no data migration in either direction.
 
-## 8 — Where things are
+## 9 — Where things are
 
 | | |
 |---|---|
@@ -263,7 +296,7 @@ ln -sfn releases/<previous-stamp> current
 | `~/mq-intake/run/intake.pid` | pid of the running instance |
 | `dist/` (build machine) | bundles produced by `scripts/bundle.sh`, with `.sha256` sidecars |
 
-## 9 — Troubleshooting
+## 10 — Troubleshooting
 
 | Symptom | Cause |
 |---|---|
@@ -272,8 +305,8 @@ ln -sfn releases/<previous-stamp> current
 | Preflight `MQRC 2035` on the connection | credential reference empty or wrong; check `MQ_CREDENTIAL_REF` and that `MQ_USER`/`MQ_PASSWORD` are exported |
 | Preflight `MQRC 2085` on a queue | the queue is not on the queue manager this connection reached — commonly a sibling QM in a pair |
 | Preflight `MQRC 2035` on a queue but not the connection | connected fine, but the account lacks the open option; on MQ, an authority profile's `*` matches one qualifier, so `MQ.ABC.*` does **not** cover `MQ.ABC.DEF.IN` — use `**` |
-| Started, but no `.seq` files | fewer than `batch.size` messages and the partition boundary has not passed (see §6) |
-| `status` shows health not answering | the process is still starting, or `SERVER_PORT` differs from the default 8080 — set `HEALTH_URL`/`METRICS_URL` in `env.sh` |
+| Started, but no data files | fewer than `batch.size` messages and the partition boundary has not passed (see §6) |
+| `status` shows health not answering | the process is still starting, or `SERVER_PORT` differs from the default (8081 for RMS, 8099 for Claims) — set `HEALTH_URL`/`METRICS_URL` in `env.sh` |
 | Service exits immediately | read `logs/current.log`; a startup gate names the exact cause on its first ERROR line |
 | `status` shows `jar_verified=NO` | the jar on disk is not the one deployed — a partial copy or a hand edit; redeploy |
 | Release shows `source=no-vcs` | expected on a build machine without git; add a `VERSION` file (§2) if you want a human-readable stamp |
