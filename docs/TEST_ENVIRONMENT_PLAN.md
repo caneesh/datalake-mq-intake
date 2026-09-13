@@ -430,7 +430,7 @@ Kill the network path, not the session: drop the connection with a firewall rule
 
 ## Part 6 — Load and throughput
 
-**Restore production config first** (`batch.size: 4000`, `batch.interval-ms: 0`, 4 listener threads) and restart.
+**Restore production config first** (RMS `batch.size: 1000`; claims `batch.size: 8000`; both `batch.bytes: 134217728`, `batch.interval-ms: 0`, 4 listener threads) and restart.
 
 **Steps:** drive a representative production volume — ideally a full peak-hour replay; at minimum several hundred thousand messages sustained.
 
@@ -448,7 +448,7 @@ curl -s localhost:8080/actuator/metrics/jvm.memory.used | python3 -m json.tool
 - [ ] Heap stable across the run — no upward trend, no `OutOfMemoryError` (watch against the 512 MB raw batch budget × payload-copy multiplier)
 - [ ] `mq_intake_flush_latency_seconds` steady; no growth over time
 - [ ] `mq_intake_balance_check_failures_total` = **0** for the entire run
-- [ ] `mq_intake_rollbacks_total` = 0 (or explained)
+- [ ] `mq_intake_batches_rolled_back_total` = 0 (or explained)
 - [ ] Total records landed = total messages sent (sum `record_count` across audit records)
 - [ ] File sizes and counts sane — no partition full of tiny files
 

@@ -1,0 +1,216 @@
+{
+  "date": "2026-09-13",
+  "applicationRevision": "951d171",
+  "targetMessagesPerMinute": 1000,
+  "testPayloadBytes": 614400,
+  "results": [
+    {
+      "binding": "rms",
+      "filesystem": "hdfs",
+      "hdfsReplication": 3,
+      "broker": "embedded ActiveMQ, nonpersistent, VM transport, prefetch=0",
+      "payloadBytes": 614400,
+      "listeners": 4,
+      "offeredMessagesPerSecond": 0.0,
+      "producerSeconds": 0.70542211,
+      "messages": 1200,
+      "elapsedSecondsIncludingShutdownDrain": 22.850252927,
+      "messagesPerSecond": 52.515830080028245,
+      "rawMiBPerSecond": 30.77099418751655,
+      "committedBeforeShutdownDrain": 876,
+      "files": 7,
+      "fileBytes": 554556762,
+      "meanFlushMs": 11653.798774,
+      "rollbacks": 0,
+      "verifiedRecords": 1200,
+      "verifiedTrackerRecords": 1200,
+      "verifiedAuditRecords": 1200,
+      "logFile": "target/throughput/run-VV5b7y.log"
+    },
+    {
+      "binding": "claims",
+      "filesystem": "hdfs",
+      "hdfsReplication": 3,
+      "broker": "embedded ActiveMQ, nonpersistent, VM transport, prefetch=0",
+      "payloadBytes": 614400,
+      "listeners": 4,
+      "offeredMessagesPerSecond": 0.0,
+      "producerSeconds": 0.687581776,
+      "messages": 1200,
+      "elapsedSecondsIncludingShutdownDrain": 29.906929624,
+      "messagesPerSecond": 40.12448001472583,
+      "rawMiBPerSecond": 23.510437508628417,
+      "committedBeforeShutdownDrain": 1095,
+      "files": 8,
+      "fileBytes": 554556982,
+      "meanFlushMs": 10729.924427,
+      "rollbacks": 0,
+      "verifiedRecords": 1200,
+      "verifiedTrackerRecords": 0,
+      "verifiedAuditRecords": 1200,
+      "logFile": "target/throughput/run-jkmMW5.log"
+    },
+    {
+      "binding": "rms",
+      "filesystem": "hdfs",
+      "hdfsReplication": 3,
+      "broker": "embedded ActiveMQ, nonpersistent, VM transport, prefetch=0",
+      "payloadBytes": 614400,
+      "listeners": 4,
+      "offeredMessagesPerSecond": 16.6666666667,
+      "producerSeconds": 119.943004963,
+      "messages": 2000,
+      "elapsedSecondsIncludingShutdownDrain": 132.336387956,
+      "messagesPerSecond": 15.113001275695781,
+      "rawMiBPerSecond": 8.855274184977997,
+      "committedBeforeShutdownDrain": 1971,
+      "files": 10,
+      "fileBytes": 924261090,
+      "meanFlushMs": 13923.375509,
+      "rollbacks": 0,
+      "verifiedRecords": 2000,
+      "verifiedTrackerRecords": 2000,
+      "verifiedAuditRecords": 2000,
+      "samples": [
+        {
+          "seconds": 14.940934714,
+          "sent": 250,
+          "committed": 0,
+          "sourceOutstandingIncludingUncommitted": 250,
+          "heapUsedMiBIncludingBrokerAndHdfs": 508
+        },
+        {
+          "seconds": 29.940345734,
+          "sent": 500,
+          "committed": 0,
+          "sourceOutstandingIncludingUncommitted": 500,
+          "heapUsedMiBIncludingBrokerAndHdfs": 730
+        },
+        {
+          "seconds": 44.9401357,
+          "sent": 750,
+          "committed": 0,
+          "sourceOutstandingIncludingUncommitted": 750,
+          "heapUsedMiBIncludingBrokerAndHdfs": 951
+        },
+        {
+          "seconds": 59.940309887,
+          "sent": 1000,
+          "committed": 0,
+          "sourceOutstandingIncludingUncommitted": 1000,
+          "heapUsedMiBIncludingBrokerAndHdfs": 1256
+        },
+        {
+          "seconds": 74.943540872,
+          "sent": 1250,
+          "committed": 876,
+          "sourceOutstandingIncludingUncommitted": 374,
+          "heapUsedMiBIncludingBrokerAndHdfs": 1462
+        },
+        {
+          "seconds": 89.940529521,
+          "sent": 1500,
+          "committed": 876,
+          "sourceOutstandingIncludingUncommitted": 624,
+          "heapUsedMiBIncludingBrokerAndHdfs": 1713
+        },
+        {
+          "seconds": 104.942678472,
+          "sent": 1750,
+          "committed": 876,
+          "sourceOutstandingIncludingUncommitted": 874,
+          "heapUsedMiBIncludingBrokerAndHdfs": 1972
+        },
+        {
+          "seconds": 119.940545041,
+          "sent": 2000,
+          "committed": 1095,
+          "sourceOutstandingIncludingUncommitted": 905,
+          "heapUsedMiBIncludingBrokerAndHdfs": 2251
+        }
+      ],
+      "logFile": "target/throughput/run-9YqQH2.log"
+    },
+    {
+      "binding": "claims",
+      "filesystem": "hdfs",
+      "hdfsReplication": 3,
+      "broker": "embedded ActiveMQ, nonpersistent, VM transport, prefetch=0",
+      "payloadBytes": 614400,
+      "listeners": 4,
+      "offeredMessagesPerSecond": 16.6666666667,
+      "producerSeconds": 119.942597598,
+      "messages": 2000,
+      "elapsedSecondsIncludingShutdownDrain": 129.328052552,
+      "messagesPerSecond": 15.464548955423599,
+      "rawMiBPerSecond": 9.061259153568516,
+      "committedBeforeShutdownDrain": 1752,
+      "files": 10,
+      "fileBytes": 924261209,
+      "meanFlushMs": 13821.360309,
+      "rollbacks": 0,
+      "verifiedRecords": 2000,
+      "verifiedTrackerRecords": 0,
+      "verifiedAuditRecords": 2000,
+      "samples": [
+        {
+          "seconds": 14.940976581,
+          "sent": 250,
+          "committed": 0,
+          "sourceOutstandingIncludingUncommitted": 250,
+          "heapUsedMiBIncludingBrokerAndHdfs": 502
+        },
+        {
+          "seconds": 29.947721157,
+          "sent": 500,
+          "committed": 0,
+          "sourceOutstandingIncludingUncommitted": 500,
+          "heapUsedMiBIncludingBrokerAndHdfs": 699
+        },
+        {
+          "seconds": 44.943225913,
+          "sent": 750,
+          "committed": 0,
+          "sourceOutstandingIncludingUncommitted": 750,
+          "heapUsedMiBIncludingBrokerAndHdfs": 950
+        },
+        {
+          "seconds": 59.94076342,
+          "sent": 1000,
+          "committed": 0,
+          "sourceOutstandingIncludingUncommitted": 1000,
+          "heapUsedMiBIncludingBrokerAndHdfs": 1224
+        },
+        {
+          "seconds": 74.940794319,
+          "sent": 1250,
+          "committed": 876,
+          "sourceOutstandingIncludingUncommitted": 374,
+          "heapUsedMiBIncludingBrokerAndHdfs": 604
+        },
+        {
+          "seconds": 89.940994061,
+          "sent": 1500,
+          "committed": 876,
+          "sourceOutstandingIncludingUncommitted": 624,
+          "heapUsedMiBIncludingBrokerAndHdfs": 881
+        },
+        {
+          "seconds": 104.94050786,
+          "sent": 1750,
+          "committed": 1314,
+          "sourceOutstandingIncludingUncommitted": 436,
+          "heapUsedMiBIncludingBrokerAndHdfs": 667
+        },
+        {
+          "seconds": 119.940560237,
+          "sent": 2000,
+          "committed": 1314,
+          "sourceOutstandingIncludingUncommitted": 686,
+          "heapUsedMiBIncludingBrokerAndHdfs": 907
+        }
+      ],
+      "logFile": "target/throughput/run-JJFUb7.log"
+    }
+  ]
+}
