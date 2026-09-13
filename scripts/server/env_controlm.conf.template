@@ -1,0 +1,16 @@
+# Control-M Job Configuration
+# This file is deployed by UrbanCode alongside the application.
+# Values are substituted during deployment.
+
+# Application settings
+APP_NAME=@APP_NAME@
+SERVER_PORT=@SERVER_PORT@
+HDFS_BASE=@HDFS_BASE@
+
+# Thresholds
+QUEUE_DEPTH_WARN=10000
+QUEUE_DEPTH_CRIT=50000
+LOG_RETENTION_DAYS=30
+
+# Paths - derived from this file's location
+# APP_BASE is the parent directory of this config file
