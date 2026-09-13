@@ -15,11 +15,19 @@
 
 set -euo pipefail
 
-# -P resolves symlinks: this script is normally invoked through 'current',
-# and without it '../..' walks up from the symlink's logical path rather than
-# from releases/<stamp>/, landing outside the deployment entirely.
+# Detect deployment structure:
+#   Option A (symlink): BASE_DIR/releases/1.0.0/intake.sh (current -> releases/1.0.0)
+#   Option B (direct):  BASE_DIR/current/intake.sh (no symlink, direct deployment)
+#
+# We detect by checking if env.sh exists at the expected location.
 RELEASE_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Try Option A first (symlink structure: 2 levels up)
 BASE_DIR="$(cd -P "${RELEASE_DIR}/../.." && pwd)"
+if [[ ! -f "${BASE_DIR}/env.sh" ]]; then
+    # Try Option B (direct structure: 1 level up)
+    BASE_DIR="$(cd -P "${RELEASE_DIR}/.." && pwd)"
+fi
 
 JAR="${RELEASE_DIR}/app.jar"
 ENV_FILE="${BASE_DIR}/env.sh"
