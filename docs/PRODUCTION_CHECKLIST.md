@@ -25,10 +25,11 @@ Pre-deployment checklist for MQ Intake service (RMS and Claims).
 |----------|-------|----------|
 | `JAVA_HOME` | Path to JRE 11 | ☐ |
 | `SERVER_PORT` | 8081 | ☐ |
-| `IBM_MQ_QUEUEMANAGER` | Production QM name | ☐ |
-| `IBM_MQ_CHANNEL` | Production channel | ☐ |
-| `IBM_MQ_CONNNAME` | Production MQ host(port) | ☐ |
-| `IBM_MQ_USER` | Service account | ☐ |
+| `MQ_HOST` / `MQ_PORT` | Production MQ host and port | ☐ |
+| `MQ_QUEUE_MANAGER` | Production QM name | ☐ |
+| `MQ_CHANNEL` | Production channel | ☐ |
+| `MQ_CREDENTIAL_REF` | `env:MQ_USER,MQ_PASSWORD` (static) or unset with `CONJUR_*` set | ☐ |
+| `MQ_USER` | Service account (static only; must be unset when Conjur is enabled) | ☐ |
 | `HDFS_BASE_PATH` | `/raw/membership/hps` | ☐ |
 | `MQ_TRACKER_QUEUE` | Tracker queue name | ☐ |
 | `MQ_BACKOUT_QUEUE` | Backout queue name | ☐ |
@@ -39,10 +40,11 @@ Pre-deployment checklist for MQ Intake service (RMS and Claims).
 |----------|-------|----------|
 | `JAVA_HOME` | Path to JRE 11 | ☐ |
 | `SERVER_PORT` | 8099 | ☐ |
-| `IBM_MQ_QUEUEMANAGER` | Production QM name | ☐ |
-| `IBM_MQ_CHANNEL` | Production channel | ☐ |
-| `IBM_MQ_CONNNAME` | Production MQ host(port) | ☐ |
-| `IBM_MQ_USER` | Service account | ☐ |
+| `MQ_HOST` / `MQ_PORT` | Production MQ host and port | ☐ |
+| `MQ_QUEUE_MANAGER` | Production QM name | ☐ |
+| `MQ_CHANNEL` | Production channel | ☐ |
+| `MQ_CREDENTIAL_REF` | `env:MQ_USER,MQ_PASSWORD` (static) or unset with `CONJUR_*` set | ☐ |
+| `MQ_USER` | Service account (static only; must be unset when Conjur is enabled) | ☐ |
 | `HDFS_BASE_PATH` | `/raw/claims/dmih` | ☐ |
 
 ---

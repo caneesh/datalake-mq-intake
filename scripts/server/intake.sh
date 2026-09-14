@@ -50,6 +50,23 @@ fi
 
 JAVA_OPTS="${JAVA_OPTS:--Xmx4g}"
 
+# logback resolves ${LOG_PATH} relative to the working directory when unset,
+# which for a Control-M job is wherever the agent happens to be. Pin it to
+# the deployment's log directory unless env.sh chose another.
+export LOG_PATH="${LOG_PATH:-${LOG_DIR}}"
+
+# Vault credentials are needed only where the service connects. Keeping this
+# out of status/logs/config means a Conjur outage cannot also take away the
+# tools for diagnosing it.
+load_vault_credentials() {
+    local fetch="${RELEASE_DIR}/fetch_secrets.sh"
+    if [[ -n "${CONJUR_APPLIANCE_URL:-}" && -n "${CONJUR_MQ_SECRET_PATH:-}" ]]; then
+        [[ -f "$fetch" ]] || { echo "Conjur is configured but ${fetch} is missing" >&2; exit 1; }
+        # shellcheck disable=SC1090
+        source "$fetch" || { echo "Could not load MQ credentials from Conjur — not starting." >&2; exit 1; }
+    fi
+}
+
 # Which java to run, in a fixed order that does not depend on shell state:
 #
 #   1. <base>/jre/bin/java   — a runtime shipped with the deployment
@@ -143,6 +160,7 @@ cmd_is_running() {
 
 cmd_preflight() {
     require_java
+    load_vault_credentials
     local group="${1:-}"
     local args=(--intake.preflight.enabled=true)
     # Either form works: PreflightConfiguration reads --preflight=<group> from
@@ -168,28 +186,38 @@ cmd_start() {
         echo "Already running (pid ${pid}). Use 'stop' first." >&2
         exit 1
     fi
+    load_vault_credentials
     mkdir -p "$LOG_DIR" "$(dirname "$PID_FILE")"
-    local log="${LOG_DIR}/intake-$(date -u +%Y%m%dT%H%M%SZ).log"
+    # Application logging goes to ${LOG_PATH}/app.log, rotated by logback.
+    # stdout/stderr carry only what happens before logback is up (a bad
+    # JVM flag, a missing main class, an OOM abort) and stay small.
+    local log="${LOG_PATH}/app.log"
+    local out="${LOG_DIR}/intake-$(date -u +%Y%m%dT%H%M%SZ).out"
+    local start_marker
+    start_marker=$(date -u +%Y-%m-%d\ %H:%M:%S)
 
     echo "Starting; log: ${log}"
-    nohup "$JAVA_BIN" $JAVA_OPTS -jar "$JAR" ${CONFIG_ARG[@]+"${CONFIG_ARG[@]}"} > "$log" 2>&1 &
+    nohup "$JAVA_BIN" $JAVA_OPTS -jar "$JAR" ${CONFIG_ARG[@]+"${CONFIG_ARG[@]}"} > "$out" 2>&1 &
     local pid=$!
     echo "$pid" > "$PID_FILE"
     ln -sfn "$log" "${LOG_DIR}/current.log"
 
     # Confirm it survived startup rather than reporting success for a process
-    # that died on a config gate three seconds later.
+    # that died on a config gate three seconds later. Only lines written after
+    # this start count — app.log persists across restarts.
     for _ in $(seq 1 30); do
         sleep 1
         if ! kill -0 "$pid" 2>/dev/null; then
             echo "FAILED to start — last lines:" >&2
-            tail -30 "$log" >&2
+            tail -30 "$log" 2>/dev/null >&2
+            tail -10 "$out" 2>/dev/null >&2
             rm -f "$PID_FILE"
             exit 1
         fi
-        if grep -q "IntakeRuntimeManager started" "$log" 2>/dev/null; then
+        if awk -v since="$start_marker" '$0 >= since && /IntakeRuntimeManager started/ {found=1} END {exit !found}' \
+                "$log" 2>/dev/null; then
             echo "Started (pid ${pid})."
-            grep -m1 "IntakeRuntimeManager started" "$log"
+            grep "IntakeRuntimeManager started" "$log" | tail -1
             return 0
         fi
     done
@@ -223,11 +251,15 @@ cmd_stop() {
     exit 1
 }
 
+# Exits 1 when the process is not running, after printing everything it can,
+# so a scheduler job on `status` fails when the service is down.
 cmd_status() {
+    local running=true
     if pid=$(running_pid); then
         echo "process : running (pid ${pid}, up $(ps -o etime= -p "$pid" | tr -d ' '))"
     else
         echo "process : NOT running"
+        running=false
     fi
     if [[ -f "${RELEASE_DIR}/RELEASE" ]]; then
         sed 's/^/release : /' "${RELEASE_DIR}/RELEASE"
@@ -291,6 +323,7 @@ cmd_status() {
             done
         fi
     fi
+    $running
 }
 
 cmd_logs() {
@@ -325,6 +358,9 @@ cmd_config() {
     for var in MQ_CREDENTIAL_REF MQ_USER MQ_PASSWORD; do
         printf '%-22s %s\n' "$var" "$([[ -n "${!var:-}" ]] && echo '<set>' || echo '<unset>')"
     done
+    if [[ -n "${CONJUR_APPLIANCE_URL:-}" && -n "${CONJUR_MQ_SECRET_PATH:-}" ]]; then
+        printf '%-22s %s\n' "conjur" "${CONJUR_APPLIANCE_URL} ${CONJUR_MQ_SECRET_PATH} (fetched at start/preflight)"
+    fi
 }
 
 case "${1:-}" in

@@ -232,4 +232,26 @@ class PartitionPathTest {
         assertThat(PartitionPath.windowId(atBoundary))
                 .isEqualTo(PartitionPath.windowId(justBefore) + 1);
     }
+
+    @Test
+    void currentFilenamesWithNoExtensionAreDataFiles() {
+        String current = PartitionPath.filename("rms", "host-123", 1_700_000_000_000L, 7);
+
+        assertThat(current).doesNotContain(".");
+        assertThat(PartitionPath.isDataFile(current)).isTrue();
+        assertThat(PartitionPath.isDataFile("rms_host-1_1700000000000_1.seq")).isTrue();
+        assertThat(PartitionPath.isDataFile("messages_1_10.0.0.1_uuid_3_ts")).isTrue();
+    }
+
+    @Test
+    void metadataAndSidecarFilesAreNotDataFiles() {
+        assertThat(PartitionPath.isDataFile("rms_h_1_1.index.jsonl")).isFalse();
+        assertThat(PartitionPath.isDataFile("audit_rms_1.json")).isFalse();
+        assertThat(PartitionPath.isDataFile(".instance-lease")).isFalse();
+        assertThat(PartitionPath.isDataFile(".rms_h_1_1.crc")).isFalse();
+        assertThat(PartitionPath.isDataFile("_SUCCESS")).isFalse();
+        assertThat(PartitionPath.isDataFile("rms_h_1_1.tmp")).isFalse();
+        assertThat(PartitionPath.isDataFile("")).isFalse();
+        assertThat(PartitionPath.isDataFile(null)).isFalse();
+    }
 }

@@ -1,5 +1,6 @@
 package com.hcsc.datalake.mqintake.core.audit;
 
+import com.hcsc.datalake.mqintake.core.hdfs.PartitionPath;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -178,26 +179,11 @@ public final class OrphanFileClassifier {
             return paths;
         }
         for (FileStatus file : fileSystem.listStatus(partitionPath)) {
-            if (file.isFile() && isDataFile(file.getPath().getName())) {
+            if (file.isFile() && PartitionPath.isDataFile(file.getPath().getName())) {
                 paths.add(file.getPath().toString());
             }
         }
         return paths;
-    }
-
-    /**
-     * Returns true if the filename is a data file (not an index, audit, or metadata file).
-     * Data files have no extension or .seq extension; non-data files end in .json, .jsonl, etc.
-     */
-    private boolean isDataFile(String filename) {
-        // Exclude known non-data file extensions
-        if (filename.endsWith(".json") || filename.endsWith(".jsonl") ||
-            filename.endsWith(".index.jsonl") || filename.startsWith("_") ||
-            filename.startsWith(".")) {
-            return false;
-        }
-        // Accept files with .seq extension (legacy) or no extension (current)
-        return true;
     }
 
     /**

@@ -56,7 +56,10 @@ mkdir -p "${BASE_DIR}/releases" "${BASE_DIR}/config" "${BASE_DIR}/logs" "${BASE_
 rm -rf "$RELEASE_DIR"
 mkdir -p "$RELEASE_DIR"
 cp "${BUNDLE_DIR}/app.jar" "${BUNDLE_DIR}/intake.sh" "${BUNDLE_DIR}/RELEASE" "$RELEASE_DIR/"
-chmod +x "${RELEASE_DIR}/intake.sh"
+for optional in fetch_secrets.sh ctm_run.sh; do
+    [[ -f "${BUNDLE_DIR}/${optional}" ]] && cp "${BUNDLE_DIR}/${optional}" "$RELEASE_DIR/"
+done
+chmod +x "${RELEASE_DIR}"/*.sh
 echo "installed_at=$(date -u +%Y%m%dT%H%M%SZ)" >> "${RELEASE_DIR}/RELEASE"
 echo "installed_on=$(hostname)" >> "${RELEASE_DIR}/RELEASE"
 

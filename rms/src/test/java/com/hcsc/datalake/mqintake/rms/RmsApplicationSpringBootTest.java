@@ -1,6 +1,7 @@
 package com.hcsc.datalake.mqintake.rms;
 
 import com.hcsc.datalake.mqintake.core.config.MqConnectionConfig;
+import com.hcsc.datalake.mqintake.core.hdfs.PartitionPath;
 import com.hcsc.datalake.mqintake.core.health.BindingsHealthIndicator;
 import com.hcsc.datalake.mqintake.core.mq.MqConnectionManager;
 import com.hcsc.datalake.mqintake.core.runtime.IntakeRuntimeManager;
@@ -182,7 +183,8 @@ class RmsApplicationSpringBootTest {
         // local filesystem's .crc sidecars) can vanish mid-stream. Treat that
         // as "not counted yet" and let the caller poll again.
         try (var stream = Files.walk(dataDir)) {
-            return stream.filter(p -> p.toString().endsWith(".seq")
+            return stream.filter(p -> Files.isRegularFile(p)
+                    && PartitionPath.isDataFile(p.getFileName().toString())
                     && !p.toString().contains("/_tmp/")).count();
         } catch (java.io.UncheckedIOException e) {
             return 0;

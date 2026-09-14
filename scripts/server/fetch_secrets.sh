@@ -1,217 +1,145 @@
 #!/bin/bash
 # ==============================================================================
-# Fetch secrets from CyberArk Conjur
+# Fetch MQ credentials from CyberArk Conjur
 # ==============================================================================
 #
-# This script retrieves MQ and HDFS credentials from CyberArk Conjur
-# and exports them as environment variables for the application.
+# Sourced by intake.sh (start and preflight only) AFTER env.sh. Exports the
+# same variables the application reads for static credentials:
 #
-# Prerequisites:
-#   - Conjur CLI installed: /opt/conjur/bin/conjur
-#   - OR curl available for REST API fallback
-#   - Host identity file or API key configured
+#   MQ_USER, MQ_PASSWORD, and MQ_CREDENTIAL_REF="env:MQ_USER,MQ_PASSWORD"
 #
-# Required Environment Variables:
+# Enabled when both of these are set (normally in env.sh):
 #   CONJUR_APPLIANCE_URL  - Conjur server URL
-#   CONJUR_ACCOUNT        - Conjur account name
-#   CONJUR_AUTHN_LOGIN    - Host identity (e.g., host/mq-intake/rms)
-#   CONJUR_MQ_SECRET_PATH - Path to MQ secrets in Conjur
+#   CONJUR_MQ_SECRET_PATH - variable path prefix; "<path>/username" and
+#                           "<path>/password" are fetched
 #
-# Optional:
-#   CONJUR_AUTHN_API_KEY  - API key (if not using host identity file)
-#   CONJUR_CERT_FILE      - Path to Conjur SSL certificate
-#   CONJUR_HDFS_SECRET_PATH - Path to HDFS secrets (if password-based auth)
+# Also read:
+#   CONJUR_ACCOUNT           - Conjur account (REST API)
+#   CONJUR_AUTHN_LOGIN       - host identity, e.g. host/mq-intake/rms (REST API)
+#   CONJUR_AUTHN_API_KEY     - API key; else read from CONJUR_HOST_IDENTITY_FILE
+#   CONJUR_HOST_IDENTITY_FILE - default /etc/conjur/identity
+#   CONJUR_CERT_FILE         - CA certificate for the appliance
+#   CONJUR_CLI               - CLI binary; used instead of REST when executable
+#                              (default /opt/conjur/bin/conjur)
+#
+# When Conjur is enabled, MQ_USER / MQ_PASSWORD must NOT also be set in
+# env.sh: a static value there would silently win over the vault, so it is
+# refused rather than merged.
 #
 # ==============================================================================
 
-set -euo pipefail
-
-# Conjur CLI path
 CONJUR_CLI="${CONJUR_CLI:-/opt/conjur/bin/conjur}"
 
-# Log function
-log() {
+conjur_log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] CONJUR: $*"
 }
 
-log_error() {
+conjur_log_error() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] CONJUR ERROR: $*" >&2
 }
 
-# ==============================================================================
-# Check if Conjur is configured
-# ==============================================================================
 conjur_enabled() {
-    if [[ -z "${CONJUR_APPLIANCE_URL:-}" ]]; then
-        return 1
-    fi
-    if [[ -z "${CONJUR_MQ_SECRET_PATH:-}" ]]; then
-        return 1
-    fi
-    return 0
+    [[ -n "${CONJUR_APPLIANCE_URL:-}" && -n "${CONJUR_MQ_SECRET_PATH:-}" ]]
 }
 
-# ==============================================================================
-# Authenticate with Conjur and get access token
-# ==============================================================================
+conjur_curl_opts() {
+    CURL_OPTS=(-s --fail --max-time 15)
+    if [[ -n "${CONJUR_CERT_FILE:-}" ]]; then
+        CURL_OPTS+=(--cacert "$CONJUR_CERT_FILE")
+    fi
+}
+
+conjur_url_encode() {
+    echo -n "$1" | sed 's|/|%2F|g'
+}
+
 conjur_authenticate() {
     local api_key="${CONJUR_AUTHN_API_KEY:-}"
-    local token=""
 
-    # If no API key provided, try to get it from host identity file
     if [[ -z "$api_key" ]]; then
-        local host_identity_file="${CONJUR_HOST_IDENTITY_FILE:-/etc/conjur/identity}"
-        if [[ -f "$host_identity_file" ]]; then
-            api_key=$(grep -E "^api_key:" "$host_identity_file" | cut -d: -f2 | tr -d ' ')
+        local identity_file="${CONJUR_HOST_IDENTITY_FILE:-/etc/conjur/identity}"
+        if [[ -f "$identity_file" ]]; then
+            api_key=$(grep -E "^api_key:" "$identity_file" | cut -d: -f2- | tr -d ' ')
         fi
     fi
 
     if [[ -z "$api_key" ]]; then
-        log_error "No API key found. Set CONJUR_AUTHN_API_KEY or configure host identity file."
+        conjur_log_error "No API key: set CONJUR_AUTHN_API_KEY or provide the host identity file"
+        return 1
+    fi
+    if [[ -z "${CONJUR_ACCOUNT:-}" || -z "${CONJUR_AUTHN_LOGIN:-}" ]]; then
+        conjur_log_error "REST authentication needs CONJUR_ACCOUNT and CONJUR_AUTHN_LOGIN"
         return 1
     fi
 
-    # Build curl options
-    local curl_opts=(-s -X POST)
-    if [[ -n "${CONJUR_CERT_FILE:-}" ]]; then
-        curl_opts+=(--cacert "$CONJUR_CERT_FILE")
-    fi
-
-    # URL encode the login
-    local encoded_login
-    encoded_login=$(echo -n "${CONJUR_AUTHN_LOGIN}" | sed 's|/|%2F|g')
-
-    # Authenticate and get token
-    token=$(curl "${curl_opts[@]}" \
-        -d "$api_key" \
-        "${CONJUR_APPLIANCE_URL}/authn/${CONJUR_ACCOUNT}/${encoded_login}/authenticate")
+    conjur_curl_opts
+    local token
+    token=$(curl "${CURL_OPTS[@]}" -X POST -d "$api_key" \
+        "${CONJUR_APPLIANCE_URL}/authn/${CONJUR_ACCOUNT}/$(conjur_url_encode "$CONJUR_AUTHN_LOGIN")/authenticate") \
+        || { conjur_log_error "Authentication request failed"; return 1; }
 
     if [[ -z "$token" ]]; then
-        log_error "Authentication failed - empty token"
+        conjur_log_error "Authentication returned an empty token"
         return 1
     fi
 
-    # Token is returned as data, need to base64 encode for API calls
     CONJUR_ACCESS_TOKEN=$(echo -n "$token" | base64 | tr -d '\n')
-    export CONJUR_ACCESS_TOKEN
-    log "Authentication successful"
+    conjur_log "Authenticated as ${CONJUR_AUTHN_LOGIN}"
 }
 
-# ==============================================================================
-# Fetch a secret value from Conjur
-# ==============================================================================
-conjur_get_secret() {
-    local secret_path="$1"
-    local secret_value=""
-
-    # URL encode the path
-    local encoded_path
-    encoded_path=$(echo -n "$secret_path" | sed 's|/|%2F|g')
-
-    # Build curl options
-    local curl_opts=(-s -H "Authorization: Token token=\"${CONJUR_ACCESS_TOKEN}\"")
-    if [[ -n "${CONJUR_CERT_FILE:-}" ]]; then
-        curl_opts+=(--cacert "$CONJUR_CERT_FILE")
-    fi
-
-    # Fetch the secret
-    secret_value=$(curl "${curl_opts[@]}" \
-        "${CONJUR_APPLIANCE_URL}/secrets/${CONJUR_ACCOUNT}/variable/${encoded_path}")
-
-    if [[ -z "$secret_value" ]]; then
-        log_error "Failed to fetch secret: $secret_path"
-        return 1
-    fi
-
-    echo "$secret_value"
+conjur_rest_get_secret() {
+    conjur_curl_opts
+    curl "${CURL_OPTS[@]}" -H "Authorization: Token token=\"${CONJUR_ACCESS_TOKEN}\"" \
+        "${CONJUR_APPLIANCE_URL}/secrets/${CONJUR_ACCOUNT}/variable/$(conjur_url_encode "$1")"
 }
 
-# ==============================================================================
-# Alternative: Use Conjur CLI if available
-# ==============================================================================
 conjur_cli_get_secret() {
-    local secret_path="$1"
+    "$CONJUR_CLI" variable get -i "$1" 2>/dev/null
+}
 
-    if [[ ! -x "$CONJUR_CLI" ]]; then
+conjur_get_secret() {
+    local value
+    if [[ -x "$CONJUR_CLI" ]]; then
+        value=$(conjur_cli_get_secret "$1") || { conjur_log_error "CLI could not read $1"; return 1; }
+    else
+        value=$(conjur_rest_get_secret "$1") || { conjur_log_error "REST could not read $1"; return 1; }
+    fi
+    if [[ -z "$value" ]]; then
+        conjur_log_error "Secret $1 is empty"
+        return 1
+    fi
+    printf '%s' "$value"
+}
+
+conjur_fetch_mq_credentials() {
+    if ! conjur_enabled; then
+        return 0
+    fi
+
+    if [[ -n "${MQ_USER:-}" || -n "${MQ_PASSWORD:-}" ]]; then
+        conjur_log_error "Conjur is enabled but MQ_USER/MQ_PASSWORD are also set in env.sh."
+        conjur_log_error "Remove the static values — they would override the vault silently."
         return 1
     fi
 
-    "$CONJUR_CLI" variable get -i "$secret_path" 2>/dev/null
-}
-
-# ==============================================================================
-# Fetch all required secrets
-# ==============================================================================
-fetch_mq_secrets() {
-    log "Fetching MQ credentials from: ${CONJUR_MQ_SECRET_PATH}"
+    conjur_log "Fetching MQ credentials from ${CONJUR_APPLIANCE_URL} path ${CONJUR_MQ_SECRET_PATH}"
+    if [[ -x "$CONJUR_CLI" ]]; then
+        conjur_log "Using Conjur CLI ${CONJUR_CLI}"
+    else
+        conjur_log "Using Conjur REST API"
+        conjur_authenticate || return 1
+    fi
 
     local username password
+    username=$(conjur_get_secret "${CONJUR_MQ_SECRET_PATH}/username") || return 1
+    password=$(conjur_get_secret "${CONJUR_MQ_SECRET_PATH}/password") || return 1
 
-    # Try CLI first, fall back to REST API
-    if [[ -x "$CONJUR_CLI" ]]; then
-        log "Using Conjur CLI"
-        username=$(conjur_cli_get_secret "${CONJUR_MQ_SECRET_PATH}/username") || return 1
-        password=$(conjur_cli_get_secret "${CONJUR_MQ_SECRET_PATH}/password") || return 1
-    else
-        log "Using Conjur REST API"
-        conjur_authenticate || return 1
-        username=$(conjur_get_secret "${CONJUR_MQ_SECRET_PATH}/username") || return 1
-        password=$(conjur_get_secret "${CONJUR_MQ_SECRET_PATH}/password") || return 1
-    fi
+    export MQ_USER="$username"
+    export MQ_PASSWORD="$password"
+    export MQ_CREDENTIAL_REF="env:MQ_USER,MQ_PASSWORD"
+    unset CONJUR_ACCESS_TOKEN
 
-    export IBM_MQ_USER="$username"
-    export IBM_MQ_PASSWORD="$password"
-
-    log "MQ credentials loaded successfully (user: $username)"
+    conjur_log "MQ credentials loaded (user: ${MQ_USER})"
 }
 
-fetch_hdfs_secrets() {
-    if [[ -z "${CONJUR_HDFS_SECRET_PATH:-}" ]]; then
-        return 0
-    fi
-
-    log "Fetching HDFS credentials from: ${CONJUR_HDFS_SECRET_PATH}"
-
-    local password
-
-    if [[ -x "$CONJUR_CLI" ]]; then
-        password=$(conjur_cli_get_secret "${CONJUR_HDFS_SECRET_PATH}/password") || return 1
-    else
-        password=$(conjur_get_secret "${CONJUR_HDFS_SECRET_PATH}/password") || return 1
-    fi
-
-    export KRB5_PASSWORD="$password"
-    log "HDFS credentials loaded successfully"
-}
-
-# ==============================================================================
-# Main
-# ==============================================================================
-main() {
-    if ! conjur_enabled; then
-        log "Conjur not configured - using static credentials from env.sh"
-        return 0
-    fi
-
-    log "CyberArk Conjur integration enabled"
-    log "Server: ${CONJUR_APPLIANCE_URL}"
-    log "Account: ${CONJUR_ACCOUNT}"
-    log "Identity: ${CONJUR_AUTHN_LOGIN}"
-
-    # Fetch MQ secrets (required)
-    if ! fetch_mq_secrets; then
-        log_error "Failed to fetch MQ secrets from Conjur"
-        return 1
-    fi
-
-    # Fetch HDFS secrets (optional)
-    if ! fetch_hdfs_secrets; then
-        log_error "Failed to fetch HDFS secrets from Conjur"
-        return 1
-    fi
-
-    log "All secrets loaded from CyberArk Conjur"
-}
-
-# Run main
-main "$@"
+conjur_fetch_mq_credentials

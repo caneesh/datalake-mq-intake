@@ -126,7 +126,9 @@ cp "$JAR" "${STAGE}/app.jar"
 cp "${REPO_ROOT}/scripts/server/intake.sh" "${STAGE}/intake.sh"
 cp "${REPO_ROOT}/scripts/server/install.sh" "${STAGE}/install.sh"
 cp "${REPO_ROOT}/scripts/server/env.sh.example" "${STAGE}/env.sh.example"
-chmod +x "${STAGE}/intake.sh" "${STAGE}/install.sh"
+cp "${REPO_ROOT}/scripts/server/fetch_secrets.sh" "${STAGE}/fetch_secrets.sh"
+cp "${REPO_ROOT}/scripts/server/ctm_run.sh" "${STAGE}/ctm_run.sh"
+chmod +x "${STAGE}/intake.sh" "${STAGE}/install.sh" "${STAGE}/ctm_run.sh"
 
 cat > "${STAGE}/RELEASE" <<EOF
 module=${MODULE}
@@ -166,7 +168,7 @@ EOF
 # Checksums for everything, so the installer can prove the bundle survived
 # whatever medium carried it. Relative paths keep the manifest verifiable from
 # inside the unpacked directory.
-( cd "$STAGE" && for f in app.jar intake.sh install.sh env.sh.example RELEASE README.txt; do
+( cd "$STAGE" && for f in app.jar intake.sh fetch_secrets.sh ctm_run.sh install.sh env.sh.example RELEASE README.txt; do
       echo "$(sha256_of "$f")  ${f}"
   done > MANIFEST.sha256 )
 

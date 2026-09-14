@@ -1,146 +1,74 @@
 #!/bin/bash
-# ==============================================================================
-# Test Conjur Integration
-# ==============================================================================
+# Exercises fetch_secrets.sh against the mock Conjur CLI. No real Conjur needed.
 #
-# Tests the fetch_secrets.sh with mock Conjur CLI.
-#
-# Usage:
 #   ./test_conjur_integration.sh
-#
-# ==============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOCK_CONJUR="$SCRIPT_DIR/mock_conjur.sh"
 FETCH_SECRETS="$SCRIPT_DIR/../fetch_secrets.sh"
-
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-pass() { echo -e "${GREEN}PASS${NC}: $1"; }
-fail() { echo -e "${RED}FAIL${NC}: $1"; exit 1; }
-info() { echo -e "${YELLOW}INFO${NC}: $1"; }
-
-echo "=============================================="
-echo "Testing CyberArk Conjur Integration"
-echo "=============================================="
-echo ""
-
-# Make mock executable
 chmod +x "$MOCK_CONJUR"
 
-# ==============================================================================
-# Test 1: Mock Conjur CLI works
-# ==============================================================================
-info "Test 1: Verify mock Conjur CLI"
+GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
+failures=0
+pass() { echo -e "${GREEN}PASS${NC}: $1"; }
+fail() { echo -e "${RED}FAIL${NC}: $1"; failures=$((failures + 1)); }
+info() { echo -e "${YELLOW}----${NC} $1"; }
 
-RESULT=$("$MOCK_CONJUR" variable get -i "apps/mq-intake/rms/mq/username")
-if [[ "$RESULT" == "test_mq_user" ]]; then
-    pass "Mock Conjur CLI returns expected value"
+reset_env() {
+    unset CONJUR_APPLIANCE_URL CONJUR_ACCOUNT CONJUR_AUTHN_LOGIN CONJUR_MQ_SECRET_PATH
+    unset MQ_USER MQ_PASSWORD MQ_CREDENTIAL_REF CONJUR_ACCESS_TOKEN
+    export CONJUR_CLI="$MOCK_CONJUR"
+}
+
+enable_conjur() {
+    export CONJUR_APPLIANCE_URL="https://mock.conjur.local"
+    export CONJUR_ACCOUNT="test"
+    export CONJUR_AUTHN_LOGIN="host/mq-intake/rms"
+    export CONJUR_MQ_SECRET_PATH="$1"
+}
+
+info "1: mock CLI answers"
+out=$("$MOCK_CONJUR" variable get -i apps/mq-intake/rms/mq/username)
+[[ "$out" == "test_mq_user" ]] && pass "mock returns username" || fail "mock returned '$out'"
+
+info "2: Conjur not configured leaves credentials untouched"
+reset_env
+source "$FETCH_SECRETS"; rc=$?
+[[ $rc -eq 0 && -z "${MQ_USER:-}" ]] && pass "no-op, exit 0" || fail "rc=$rc MQ_USER='${MQ_USER:-}'"
+
+info "3: RMS credentials exported under the names the app reads"
+reset_env; enable_conjur apps/mq-intake/rms/mq
+source "$FETCH_SECRETS"; rc=$?
+[[ $rc -eq 0 ]] && pass "exit 0" || fail "rc=$rc"
+[[ "${MQ_USER:-}" == "test_mq_user" ]] && pass "MQ_USER=$MQ_USER" || fail "MQ_USER='${MQ_USER:-}'"
+[[ "${MQ_PASSWORD:-}" == "test_mq_password_123" ]] && pass "MQ_PASSWORD set" || fail "MQ_PASSWORD wrong"
+[[ "${MQ_CREDENTIAL_REF:-}" == "env:MQ_USER,MQ_PASSWORD" ]] && pass "MQ_CREDENTIAL_REF=$MQ_CREDENTIAL_REF" \
+    || fail "MQ_CREDENTIAL_REF='${MQ_CREDENTIAL_REF:-}'"
+
+info "4: Claims path"
+reset_env; enable_conjur apps/mq-intake/claims/mq
+source "$FETCH_SECRETS" > /dev/null
+[[ "${MQ_USER:-}" == "test_claims_user" ]] && pass "MQ_USER=$MQ_USER" || fail "MQ_USER='${MQ_USER:-}'"
+
+info "5: static MQ_USER alongside Conjur is refused"
+reset_env; enable_conjur apps/mq-intake/rms/mq
+export MQ_USER=static_user MQ_PASSWORD=static_pw
+source "$FETCH_SECRETS" > /dev/null 2>&1; rc=$?
+[[ $rc -ne 0 ]] && pass "refused (rc=$rc)" || fail "accepted static override"
+[[ "${MQ_USER}" == "static_user" ]] && pass "static value left as-is for the error message" || fail "MQ_USER mutated"
+
+info "6: missing secret fails"
+reset_env; enable_conjur apps/mq-intake/nothere/mq
+source "$FETCH_SECRETS" > /dev/null 2>&1; rc=$?
+[[ $rc -ne 0 && -z "${MQ_USER:-}" ]] && pass "failed without exporting partial credentials" \
+    || fail "rc=$rc MQ_USER='${MQ_USER:-}'"
+
+echo
+if (( failures == 0 )); then
+    echo -e "${GREEN}All tests passed.${NC}"
 else
-    fail "Mock Conjur CLI failed: got '$RESULT'"
+    echo -e "${RED}${failures} test(s) failed.${NC}"
+    exit 1
 fi
-
-# ==============================================================================
-# Test 2: fetch_secrets.sh without Conjur config
-# ==============================================================================
-info "Test 2: fetch_secrets.sh without Conjur config (should skip)"
-
-unset CONJUR_APPLIANCE_URL
-unset CONJUR_MQ_SECRET_PATH
-unset IBM_MQ_USER
-unset IBM_MQ_PASSWORD
-
-source "$FETCH_SECRETS"
-
-if [[ -z "${IBM_MQ_USER:-}" ]]; then
-    pass "No credentials set when Conjur not configured"
-else
-    fail "Credentials should not be set: IBM_MQ_USER=$IBM_MQ_USER"
-fi
-
-# ==============================================================================
-# Test 3: fetch_secrets.sh with Conjur config
-# ==============================================================================
-info "Test 3: fetch_secrets.sh with mock Conjur"
-
-export CONJUR_CLI="$MOCK_CONJUR"
-export CONJUR_APPLIANCE_URL="https://mock.conjur.local"
-export CONJUR_ACCOUNT="test"
-export CONJUR_AUTHN_LOGIN="host/mq-intake/rms"
-export CONJUR_MQ_SECRET_PATH="apps/mq-intake/rms/mq"
-
-unset IBM_MQ_USER
-unset IBM_MQ_PASSWORD
-
-source "$FETCH_SECRETS"
-
-if [[ "${IBM_MQ_USER:-}" == "test_mq_user" ]]; then
-    pass "IBM_MQ_USER set correctly: $IBM_MQ_USER"
-else
-    fail "IBM_MQ_USER not set correctly: got '${IBM_MQ_USER:-}'"
-fi
-
-if [[ "${IBM_MQ_PASSWORD:-}" == "test_mq_password_123" ]]; then
-    pass "IBM_MQ_PASSWORD set correctly: ***"
-else
-    fail "IBM_MQ_PASSWORD not set correctly"
-fi
-
-# ==============================================================================
-# Test 4: Claims secrets
-# ==============================================================================
-info "Test 4: Claims secrets"
-
-export CONJUR_MQ_SECRET_PATH="apps/mq-intake/claims/mq"
-
-unset IBM_MQ_USER
-unset IBM_MQ_PASSWORD
-
-source "$FETCH_SECRETS"
-
-if [[ "${IBM_MQ_USER:-}" == "test_claims_user" ]]; then
-    pass "Claims IBM_MQ_USER set correctly: $IBM_MQ_USER"
-else
-    fail "Claims IBM_MQ_USER not set correctly: got '${IBM_MQ_USER:-}'"
-fi
-
-# ==============================================================================
-# Test 5: HDFS secrets
-# ==============================================================================
-info "Test 5: HDFS secrets (optional)"
-
-export CONJUR_MQ_SECRET_PATH="apps/mq-intake/rms/mq"
-export CONJUR_HDFS_SECRET_PATH="apps/mq-intake/rms/hdfs"
-
-unset IBM_MQ_USER
-unset IBM_MQ_PASSWORD
-unset KRB5_PASSWORD
-
-source "$FETCH_SECRETS"
-
-if [[ "${KRB5_PASSWORD:-}" == "test_hdfs_password" ]]; then
-    pass "KRB5_PASSWORD set correctly: ***"
-else
-    fail "KRB5_PASSWORD not set correctly"
-fi
-
-# ==============================================================================
-# Summary
-# ==============================================================================
-echo ""
-echo "=============================================="
-echo -e "${GREEN}All tests passed!${NC}"
-echo "=============================================="
-echo ""
-echo "The Conjur integration is working correctly."
-echo "To use with real Conjur, update env.sh with:"
-echo "  CONJUR_APPLIANCE_URL=https://your-conjur-server"
-echo "  CONJUR_ACCOUNT=your-account"
-echo "  CONJUR_AUTHN_LOGIN=host/your-host-identity"
-echo "  CONJUR_MQ_SECRET_PATH=path/to/mq/secrets"

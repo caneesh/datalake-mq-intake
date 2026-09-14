@@ -137,7 +137,7 @@ Four things to get right:
 
 ### CyberArk Conjur for secrets (optional)
 
-Instead of embedding MQ credentials in `env.sh`, you can fetch them from CyberArk Conjur at startup. Uncomment and configure the Conjur section in `env.sh`:
+Instead of embedding MQ credentials in `env.sh`, you can fetch them from CyberArk Conjur. Uncomment the Conjur block in `env.sh` and **remove** the static `MQ_CREDENTIAL_REF`/`MQ_USER`/`MQ_PASSWORD` lines:
 
 ```bash
 export CONJUR_APPLIANCE_URL=https://conjur.company.com
@@ -146,7 +146,9 @@ export CONJUR_AUTHN_LOGIN=host/mq-intake/rms
 export CONJUR_MQ_SECRET_PATH=apps/mq-intake/rms/mq
 ```
 
-The `fetch_secrets.sh` script runs automatically when sourced from `env.sh`. It fetches `username` and `password` from the configured path and exports them as `IBM_MQ_USER` and `IBM_MQ_PASSWORD`.
+`intake.sh start` and `preflight` then run `fetch_secrets.sh`, which reads `<path>/username` and `<path>/password` and exports `MQ_USER`, `MQ_PASSWORD` and `MQ_CREDENTIAL_REF` — the same variables the application reads for static credentials. `status`, `logs` and `config` never contact Conjur, so a vault outage cannot take away the diagnostics.
+
+Two rules are enforced: if the static variables are still set alongside the Conjur ones, `start` refuses (a static value would otherwise win silently), and the service holds the fetched password for its lifetime — after a rotation in Conjur, `stop`/`start` to pick up the new one.
 
 To test the integration locally without a real Conjur server:
 
@@ -253,14 +255,16 @@ The audit record should read `"balance_status": "BALANCED"` with `consumed_count
 For scheduler-driven operation, use the Control-M wrapper script instead of calling `intake.sh` directly:
 
 ```bash
-./current/ctm_run.sh start      # start via Control-M job
-./current/ctm_run.sh stop       # stop via Control-M job
-./current/ctm_run.sh status     # check status (exit 0 = running)
-./current/ctm_run.sh preflight  # validate before consuming
-./current/ctm_run.sh health     # health check for monitoring
+./current/ctm_run.sh start       # start via Control-M job
+./current/ctm_run.sh stop        # stop via Control-M job
+./current/ctm_run.sh is-running  # exit 0 running / 1 not — the cyclic monitor job
+./current/ctm_run.sh status      # same, but prints pid, release, health, metrics
+./current/ctm_run.sh preflight   # validate before consuming
+./current/ctm_run.sh health      # exit 0 only when actuator reports UP
+./current/ctm_run.sh tmp-check   # exit 1 if an HDFS staging directory has no live lease
 ```
 
-The wrapper auto-detects the deployment path (no hardcoded node IDs), sources `env.sh`, and provides Control-M-friendly exit codes. See [Control-M setup](CONTROLM_SETUP.md) for job definitions.
+The wrapper finds the deployment from its own location (no hardcoded node IDs), reads `SERVER_PORT`, `HDFS_BASE_PATH` and Kerberos settings from `env.sh`, and exits non-zero on anything a scheduler should treat as failure. `tmp-check` needs a Hadoop client on `PATH` and does its own `kinit` from the keytab in `env.sh`. See [Control-M setup](CONTROLM_SETUP.md) for job definitions.
 
 ## 8 — Upgrade and roll back
 
@@ -292,7 +296,8 @@ ln -sfn releases/<previous-stamp> current
 | `~/mq-intake/releases/` | last five releases; rollback targets |
 | `~/mq-intake/config/` | optional YAML overrides; survives deploys |
 | `~/mq-intake/env.sh` | environment and credentials, chmod 600; survives deploys |
-| `~/mq-intake/logs/current.log` | symlink to the log of the running instance |
+| `~/mq-intake/logs/app.log` | application log, rotated by logback (100 MB files, 30 days, 5 GB cap); `current.log` links here |
+| `~/mq-intake/logs/intake-<stamp>.out` | JVM stdout/stderr per start — only what happens before logging is up; small |
 | `~/mq-intake/run/intake.pid` | pid of the running instance |
 | `dist/` (build machine) | bundles produced by `scripts/bundle.sh`, with `.sha256` sidecars |
 
@@ -307,7 +312,8 @@ ln -sfn releases/<previous-stamp> current
 | Preflight `MQRC 2035` on a queue but not the connection | connected fine, but the account lacks the open option; on MQ, an authority profile's `*` matches one qualifier, so `MQ.ABC.*` does **not** cover `MQ.ABC.DEF.IN` — use `**` |
 | Started, but no data files | fewer than `batch.size` messages and the partition boundary has not passed (see §6) |
 | `status` shows health not answering | the process is still starting, or `SERVER_PORT` differs from the default (8081 for RMS, 8099 for Claims) — set `HEALTH_URL`/`METRICS_URL` in `env.sh` |
-| Service exits immediately | read `logs/current.log`; a startup gate names the exact cause on its first ERROR line |
+| Service exits immediately | read `logs/current.log`; a startup gate names the exact cause on its first ERROR line. If it is empty, the JVM died before logging started — read the newest `logs/intake-*.out` |
+| `Conjur is enabled but MQ_USER/MQ_PASSWORD are also set` | remove the static credential lines from `env.sh`; Conjur and static values are never merged |
 | `status` shows `jar_verified=NO` | the jar on disk is not the one deployed — a partial copy or a hand edit; redeploy |
 | Release shows `source=no-vcs` | expected on a build machine without git; add a `VERSION` file (§2) if you want a human-readable stamp |
 | Offline build fails on a missing artifact | `~/.m2` is incomplete for `-o`; re-prime it from a connected machine |

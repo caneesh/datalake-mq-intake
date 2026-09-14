@@ -149,7 +149,7 @@ public class PartitionReconciliationService implements PartitionReconciler {
         Path partition = new Path(partitionPath);
         if (fileSystem.exists(partition)) {
             for (FileStatus status : fileSystem.listStatus(partition)) {
-                if (status.isFile() && status.getPath().getName().endsWith(".seq")) {
+                if (status.isFile() && PartitionPath.isDataFile(status.getPath().getName())) {
                     filesByName.put(status.getPath().getName(), status);
                 }
             }

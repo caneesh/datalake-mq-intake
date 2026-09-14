@@ -1,6 +1,7 @@
 package com.hcsc.datalake.mqintake.rms.integration;
 
 import com.hcsc.datalake.mqintake.core.batch.BatchWriter;
+import com.hcsc.datalake.mqintake.core.hdfs.PartitionPath;
 import com.hcsc.datalake.mqintake.core.config.BindingConfig;
 import com.hcsc.datalake.mqintake.core.config.BindingMode;
 import com.hcsc.datalake.mqintake.core.failure.DegradationStrategy;
@@ -479,7 +480,7 @@ class IbmMqFailureIntegrationTest {
             var iter = fileSystem.listFiles(base, true);
             while (iter.hasNext()) {
                 String file = iter.next().getPath().toString();
-                if (file.endsWith(".seq") && !file.contains("/_tmp/")) {
+                if (PartitionPath.isDataFile(new org.apache.hadoop.fs.Path(file).getName()) && !file.contains("/_tmp/")) {
                     try {
                         identities.addAll(identityReader.extractIdentities(file));
                     } catch (Exception e) {

@@ -102,6 +102,29 @@ public final class PartitionPath {
     }
 
     /**
+     * True for a landed data file, as opposed to an audit record, sidecar
+     * index, lease, or other metadata sharing the partition directory.
+     *
+     * <p>Data files carry no extension (legacy MDB contract); a {@code .seq}
+     * suffix is accepted for files written before that change. Everything
+     * reconciliation and orphan classification enumerate goes through here,
+     * so the two cannot disagree about what counts as data.
+     */
+    public static boolean isDataFile(String filename) {
+        if (filename == null || filename.isEmpty()) {
+            return false;
+        }
+        if (filename.startsWith("_") || filename.startsWith(".")) {
+            return false;
+        }
+        if (filename.endsWith(".json") || filename.endsWith(".jsonl")
+                || filename.endsWith(".tmp") || filename.endsWith(".crc")) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
      * Removes trailing slash from base path if present.
      */
     private static String normalizeBasePath(String basePath) {

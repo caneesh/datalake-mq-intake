@@ -44,8 +44,18 @@
     <logger name="com.ibm.mq" level="WARN"/>
     <logger name="org.springframework" level="INFO"/>
 
-    <root level="INFO">
-        <appender-ref ref="CONSOLE"/>
-        <appender-ref ref="ASYNC_FILE"/>
-    </root>
+    <!-- Console only under the dev profile: in production intake.sh redirects
+         stdout to a per-start file that nothing rotates, so a console appender
+         there duplicates app.log onto an unbounded file. -->
+    <springProfile name="dev">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="ASYNC_FILE"/>
+        </root>
+    </springProfile>
+    <springProfile name="!dev">
+        <root level="INFO">
+            <appender-ref ref="ASYNC_FILE"/>
+        </root>
+    </springProfile>
 </configuration>
