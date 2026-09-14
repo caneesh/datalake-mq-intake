@@ -224,10 +224,7 @@ class ClaimsBisectionIntegrationTest {
                 "claims", 4, DegradationStrategy.BISECT, 2);
         PoisonMessageHandler poisonHandler = new PoisonMessageHandler(
                 1, BACKOUT_QUEUE,
-                () -> {
-                    var last = shared.getLastFailureClass();
-                    return last == null || last.permitsBackoutRouting();
-                });
+                shared::isConfirmedPoison);
 
         // Every write fails the way a landing-path outage does.
         BatchWriter unwritable = (bindingId, messages) -> {
@@ -243,9 +240,12 @@ class ClaimsBisectionIntegrationTest {
         loop.stop();
         awaitCondition(5_000, () -> countOnQueue(SOURCE_QUEUE) == 4);
 
-        assertThat(shared.getLastFailureClass().permitsBackoutRouting())
+        assertThat(shared.getLastFailureClass().triggersDegradedMode())
                 .as("a write-path failure must not read as 'the message is bad'")
                 .isFalse();
+        assertThat(shared.getSuspectCount())
+                .as("nothing was ever isolated, so nothing can be confirmed poison")
+                .isZero();
         assertThat(countOnQueue(BACKOUT_QUEUE))
                 .as("healthy messages must not be diverted by an infrastructure outage")
                 .isZero();
@@ -256,9 +256,9 @@ class ClaimsBisectionIntegrationTest {
 
     @Test
     void agenuinePoisonMessageStillReachesTheBackoutQueueThroughTheGate() throws Exception {
-        // The gate must not strand real poison: the message's own failure
-        // classifies as message data, which opens the gate for the next
-        // redelivery.
+        // The gate must not strand real poison: once bisection leaves the
+        // message alone in a failing unit of work it is confirmed, and the
+        // next delivery over the threshold routes it.
         producer.send(producerSession.createTextMessage("CLEAN-0"));
         producer.send(producerSession.createTextMessage("POISON-A"));
 
@@ -274,10 +274,7 @@ class ClaimsBisectionIntegrationTest {
                 "claims", 2, DegradationStrategy.BISECT, 2);
         PoisonMessageHandler poisonHandler = new PoisonMessageHandler(
                 2, BACKOUT_QUEUE,
-                () -> {
-                    var last = shared.getLastFailureClass();
-                    return last == null || last.permitsBackoutRouting();
-                });
+                shared::isConfirmedPoison);
 
         PoisonSensitiveBatchWriter writer = new PoisonSensitiveBatchWriter();
         TransactedReceiveLoop loop = newLoop(config, writer, shared, poisonHandler);

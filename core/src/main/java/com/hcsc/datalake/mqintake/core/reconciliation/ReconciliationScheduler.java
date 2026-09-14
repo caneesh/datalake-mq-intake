@@ -120,13 +120,31 @@ public class ReconciliationScheduler implements AutoCloseable {
                                    Function<String, BindingMetrics> metricsLookup,
                                    Clock clock,
                                    PendingPartitions pendingPartitions) {
+        this(reconciliationService, properties, metricsLookup, clock, pendingPartitions,
+                bindingId -> false);
+    }
+
+    /**
+     * @param identityAvailable whether a binding's landed records can be
+     *                          identified without a sidecar index — true when
+     *                          its serializer recovers identity from the value
+     */
+    public ReconciliationScheduler(PartitionReconciler reconciliationService,
+                                   IntakeProperties properties,
+                                   Function<String, BindingMetrics> metricsLookup,
+                                   Clock clock,
+                                   PendingPartitions pendingPartitions,
+                                   java.util.function.Predicate<String> identityAvailable) {
         this.reconciliationService =
                 Objects.requireNonNull(reconciliationService, "reconciliationService required");
         this.properties = Objects.requireNonNull(properties, "properties required");
         this.metricsLookup = Objects.requireNonNull(metricsLookup, "metricsLookup required");
         this.clock = Objects.requireNonNull(clock, "clock required");
         this.pendingPartitions = pendingPartitions;
+        this.identityAvailable = Objects.requireNonNull(identityAvailable, "identityAvailable required");
     }
+
+    private final java.util.function.Predicate<String> identityAvailable;
 
     /** Starts the schedule, unless reconciliation is disabled. */
     public void start() {
@@ -246,7 +264,8 @@ public class ReconciliationScheduler implements AutoCloseable {
     private BindingReconciliationRunner runnerFor(BindingConfig binding) {
         return runners.computeIfAbsent(binding.getId(), id ->
                 new BindingReconciliationRunner(binding, reconciliationService, properties,
-                        metricsLookup, pendingPartitions, clock));
+                        metricsLookup, pendingPartitions, clock,
+                        identityAvailable.test(binding.getId())));
     }
 
     /**

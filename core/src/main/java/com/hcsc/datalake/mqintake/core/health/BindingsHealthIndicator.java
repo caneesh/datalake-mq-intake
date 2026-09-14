@@ -3,10 +3,13 @@ package com.hcsc.datalake.mqintake.core.health;
 import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager;
 import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager.BindingHealthSnapshot;
 import com.hcsc.datalake.mqintake.core.lifecycle.BindingHealthManager.HealthStatus;
+import com.hcsc.datalake.mqintake.core.security.KerberosManager;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.actuate.health.Health;
 import org.springframework.boot.actuate.health.HealthIndicator;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -17,7 +20,9 @@ import java.util.Map;
  * <ul>
  *   <li>UP: all bindings HEALTHY or STOPPED</li>
  *   <li>DOWN: <em>every</em> binding UNHEALTHY — the process genuinely has
- *       nothing consuming, and a restart is justified</li>
+ *       nothing consuming, and a restart is justified — or the Kerberos
+ *       login can no longer be renewed, which will stop every binding from
+ *       landing once the ticket lapses</li>
  *   <li>PARTIAL_OUTAGE: some bindings UNHEALTHY while others still work</li>
  *   <li>DEGRADED: no binding UNHEALTHY, but some DEGRADED or RECOVERING</li>
  * </ul>
@@ -30,6 +35,12 @@ import java.util.Map;
  * already isolated. PARTIAL_OUTAGE and DEGRADED are mapped to HTTP 200 in
  * application.yml; alerting reads the status string and the per-binding
  * metrics, not the HTTP code.
+ *
+ * <p><strong>Why Kerberos is here:</strong> a relogin failure is not
+ * binding-scoped. The keytab is shared, the ticket is shared, and once it
+ * expires every write fails with the same infrastructure error — batches roll
+ * back, nothing reaches the backout queue, and the queue backs up. Until now
+ * the only signal was an hourly ERROR line and a gauge nothing scraped.
  *
  * <p>Individual binding status is included in the details.
  *
@@ -45,9 +56,17 @@ public class BindingsHealthIndicator implements HealthIndicator {
     public static final String DEGRADED = "DEGRADED";
 
     private final BindingHealthManager healthManager;
+    private final KerberosManager kerberosManager;   // null when Kerberos is disabled
 
     public BindingsHealthIndicator(BindingHealthManager healthManager) {
+        this(healthManager, null);
+    }
+
+    @Autowired
+    public BindingsHealthIndicator(BindingHealthManager healthManager,
+                                   @Autowired(required = false) KerberosManager kerberosManager) {
         this.healthManager = healthManager;
+        this.kerberosManager = kerberosManager;
     }
 
     @Override
@@ -55,9 +74,8 @@ public class BindingsHealthIndicator implements HealthIndicator {
         Map<String, HealthStatus> statuses = healthManager.getAllStatuses();
 
         if (statuses.isEmpty()) {
-            return Health.unknown()
-                    .withDetail("message", "No bindings registered")
-                    .build();
+            return withKerberos(Health.unknown()
+                    .withDetail("message", "No bindings registered"));
         }
 
         // Build details map with per-binding status
@@ -103,22 +121,42 @@ public class BindingsHealthIndicator implements HealthIndicator {
         boolean allUnhealthy = statuses.values().stream()
                 .allMatch(s -> s == HealthStatus.UNHEALTHY);
 
+        Health.Builder builder;
         if (allUnhealthy) {
-            return Health.down()
-                    .withDetails(details)
-                    .build();
+            builder = Health.down();
         } else if (hasUnhealthy) {
-            return Health.status(PARTIAL_OUTAGE)
-                    .withDetails(details)
-                    .build();
+            builder = Health.status(PARTIAL_OUTAGE);
         } else if (hasDegradedOrRecovering) {
-            return Health.status(DEGRADED)
-                    .withDetails(details)
-                    .build();
+            builder = Health.status(DEGRADED);
         } else {
-            return Health.up()
-                    .withDetails(details)
-                    .build();
+            builder = Health.up();
         }
+        return withKerberos(builder.withDetails(details));
+    }
+
+    /**
+     * Overrides the aggregate to DOWN when the Kerberos login cannot be
+     * renewed. Ticket expiry stops every binding from landing, so this is
+     * the one process-wide failure a restart (with a fixed keytab) actually
+     * addresses.
+     */
+    private Health withKerberos(Health.Builder builder) {
+        if (kerberosManager == null) {
+            return builder.build();
+        }
+        Map<String, Object> kerberos = new LinkedHashMap<>();
+        boolean healthy = kerberosManager.isHealthy();
+        kerberos.put("status", healthy ? "UP" : "DOWN");
+        kerberos.put("principal", kerberosManager.getPrincipal());
+        kerberos.put("reloginFailures", kerberosManager.getReloginFailureCount());
+        long last = kerberosManager.getLastSuccessfulRelogin();
+        kerberos.put("lastSuccessfulRelogin",
+                last > 0 ? Instant.ofEpochMilli(last).toString() : "never");
+        if (!healthy) {
+            kerberos.put("reason", "TGT could not be renewed from the keytab within two "
+                    + "relogin intervals; HDFS writes will fail once the ticket expires");
+            builder.down();
+        }
+        return builder.withDetail("kerberos", kerberos).build();
     }
 }

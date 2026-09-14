@@ -134,7 +134,22 @@ public class ClaimsRecordSerializer implements RecordSerializer, PlaceholderSeri
 
         } catch (JMSException e) {
             throw new SerializationException("Failed to read message: " + e.getMessage(), e);
+        } catch (RuntimeException e) {
+            // A payload-provoked failure must classify as message data, or it
+            // retries at full batch size until the whole batch is diverted.
+            throw new SerializationException("Failed to serialize message: " + e, e);
         }
+    }
+
+    @Override
+    public String identityOf(String serializedValue) {
+        String identity = identityExtractor.extractIdentity(serializedValue);
+        return identity == null || identity.isBlank() ? null : identity;
+    }
+
+    @Override
+    public boolean providesIdentity() {
+        return true;
     }
 
     private String extractPayload(Message message) throws JMSException, SerializationException {

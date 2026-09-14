@@ -8,6 +8,11 @@ spring:
 # moving the service moves both together.
 server:
   port: ${SERVER_PORT:8080}
+  # Loopback only. The actuator is unauthenticated and its health details
+  # name hosts and queues; the control script and Control-M jobs run on this
+  # host, so nothing off-box needs it. Set SERVER_ADDRESS=0.0.0.0 to expose it
+  # deliberately, behind whatever the network provides.
+  address: ${SERVER_ADDRESS:127.0.0.1}
 
 intake:
   # Left empty so the service derives hostname-pid. HOSTNAME alone is unique
@@ -135,19 +140,16 @@ intake:
         # accumulate backout count too; a lower threshold would misroute them.
         # Set BOTHRESH on the queue manager to match.
         threshold: 14
-        # Suppress backout routing while failures are infrastructure-classified.
-        # Delivery count cannot tell a malformed message from a healthy one
-        # that sat in batches which rolled back because the landing path was
-        # unwritable; without this, such an outage diverts good messages to a
-        # queue that must then be replayed by hand. A genuine poison message
-        # still reaches the BOQ — its own failure classifies as message data,
-        # which opens the gate on the next redelivery.
-        #
-        # This matters more here than for RMS, not less. Claims carries the
-        # higher volume, and BISECT drives the threshold to 14, so an outage
-        # would spend far longer accumulating delivery counts across far more
-        # messages before anything was diverted — and divert far more when it
-        # finally was.
+        # Route a message to the backout queue only once it is CONFIRMED
+        # poison: it failed with a data failure while alone in its unit of
+        # work. Delivery count alone cannot tell a malformed message from a
+        # healthy one whose batches rolled back because the landing path was
+        # unwritable — every rollback raises it — so counting alone diverts
+        # the whole in-flight backlog after any outage, and a restart would
+        # do so on the first screen. Confirmation is in-memory: after a
+        # restart a real poison message costs one more degraded-mode
+        # isolation before it is routed. false = legacy MDB behaviour, count
+        # alone.
         route-only-on-data-failures: true
         # Feeds the backout-depth gauge, which DESIGN §14 nominates as the
         # pager condition. Sampled by browsing (read-only, does not consume).

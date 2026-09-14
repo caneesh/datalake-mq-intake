@@ -106,4 +106,23 @@ class SessionFaultPolicyTest {
 
         assertThat(policy.requiresRecovery(exception)).isFalse();
     }
+    @Test
+    void authorityRevokedMidRunIsFatalEvenWhenOnlyTheLinkedExceptionSaysSo() {
+        // IBM MQ: a bland JMSException, and the reason code in the link.
+        JMSException exception = new JMSException(
+                "JMSWMQ2002: Failed to get a message from destination 'QUEUE'.", "JMSWMQ2002");
+        exception.setLinkedException(new Exception(
+                "com.ibm.mq.MQException: MQJE001: Completion Code '2', Reason '2035'."));
+
+        assertThat(policy.isFatal(exception)).isTrue();
+    }
+
+    @Test
+    void anOrdinaryLinkedFaultIsNotFatal() {
+        JMSException exception = new JMSException("JMSWMQ2002: Failed to get a message");
+        exception.setLinkedException(new Exception(
+                "com.ibm.mq.MQException: MQJE001: Completion Code '2', Reason '2009'."));
+
+        assertThat(policy.isFatal(exception)).isFalse();
+    }
 }

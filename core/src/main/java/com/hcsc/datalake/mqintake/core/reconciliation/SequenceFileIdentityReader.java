@@ -11,34 +11,27 @@ import java.io.IOException;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
- * Identity reader for landed SequenceFiles carrying a composite metadata key.
+ * Reads record identities and counts straight from a landed SequenceFile.
  *
- * <p>Reads a Text key of the form
- * {@code binding_id=...|payload_guid=...|mq_message_id=...|...}, extracting
- * {@code payload_guid} and falling back to {@code mq_message_id} when the
- * payload identity is absent (§10: identity is payload_guid with
- * mq_message_id as fallback).
+ * <p>Production files carry a {@code LongWritable} byte-offset key and a
+ * {@code Text} payload value — the legacy MDB contract, which has no room for
+ * identity. Identity is therefore recovered from the <em>value</em>, using
+ * the binding's own extractor ({@code RecordSerializer.identityOf}), which is
+ * the same function that supplied the identity at write time.
  *
- * <p>Only keys are interpreted — record values are never deserialized beyond
- * what the SequenceFile format requires, keeping reconciliation cheap (§12).
+ * <p>Without a value extractor this falls back to parsing a composite
+ * metadata key ({@code payload_guid=...|mq_message_id=...}) — a layout only
+ * test fixtures still write. Against a production file that fallback finds
+ * nothing and says so once, and every orphan then classifies INCONCLUSIVE,
+ * which is the safe direction (INCONCLUSIVE means KEEP).
  *
- * <p><strong>Not applicable to the production layout.</strong> Production
- * SequenceFiles use a {@code LongWritable} byte-offset key, which carries no
- * identity, and the binding serializers now match that. Against such a file
- * this reader returns no identities, which propagates as
- * {@code INCONCLUSIVE} through {@link com.hcsc.datalake.mqintake.core.audit.OrphanFileClassifier}
- * — the safe direction, since INCONCLUSIVE means KEEP, never delete. The
- * condition is logged once per reader rather than failing silently.
- *
- * <p><strong>Superseded for identity by the sidecar index.</strong> Identity
- * now lives beside the file rather than inside it; see
- * {@link com.hcsc.datalake.mqintake.core.index.RecordIndexIdentityExtractor},
- * which reads the index and delegates here only for files that have none —
- * anything landed before indexing was enabled, or from a binding with it off.
- * This class remains the record-counting path and the fallback, so it is not
- * dead code.
+ * <p>Where a binding writes a sidecar index, {@link
+ * com.hcsc.datalake.mqintake.core.index.RecordIndexIdentityExtractor} reads
+ * that first and delegates here only for files that have none. The record
+ * COUNT always comes from here.
  */
 public class SequenceFileIdentityReader implements IdentityExtractor {
 
@@ -46,11 +39,22 @@ public class SequenceFileIdentityReader implements IdentityExtractor {
             org.slf4j.LoggerFactory.getLogger(SequenceFileIdentityReader.class);
 
     private final Configuration conf;
-    private final java.util.concurrent.atomic.AtomicBoolean warnedNoIdentityKey =
+    private final Function<String, String> valueIdentity;   // null: key-based fallback
+    private final java.util.concurrent.atomic.AtomicBoolean warnedNoIdentity =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
+    /** Key-based reader: fixtures and pre-production layouts only. */
     public SequenceFileIdentityReader(Configuration conf) {
+        this(conf, null);
+    }
+
+    /**
+     * @param valueIdentity recovers a record's identity from its Text value;
+     *                      null selects the composite-key fallback
+     */
+    public SequenceFileIdentityReader(Configuration conf, Function<String, String> valueIdentity) {
         this.conf = Objects.requireNonNull(conf, "conf required");
+        this.valueIdentity = valueIdentity;
     }
 
     @Override
@@ -64,18 +68,26 @@ public class SequenceFileIdentityReader implements IdentityExtractor {
             Writable value = (Writable) ReflectionUtils.newInstance(reader.getValueClass(), conf);
 
             while (reader.next(key, value)) {
-                String identity = parseIdentity(key.toString());
-                if (identity != null) {
+                String identity = valueIdentity != null
+                        ? valueIdentity.apply(value.toString())
+                        : parseIdentity(key.toString());
+                if (identity != null && !identity.isEmpty()) {
                     identities.add(identity);
                 }
             }
 
-            if (identities.isEmpty() && warnedNoIdentityKey.compareAndSet(false, true)) {
-                log.warn("No record identities found in {} (key class {}). Files using the " +
-                        "production positional key carry no identity, so reconciliation " +
-                        "cannot classify duplicates and will report INCONCLUSIVE (files are " +
-                        "KEPT). Resolve metadata placement (open item #2) to restore this.",
-                        filePath, reader.getKeyClass().getSimpleName());
+            if (identities.isEmpty() && warnedNoIdentity.compareAndSet(false, true)) {
+                if (valueIdentity != null) {
+                    log.warn("No record identities recovered from {} — the binding's extractor "
+                            + "found nothing in any value. Orphans in such files classify "
+                            + "INCONCLUSIVE and are KEPT.", filePath);
+                } else {
+                    log.warn("No record identities found in {} (key class {}). This reader has "
+                            + "no value extractor and the key carries no identity, so "
+                            + "reconciliation cannot classify duplicates and will report "
+                            + "INCONCLUSIVE (files are KEPT).",
+                            filePath, reader.getKeyClass().getSimpleName());
+                }
             }
         }
 

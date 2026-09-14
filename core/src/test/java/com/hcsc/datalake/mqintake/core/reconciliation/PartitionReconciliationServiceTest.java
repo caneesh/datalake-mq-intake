@@ -298,14 +298,27 @@ class PartitionReconciliationServiceTest {
     }
 
     @Test
-    void unresolvedIdentityRefusesReadinessAndTouchesNothing() throws Exception {
-        writeSeqFile("orphan.seq", "guid-1");
+    void unresolvedIdentityStillReconcilesCountsButNeverTouchesOrphans() throws Exception {
+        // Refusing the whole partition when identity was unavailable turned
+        // the count half of ABC off silently for any binding without an
+        // index. Counts need no identity; only orphan classification does.
+        writeSeqFile("audited.seq", "guid-1", "guid-2");
+        writeAudit("audited.seq", 5);                       // file holds 2, audit says 5
+        writeAudit("vanished.seq", 1);                      // audit with no file
+        writeSeqFile("orphan.seq", "guid-3");               // file with no audit
 
-        // Claims: identityApproved=false until open item #17 is resolved
-        ReconciliationReport report = reconcile("claims", false, true);
+        ReconciliationReport report = reconcile("rms", false, true);
 
-        assertThat(report.getStatus()).isEqualTo(ReconciliationStatus.NOT_READY);
-        assertThat(report.getMessage()).contains("identity unresolved");
+        assertThat(report.getStatus()).isEqualTo(ReconciliationStatus.DISCREPANCIES);
+        assertThat(report.getDiscrepancies())
+                .extracting(d -> d.getType() + ":" + d.getFilename())
+                .containsExactlyInAnyOrder(
+                        "COUNT_MISMATCH:audited.seq",
+                        "MISSING_FILE:vanished.seq",
+                        "ORPHAN_UNCLASSIFIED:orphan.seq");
+        assertThat(report.isRetryLater())
+                .as("an unclassifiable orphan is final, not something a later pass resolves")
+                .isFalse();
         assertThat(fileSystem.exists(new Path(partitionPath(), "orphan.seq"))).isTrue();
         assertThat(fileSystem.exists(new Path(basePath + "/_quarantine/orphan.seq"))).isFalse();
     }

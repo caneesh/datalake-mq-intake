@@ -238,15 +238,16 @@ public class BindingRuntimeFactory {
             return null;
         }
         if (config.getBackout().isRouteOnlyOnDataFailures()) {
-            // Gate open before any failure, so a message already over the
-            // threshold when the process starts is still routable.
+            // A message is diverted only once it has failed with a data
+            // failure while alone in its unit of work. After a restart the
+            // set is empty, so a genuine poison message costs one more
+            // degraded-mode isolation before it is routed — and a healthy
+            // backlog whose delivery counts were inflated by an outage is
+            // never routed at all.
             return new PoisonMessageHandler(
                     config.getBackout().getThreshold(),
                     config.getBackout().getQueue(),
-                    () -> {
-                        var last = degradedModeManager.getLastFailureClass();
-                        return last == null || last.permitsBackoutRouting();
-                    });
+                    degradedModeManager::isConfirmedPoison);
         }
         return new PoisonMessageHandler(
                 config.getBackout().getThreshold(),

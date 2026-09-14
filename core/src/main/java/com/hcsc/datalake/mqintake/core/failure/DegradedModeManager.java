@@ -72,6 +72,22 @@ public class DegradedModeManager implements DegradationPolicy {
             java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /**
+     * Message IDs that failed with a data failure while ALONE in their unit of
+     * work. That is the only observation that pins a failure on one message:
+     * a batch of N failing says only that one of N is bad, and a delivery
+     * count says only how often a message was rolled back — for any reason.
+     *
+     * <p>This is what the poison screen routes on. Delivery count alone
+     * diverted every healthy message in flight after an infrastructure
+     * outage, because each rollback incremented it, and the in-memory
+     * "was the last failure infrastructure?" gate that tried to prevent that
+     * was open at start — so the restart that follows an outage routed the
+     * whole backlog to the backout queue on the first screen.
+     */
+    private final java.util.Set<String> confirmedPoisonIds =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
      * Creates a degraded mode manager.
      *
      * @param bindingId                  the binding identifier
@@ -161,6 +177,9 @@ public class DegradedModeManager implements DegradationPolicy {
             if (id != null && suspectMessageIds.remove(id)) {
                 removed = true;
             }
+            if (id != null) {
+                confirmedPoisonIds.remove(id);
+            }
         }
         if (removed) {
             log.info("Binding '{}': cleared suspects, {} outstanding",
@@ -185,6 +204,15 @@ public class DegradedModeManager implements DegradationPolicy {
      */
     public boolean isSuspect(String messageId) {
         return messageId != null && suspectMessageIds.contains(messageId);
+    }
+
+    /**
+     * True when this message has failed with a data failure while alone in
+     * its unit of work — the only evidence that the message itself is bad.
+     * The poison screen consults this before routing to the backout queue.
+     */
+    public boolean isConfirmedPoison(String messageId) {
+        return messageId != null && confirmedPoisonIds.contains(messageId);
     }
 
     /**
@@ -227,6 +255,14 @@ public class DegradedModeManager implements DegradationPolicy {
             // half of the restore condition.
             if (batchMessageIds != null) {
                 markBatchSuspect(batchMessageIds);
+                if (batchMessageIds.size() == 1) {
+                    String lone = batchMessageIds.iterator().next();
+                    if (lone != null && confirmedPoisonIds.add(lone)) {
+                        log.warn("Binding '{}': message {} failed alone with a data failure — "
+                                + "confirmed poison; it will be routed to the backout queue "
+                                + "on its next delivery over the threshold", bindingId, lone);
+                    }
+                }
             }
             entered = enterOrDeepenDegradedMode();
         } else {

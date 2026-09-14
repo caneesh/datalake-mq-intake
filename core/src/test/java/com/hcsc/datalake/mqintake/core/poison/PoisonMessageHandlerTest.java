@@ -227,4 +227,45 @@ class PoisonMessageHandlerTest {
                 .isInstanceOf(PoisonMessageHandler.BackoutFailureException.class)
                 .hasMessageContaining("Failed to route poison message");
     }
+    @Test
+    void routesOnlyMessagesTheGateConfirmsEvenWhenAllAreOverThreshold() throws Exception {
+        // Delivery count rises on every rollback, for any reason, so after an
+        // infrastructure outage every message in flight is over the
+        // threshold. Only the one confirmed bad may be diverted.
+        // Ids assigned directly: sending through the broker to obtain one
+        // resets the delivery count under test.
+        TextMessage confirmed = session.createTextMessage("poison");
+        confirmed.setJMSMessageID("ID:handler-test:1:1:1");
+        confirmed.setIntProperty(PoisonMessageHandler.JMSX_DELIVERY_COUNT, 9);
+        TextMessage healthy = session.createTextMessage("healthy-but-rolled-back");
+        healthy.setJMSMessageID("ID:handler-test:1:1:2");
+        healthy.setIntProperty(PoisonMessageHandler.JMSX_DELIVERY_COUNT, 9);
+        String poisonId = confirmed.getJMSMessageID();
+
+        PoisonMessageHandler handler = new PoisonMessageHandler(3, BACKOUT_QUEUE,
+                id -> id != null && id.equals(poisonId));
+
+        PoisonMessageHandler.BatchPoisonCheckResult result =
+                handler.screen(session, List.of(confirmed, healthy));
+        session.commit();
+
+        assertThat(result.getRoutedMessages()).extracting(
+                PoisonMessageHandler.BackoutResult::getMessageId).containsExactly(poisonId);
+        assertThat(result.getCleanMessages()).containsExactly(healthy);
+    }
+
+    @Test
+    void defaultGateRoutesOnDeliveryCountAlone() throws Exception {
+        TextMessage over = session.createTextMessage("over");
+        over.setJMSMessageID("ID:handler-test:1:1:3");
+        over.setIntProperty(PoisonMessageHandler.JMSX_DELIVERY_COUNT, 4);
+        PoisonMessageHandler handler = new PoisonMessageHandler(3, BACKOUT_QUEUE);
+
+        PoisonMessageHandler.BatchPoisonCheckResult result =
+                handler.screen(session, List.of(over));
+        session.commit();
+
+        assertThat(result.getRoutedMessages()).hasSize(1);
+        assertThat(result.getCleanMessages()).isEmpty();
+    }
 }

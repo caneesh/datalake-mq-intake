@@ -91,4 +91,30 @@ class BindingsHealthIndicatorTest {
 
         assertThat(indicator.health().getStatus()).isEqualTo(Status.UP);
     }
+    @Test
+    void kerberosThatCannotRenewOverridesHealthyBindingsToDown() {
+        // A stale TGT stops every binding from landing once it expires; a
+        // relogin failure was previously visible only in the log. An
+        // uninitialised manager reports unhealthy, which is the same
+        // observable state as one whose relogins keep failing.
+        com.hcsc.datalake.mqintake.core.security.KerberosManager kerberos =
+                new com.hcsc.datalake.mqintake.core.security.KerberosManager(
+                        "svc@REALM", "/nonexistent.keytab", 60_000L);
+        manager.recordHealthy("rms");
+        BindingsHealthIndicator withKerberos = new BindingsHealthIndicator(manager, kerberos);
+
+        Health health = withKerberos.health();
+
+        assertThat(health.getStatus()).isEqualTo(Status.DOWN);
+        assertThat(health.getDetails()).containsKey("kerberos");
+        assertThat(health.getDetails().get("rms")).isNotNull();
+        kerberos.close();
+    }
+
+    @Test
+    void noKerberosManagerLeavesBindingHealthUntouched() {
+        manager.recordHealthy("rms");
+        assertThat(new BindingsHealthIndicator(manager, null).health().getStatus())
+                .isEqualTo(Status.UP);
+    }
 }

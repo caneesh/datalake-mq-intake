@@ -35,7 +35,16 @@ public class DefaultSessionFaultPolicy implements SessionFaultPolicy {
                     "not authorized", "password", "credential")
                     // 2035 MQRC_NOT_AUTHORIZED, 2063 MQRC_SECURITY_ERROR
                     .or(errorCodeIn("MQRC_NOT_AUTHORIZED", "2035",
-                            "MQRC_SECURITY_ERROR", "2063"));
+                            "MQRC_SECURITY_ERROR", "2063"))
+                    // IBM MQ puts the reason in the LINKED MQException
+                    // ("MQJE001: Completion Code '2', Reason '2035'."); the
+                    // JMSException on top says only that something failed.
+                    // Without this, a revoked authority mid-run was neither
+                    // fatal nor broken and churned through the whole recovery
+                    // budget before stopping anyway.
+                    .or(linkedMessageContains("reason '2035'", "reason '2063'",
+                            "mqrc_not_authorized", "mqrc_security_error",
+                            "not authorized"));
 
     @Override
     public boolean requiresRecovery(JMSException exception) {

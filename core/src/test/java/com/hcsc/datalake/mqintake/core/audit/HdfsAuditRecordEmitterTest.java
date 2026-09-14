@@ -396,4 +396,41 @@ class HdfsAuditRecordEmitterTest {
         }
         return lines;
     }
+    @Test
+    void dottedInstanceIdsInExtensionlessFilenamesGetDistinctAuditRecords() throws Exception {
+        // Data files no longer carry an extension, and a generated instance id
+        // used to keep the dots of an FQDN hostname. Stripping "the extension"
+        // at the last dot then cut inside the id, so every batch on that host
+        // mapped to one audit filename — and only the first was ever written.
+        for (int batch = 1; batch <= 3; batch++) {
+            emitter.emit(AuditRecord.builder()
+                    .bindingId("rms")
+                    .partitionPath("/data/raw/rms/2026/09/13/10/2")
+                    .filename("rms_edge01.corp.example-4242_1757757600000_" + batch)
+                    .recordCount(1)
+                    .byteCount(10)
+                    .instanceId("edge01.corp.example-4242")
+                    .commitTimestamp(Instant.parse("2026-09-13T10:00:00Z"))
+                    .build());
+        }
+
+        for (int batch = 1; batch <= 3; batch++) {
+            assertThat(fileSystem.exists(new Path(testBasePath
+                    + "/rms/20260913/audit_rms_edge01.corp.example-4242_1757757600000_" + batch
+                    + ".json"))).as("batch %d audited", batch).isTrue();
+        }
+        assertThat(fileSystem.exists(new Path(testBasePath + "/rms/20260913/audit_rms_edge01.json")))
+                .isFalse();
+    }
+
+    @Test
+    void legacySeqSuffixStillMapsToItsOriginalAuditName() throws Exception {
+        emitter.emit(AuditRecord.builder()
+                .bindingId("rms").partitionPath("/p").filename("rms_inst1_7_1.seq")
+                .recordCount(1).byteCount(1).instanceId("inst1")
+                .commitTimestamp(Instant.parse("2026-09-13T10:00:00Z")).build());
+
+        assertThat(fileSystem.exists(new Path(testBasePath + "/rms/20260913/audit_rms_inst1_7_1.json")))
+                .isTrue();
+    }
 }

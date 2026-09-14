@@ -42,8 +42,12 @@ public class InstanceId {
 
     private static final Logger log = LoggerFactory.getLogger(InstanceId.class);
 
-    /** Characters safe in an HDFS path component and a filename. */
-    private static final String UNSAFE_CHARACTERS = "[^A-Za-z0-9._-]";
+    /**
+     * Characters safe in an HDFS path component and a filename. Dots are
+     * excluded on purpose: the id is embedded in filenames that other code
+     * splits on '.', and an FQDN hostname would otherwise leak one in.
+     */
+    private static final String UNSAFE_CHARACTERS = "[^A-Za-z0-9_-]";
 
     private final String value;
     private final boolean generated;

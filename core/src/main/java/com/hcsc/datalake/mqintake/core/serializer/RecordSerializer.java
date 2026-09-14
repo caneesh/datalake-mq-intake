@@ -36,6 +36,25 @@ public interface RecordSerializer {
     Class<? extends Writable> getValueClass();
 
     /**
+     * Recovers a record's identity from its landed value, for reconciliation.
+     *
+     * <p>The file's key is a byte offset and carries no identity, so the only
+     * way to identify a landed record without a sidecar index is to re-read
+     * the value with the binding's own knowledge of the payload. Bindings that
+     * have such knowledge override this; the default says they do not.
+     *
+     * @return the identity, or null when none can be found in the value
+     */
+    default String identityOf(String serializedValue) {
+        return null;
+    }
+
+    /** True when {@link #identityOf} can identify this binding's records. */
+    default boolean providesIdentity() {
+        return false;
+    }
+
+    /**
      * A serialized key/value pair ready for SequenceFile writing.
      */
     class SerializedRecord {

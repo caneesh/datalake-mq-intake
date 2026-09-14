@@ -174,13 +174,22 @@ public class HdfsAuditRecordEmitter implements AuditRecordEmitter {
     private String buildAuditPath(AuditRecord record) {
         java.time.LocalDate date =
                 record.getCommitTimestamp().atZone(java.time.ZoneOffset.UTC).toLocalDate();
-        String auditFilename = "audit_" + stripExtension(record.getFilename()) + ".json";
+        String auditFilename = "audit_" + auditStem(record.getFilename()) + ".json";
         return AuditPaths.recordFile(auditBasePath, record.getBindingId(), date, auditFilename);
     }
 
-    private String stripExtension(String filename) {
-        int lastDot = filename.lastIndexOf('.');
-        return lastDot > 0 ? filename.substring(0, lastDot) : filename;
+    /**
+     * Data files carry no extension, so the filename is used whole. Only a
+     * literal ".seq" suffix — files landed before the extension was dropped —
+     * is removed, keeping their audit names unchanged. Cutting at the last dot
+     * instead used to truncate inside a dotted instance id (an FQDN hostname),
+     * collapsing every batch on that host onto one audit filename that the
+     * exists() check above then refused to rewrite.
+     */
+    private String auditStem(String filename) {
+        return filename.endsWith(".seq")
+                ? filename.substring(0, filename.length() - ".seq".length())
+                : filename;
     }
 
     /**

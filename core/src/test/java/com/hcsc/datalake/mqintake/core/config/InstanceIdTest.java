@@ -56,7 +56,7 @@ class InstanceIdTest {
         // The id becomes an HDFS path component; a slash would silently create
         // a nested directory and break the "sweep only my own subtree" rule.
         assertThat(new InstanceId("rms/blue 1", "host", 1L).value()).isEqualTo("rms-blue-1");
-        assertThat(new InstanceId(null, "host.name", 5L).value()).isEqualTo("host.name-5");
+        assertThat(new InstanceId(null, "host.name", 5L).value()).isEqualTo("host-name-5");
     }
 
     @Test

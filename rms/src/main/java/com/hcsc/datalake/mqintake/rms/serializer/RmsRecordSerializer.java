@@ -114,7 +114,23 @@ public class RmsRecordSerializer
 
         } catch (JMSException e) {
             throw new SerializationException("Failed to read message: " + e.getMessage(), e);
+        } catch (RuntimeException e) {
+            // Anything the payload itself provokes is a data failure and must
+            // classify as one: escaping unwrapped, it read as UNKNOWN, never
+            // entered degraded mode, and retried at full batch size until
+            // every message in the batch breached the backout threshold.
+            throw new SerializationException("Failed to serialize message: " + e, e);
         }
+    }
+
+    @Override
+    public String identityOf(String serializedValue) {
+        return extractPayloadGuid(serializedValue);
+    }
+
+    @Override
+    public boolean providesIdentity() {
+        return true;
     }
 
     /**

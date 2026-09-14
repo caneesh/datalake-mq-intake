@@ -360,6 +360,16 @@ public class IntakeRuntimeManager implements SmartLifecycle {
                 properties,
                 instanceId.value(),
                 metricsRegistry::getBindingMetrics,
+                binding -> {
+                    try {
+                        return serializerFactory.create(binding);
+                    } catch (RuntimeException e) {
+                        log.warn("Binding '{}': no serializer for reconciliation identity ({}); "
+                                + "orphan files will be reported UNCLASSIFIED",
+                                binding.getId(), e.getMessage());
+                        return null;
+                    }
+                },
                 Clock.systemUTC());
     }
 

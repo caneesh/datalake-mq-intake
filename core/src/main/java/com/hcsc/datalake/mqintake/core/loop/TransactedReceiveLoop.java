@@ -212,6 +212,17 @@ public class TransactedReceiveLoop implements Runnable {
         } catch (JMSException e) {
             log.error("Failed to initialize session for binding '{}': {}",
                     config.getId(), e.getMessage(), e);
+        } catch (RuntimeException | Error e) {
+            // Anything the batch path did not catch — an OutOfMemoryError
+            // from a 128 MB batch, a StackOverflowError in a serializer — used
+            // to leave the thread with no trace but the executor's silence.
+            // The session close in cleanup() rolls the unit of work back, so
+            // nothing is lost; this makes the exit visible and unhealthy.
+            log.error("Listener for binding '{}' died on an unhandled {}: {}",
+                    config.getId(), e.getClass().getSimpleName(), e.getMessage(), e);
+            reporter.batchFailed(e);
+            reporter.unhealthy();
+            throw e;
         } finally {
             cleanup();
             log.info("Receive loop stopped for binding '{}'. Commits: {}, Rollbacks: {}, Messages: {}",

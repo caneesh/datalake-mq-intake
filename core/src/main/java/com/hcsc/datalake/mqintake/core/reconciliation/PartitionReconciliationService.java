@@ -46,8 +46,9 @@ import java.util.Set;
  *   <li>A partition is not reconciled before close + grace period.</li>
  *   <li>Bindings are reconciled independently — one binding's failure never
  *       affects another's report.</li>
- *   <li>A binding without an approved stable identity (claims, open item #17)
- *       reports NOT_READY and its files are not touched (§12).</li>
+ *   <li>A binding whose records cannot be identified still has its counts
+ *       reconciled; its orphan files are reported UNCLASSIFIED and never
+ *       touched (§12).</li>
  * </ul>
  *
  * <p>Crash-window recovery (§12.1): a file with an audit record is state ≥5;
@@ -62,14 +63,18 @@ public class PartitionReconciliationService implements PartitionReconciler {
     private static final Duration PARTITION_LENGTH = PartitionPath.WINDOW;
 
     private final FileSystem fileSystem;
-    private final IdentityExtractor identityReader;
+    private final java.util.function.Function<String, IdentityExtractor> identityReaders;
     private final AuditRecordReader auditReader;
-    private final OrphanFileClassifier orphanClassifier;
     private final AuditRecordEmitter retrospectiveAuditEmitter; // may be null
     private final Duration gracePeriod;
     private final Clock clock;
     private final String instanceId;
 
+    /** Bindings already told, once, that their orphans cannot be classified. */
+    private final Set<String> warnedUnclassifiable =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** One identity reader for every binding — tests and single-binding wiring. */
     public PartitionReconciliationService(FileSystem fileSystem,
                                           IdentityExtractor identityReader,
                                           AuditRecordReader auditReader,
@@ -77,14 +82,36 @@ public class PartitionReconciliationService implements PartitionReconciler {
                                           Duration gracePeriod,
                                           Clock clock,
                                           String instanceId) {
+        this(fileSystem,
+                bindingId -> Objects.requireNonNull(identityReader, "identityReader required"),
+                auditReader, retrospectiveAuditEmitter, gracePeriod, clock, instanceId);
+    }
+
+    /**
+     * @param identityReaders the identity reader for a binding id; identity
+     *                        recovery is binding-specific because the file's
+     *                        value can only be interpreted by the binding that
+     *                        wrote it
+     */
+    public PartitionReconciliationService(FileSystem fileSystem,
+                                          java.util.function.Function<String, IdentityExtractor> identityReaders,
+                                          AuditRecordReader auditReader,
+                                          AuditRecordEmitter retrospectiveAuditEmitter,
+                                          Duration gracePeriod,
+                                          Clock clock,
+                                          String instanceId) {
         this.fileSystem = Objects.requireNonNull(fileSystem, "fileSystem required");
-        this.identityReader = Objects.requireNonNull(identityReader, "identityReader required");
+        this.identityReaders = Objects.requireNonNull(identityReaders, "identityReaders required");
         this.auditReader = Objects.requireNonNull(auditReader, "auditReader required");
         this.retrospectiveAuditEmitter = retrospectiveAuditEmitter;
         this.gracePeriod = Objects.requireNonNull(gracePeriod, "gracePeriod required");
         this.clock = Objects.requireNonNull(clock, "clock required");
         this.instanceId = Objects.requireNonNull(instanceId, "instanceId required");
-        this.orphanClassifier = new OrphanFileClassifier(fileSystem, identityReader);
+    }
+
+    private IdentityExtractor identityReaderFor(String bindingId) {
+        return Objects.requireNonNull(identityReaders.apply(bindingId),
+                "no identity reader for binding " + bindingId);
     }
 
     /**
@@ -93,9 +120,13 @@ public class PartitionReconciliationService implements PartitionReconciler {
      * @param bindingId          the binding to reconcile
      * @param basePath           the binding's HDFS base path
      * @param partitionInstant   any instant within the target partition window
-     * @param identityApproved   whether this binding has an approved stable
-     *                           identity (claims must pass false until open
-     *                           item #17 is resolved)
+     * @param identityApproved   whether this binding's records can be
+     *                           identified from what is landed. When false the
+     *                           count half of reconciliation still runs —
+     *                           MISSING_FILE and COUNT_MISMATCH need no
+     *                           identity — but an orphan file is reported
+     *                           UNCLASSIFIED and kept, never classified,
+     *                           quarantined, or retrospectively audited
      * @param quarantineDuplicates when true, DUPLICATE-classified orphans are
      *                           moved (never deleted) to {base}/_quarantine/
      * @param metrics            optional metrics sink for discrepancies
@@ -109,11 +140,14 @@ public class PartitionReconciliationService implements PartitionReconciler {
                                                    BindingMetrics metrics) {
         String partitionPath = PartitionPath.compute(basePath, partitionInstant);
 
-        if (!identityApproved) {
-            log.warn("Binding '{}': reconciliation NOT READY — stable identity unresolved; " +
-                    "partition {} untouched", bindingId, partitionPath);
-            return ReconciliationReport.notReady(bindingId, partitionPath,
-                    "Stable identity unresolved (open item #17) — reconciliation refused");
+        if (!identityApproved && warnedUnclassifiable.add(bindingId)) {
+            // Once, not per pass: this used to refuse the whole partition at
+            // DEBUG, which left the audit-vs-landed count check silently off
+            // while reconciliation.enabled said otherwise.
+            log.warn("Binding '{}': records cannot be identified from landed files — "
+                    + "counts are reconciled, but orphan files will be reported UNCLASSIFIED "
+                    + "and kept rather than classified as duplicate or sole copy",
+                    bindingId);
         }
 
         Instant partitionClose = partitionCloseInstant(partitionInstant);
@@ -127,7 +161,7 @@ public class PartitionReconciliationService implements PartitionReconciler {
 
         try {
             return doReconcile(bindingId, basePath, partitionPath, partitionInstant,
-                    quarantineDuplicates, metrics);
+                    identityApproved, quarantineDuplicates, metrics);
         } catch (IOException e) {
             log.error("Binding '{}': reconciliation of {} failed: {}",
                     bindingId, partitionPath, e.getMessage(), e);
@@ -139,10 +173,13 @@ public class PartitionReconciliationService implements PartitionReconciler {
                                              String basePath,
                                              String partitionPath,
                                              Instant partitionInstant,
+                                             boolean identityApproved,
                                              boolean quarantineDuplicates,
                                              BindingMetrics metrics) throws IOException {
         List<Discrepancy> discrepancies = new ArrayList<>();
         boolean retryLater = false;
+        IdentityExtractor identityReader = identityReaderFor(bindingId);
+        OrphanFileClassifier orphanClassifier = new OrphanFileClassifier(fileSystem, identityReader);
 
         // Enumerate landed files
         Map<String, FileStatus> filesByName = new HashMap<>();
@@ -253,7 +290,15 @@ public class PartitionReconciliationService implements PartitionReconciler {
                 continue;
             }
 
-            // File with no audit record: crash window state 3/4 — classify
+            // File with no audit record: crash window state 3/4 — classify,
+            // if this binding's records can be identified at all. Reported
+            // without retryLater: a later pass cannot learn anything more.
+            if (!identityApproved) {
+                discrepancies.add(new Discrepancy(DiscrepancyType.ORPHAN_UNCLASSIFIED,
+                        filename, "No audit record and no identity available to classify "
+                                + "it — KEPT; inspect by hand"));
+                continue;
+            }
             OrphanFileClassifier.ClassificationResult result =
                     orphanClassifier.classify(filePath, partitionSnapshot);
 
@@ -348,7 +393,7 @@ public class PartitionReconciliationService implements PartitionReconciler {
             return "; no audit emitter configured for retrospective record";
         }
         try {
-            Set<String> identities = identityReader.extractIdentities(filePath);
+            Set<String> identities = identityReaderFor(bindingId).extractIdentities(filePath);
             String anyIdentity = identities.isEmpty() ? null : identities.iterator().next();
             AuditRecord record = AuditRecord.builder()
                     .bindingId(bindingId)
@@ -400,12 +445,18 @@ public class PartitionReconciliationService implements PartitionReconciler {
     // --- Report types ---
 
     public enum ReconciliationStatus {
-        CLEAN, DISCREPANCIES, SKIPPED_GRACE_PERIOD, NOT_READY, ERROR
+        CLEAN, DISCREPANCIES, SKIPPED_GRACE_PERIOD,
+        /** Retained for report consumers; no longer produced — counts always reconcile. */
+        NOT_READY,
+        ERROR
     }
 
     public enum DiscrepancyType {
         MISSING_FILE, COUNT_MISMATCH, ORPHAN_DUPLICATE,
-        ORPHAN_SOLE_COPY, ORPHAN_INCONCLUSIVE, UNREADABLE_FILE,
+        ORPHAN_SOLE_COPY, ORPHAN_INCONCLUSIVE,
+        /** No audit record, and the binding cannot identify records; kept, never retried. */
+        ORPHAN_UNCLASSIFIED,
+        UNREADABLE_FILE,
         /** An audit record exists but could not be parsed; the scan is incomplete. */
         UNREADABLE_AUDIT
     }
@@ -467,6 +518,7 @@ public class PartitionReconciliationService implements PartitionReconciler {
                     "Partition inside grace period until " + reconcileAfter);
         }
 
+        /** No longer produced by the service; retained for consumers and stubs. */
         static ReconciliationReport notReady(String bindingId, String partitionPath, String reason) {
             return new ReconciliationReport(bindingId, partitionPath,
                     ReconciliationStatus.NOT_READY, List.of(), 0, 0, 0, 0, true, reason);

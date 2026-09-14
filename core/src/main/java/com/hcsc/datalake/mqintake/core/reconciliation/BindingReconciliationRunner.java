@@ -69,13 +69,28 @@ class BindingReconciliationRunner {
                                 Function<String, BindingMetrics> metricsLookup,
                                 PendingPartitions pendingPartitions,
                                 Clock clock) {
+        this(binding, reconciliationService, properties, metricsLookup, pendingPartitions,
+                clock, false);
+    }
+
+    BindingReconciliationRunner(BindingConfig binding,
+                                PartitionReconciler reconciliationService,
+                                IntakeProperties properties,
+                                Function<String, BindingMetrics> metricsLookup,
+                                PendingPartitions pendingPartitions,
+                                Clock clock,
+                                boolean identityFromValue) {
         this.binding = binding;
         this.reconciliationService = reconciliationService;
         this.properties = properties;
         this.metricsLookup = metricsLookup;
         this.pendingPartitions = pendingPartitions;
         this.clock = clock;
+        this.identityFromValue = identityFromValue;
     }
+
+    /** The binding's serializer can identify a landed record from its value. */
+    private final boolean identityFromValue;
 
     String bindingId() {
         return binding.getId();
@@ -187,10 +202,12 @@ class BindingReconciliationRunner {
                             binding.getId(),
                             binding.getHdfs().getBasePath(),
                             window,
-                            // Identity is only trustworthy where the sidecar
-                            // index is written; without it reconciliation
-                            // correctly refuses rather than guessing.
-                            binding.getHdfs().isRecordIndexEnabled(),
+                            // Identity comes from the sidecar index where one
+                            // is written, else from the value via the
+                            // binding's own extractor. Counts reconcile
+                            // regardless; this only decides whether orphans
+                            // can be classified.
+                            binding.getHdfs().isRecordIndexEnabled() || identityFromValue,
                             config.isQuarantineDuplicates(),
                             metrics);
 
